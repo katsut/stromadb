@@ -171,10 +171,17 @@ impl Changelog {
         f
     }
 
-    /// Fold records `[from, head)` into an existing fold (incremental catch-up).
+    /// Fold the whole log into an existing fold.
     pub fn replay_into(&self, fold: &mut Fold) {
-        for (i, r) in self.records.iter().enumerate() {
-            let op = record_to_op(i as u64, r.source, &r.kind);
+        self.replay_range_into(0, fold);
+    }
+
+    /// Fold records `[from, head)` into an existing fold (incremental catch-up / read-merge tail).
+    pub fn replay_range_into(&self, from: u64, fold: &mut Fold) {
+        let start = (from as usize).min(self.records.len());
+        for (offset, r) in self.records[start..].iter().enumerate() {
+            let seqno = (start + offset) as u64;
+            let op = record_to_op(seqno, r.source, &r.kind);
             fold.apply(&op);
         }
     }
