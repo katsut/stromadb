@@ -1,0 +1,12 @@
+[package]
+name = "stroma-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "StromaDB core engine: Fact model, ontology catalog, fold, and query."
+
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
