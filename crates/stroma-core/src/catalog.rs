@@ -139,9 +139,14 @@ impl Catalog {
         id
     }
 
-    /// Assign an entity type to a node (used by domain/range validation).
+    /// Assign an entity type to a node (used by domain/range validation and type-aware search).
     pub fn set_node_type(&mut self, node: crate::fact::NodeId, type_id: FieldId) {
         self.node_types.insert(node, type_id);
+    }
+
+    /// The entity type assigned to a node, if any.
+    pub fn node_type(&self, node: crate::fact::NodeId) -> Option<FieldId> {
+        self.node_types.get(&node).copied()
     }
 
     pub fn field_id(&self, name: &str) -> Option<FieldId> {
