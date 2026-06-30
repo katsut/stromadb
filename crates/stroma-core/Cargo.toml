@@ -7,3 +7,6 @@ repository.workspace = true
 description = "StromaDB core engine: Fact model, ontology catalog, fold, and query."
 
 [dependencies]
+
+[dev-dependencies]
+proptest = "1"

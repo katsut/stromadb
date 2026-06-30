@@ -7,8 +7,10 @@
 
 pub mod catalog;
 pub mod fact;
+pub mod fold;
 
 pub use catalog::{
     Cardinality, Catalog, ConstraintError, PredicateDef, Range, RelProps, ValueType,
 };
 pub use fact::{Fact, FieldId, NodeId, Object, Provenance, ProvenanceKind, ValidTime, Value};
+pub use fold::{Fold, ObjKey, Op, OrderKey, Snapshot, fold};
