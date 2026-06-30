@@ -1,13 +1,17 @@
-//! Type-aware hybrid search (CAP-3, the differentiator).
+//! Type-aware hybrid search (CAP-3, the differentiator) + version-vector read modes (CAP-3 recall
+//! completeness, R-3).
 //!
 //! Plain ANN is type-blind: it returns vector-near results regardless of ontology type, so a query
 //! for type T is polluted by semantically-near wrong-type distractors. Type-aware hybrid filters the
-//! ANN candidates by the catalog's type, returning only semantically-coherent results (0 type
-//! violations by construction). Validated statistically in Phase 0 (`poc-quality-hybrid`).
+//! ANN candidates by type (0 type violations). [`search`] additionally resolves the vector axis of a
+//! version vector: **strict** reads the indexed prefix only; **fresh** reads indexed ∪ brute-force
+//! tail, closing index/structure split-brain. Validated in Phase 0 (`poc-quality-hybrid`,
+//! `poc-crossstore-snapshot`).
 
 use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
 use crate::vector::VectorIndex;
+use crate::version::{ReadMode, VersionVector};
 
 /// Plain ANN: top-k nearest by vector, type-blind (the baseline).
 pub fn plain_ann(index: &VectorIndex, q: &[f32], k: usize) -> Vec<NodeId> {
@@ -29,6 +33,29 @@ pub fn type_aware(
         .collect()
 }
 
+/// Type-aware hybrid at a pinned version vector. `Strict` searches the indexed prefix
+/// (`seqno < vv.vector_watermark`) only; `Fresh` searches indexed ∪ brute-force tail (split-brain
+/// closed). Both apply the ontology-type filter.
+pub fn search(
+    index: &VectorIndex,
+    catalog: &Catalog,
+    q: &[f32],
+    target_type: FieldId,
+    k: usize,
+    vv: &VersionVector,
+    mode: ReadMode,
+) -> Vec<NodeId> {
+    let scope = match mode {
+        ReadMode::Strict => Some(vv.vector_watermark),
+        ReadMode::Fresh => None,
+    };
+    index
+        .nearest_scoped(q, k, scope, |n| catalog.node_type(n) == Some(target_type))
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,9 +71,8 @@ mod tests {
     #[test]
     fn type_aware_beats_plain_ann() {
         let mut c = Catalog::new();
-        let person = c.register_type("Person"); // target type T
-        let doc = c.register_type("Document"); // distractor type
-        // a Person->Skill predicate just to exercise the catalog; not used by the search itself.
+        let person = c.register_type("Person");
+        let doc = c.register_type("Document");
         let skill = c.register_type("Skill");
         c.register_predicate(
             "has-skill",
@@ -58,29 +84,23 @@ mod tests {
 
         let mut idx = VectorIndex::new(4);
         let q = [0.0f32; 4];
-
-        // 7 wrong-type distractors closest to q (v = 0.05..0.35)
         for i in 1..=7u64 {
-            idx.insert(i, emb(0.05 * i as f32));
+            idx.insert(i, i, emb(0.05 * i as f32)); // distractors closest
             c.set_node_type(i, doc);
         }
-        // 3 relevant Person nodes (v = 0.50..0.52)
         for (j, id) in [11u64, 12, 13].into_iter().enumerate() {
-            idx.insert(id, emb(0.50 + 0.01 * j as f32));
+            idx.insert(id, id, emb(0.50 + 0.01 * j as f32)); // relevant
             c.set_node_type(id, person);
         }
-        // 2 far Person nodes (v = 2.0, 2.1) — correct type but not relevant
-        idx.insert(21, emb(2.0));
+        idx.insert(21, 21, emb(2.0)); // far Person (not relevant)
         c.set_node_type(21, person);
-        idx.insert(22, emb(2.1));
+        idx.insert(22, 22, emb(2.1));
         c.set_node_type(22, person);
 
         let k = 5;
         let relevant: std::collections::BTreeSet<NodeId> = [11, 12, 13].into_iter().collect();
-
         let plain = plain_ann(&idx, &q, k);
         let hybrid = type_aware(&idx, &c, &q, person, k);
-
         let recall = |r: &[NodeId]| {
             r.iter().filter(|n| relevant.contains(n)).count() as f64 / relevant.len() as f64
         };
@@ -90,13 +110,47 @@ mod tests {
                 .count()
         };
 
-        // plain ANN: top-5 are the 5 closest distractors -> 0 relevant, all type violations.
         assert_eq!(recall(&plain), 0.0);
         assert_eq!(type_viol(&plain), 5);
-        // type-aware: the 3 relevant (+2 far Person) -> full recall, 0 type violations.
         assert_eq!(recall(&hybrid), 1.0);
         assert_eq!(type_viol(&hybrid), 0);
         assert!(recall(&hybrid) > recall(&plain));
+    }
+
+    /// fresh closes the split-brain that strict (indexed-prefix only) leaves open: a freshly-added,
+    /// not-yet-indexed type-T node closest to the query is found only by fresh.
+    #[test]
+    fn fresh_closes_split_brain() {
+        let mut c = Catalog::new();
+        let person = c.register_type("Person");
+        let mut idx = VectorIndex::new(4);
+        let q = [0.0f32; 4];
+
+        // indexed prefix (seqno < watermark=5): two Person at moderate distance
+        idx.insert(1, 1, emb(1.0));
+        idx.insert(2, 2, emb(1.1));
+        c.set_node_type(1, person);
+        c.set_node_type(2, person);
+        // un-indexed tail (seqno >= 5): a Person closest to q
+        idx.insert(6, 6, emb(0.1));
+        c.set_node_type(6, person);
+        idx.advance_watermark(5);
+
+        let vv = VersionVector::new(10, 5);
+        assert_eq!(vv.skew(), 5);
+
+        let strict: std::collections::BTreeSet<NodeId> =
+            search(&idx, &c, &q, person, 3, &vv, ReadMode::Strict)
+                .into_iter()
+                .collect();
+        let fresh: std::collections::BTreeSet<NodeId> =
+            search(&idx, &c, &q, person, 3, &vv, ReadMode::Fresh)
+                .into_iter()
+                .collect();
+
+        assert_eq!(strict, [1, 2].into_iter().collect()); // tail node 6 missed
+        assert!(fresh.contains(&6)); // brute-force tail found it
+        assert!(strict.is_subset(&fresh)); // fresh never loses a strict result
     }
 
     #[test]
