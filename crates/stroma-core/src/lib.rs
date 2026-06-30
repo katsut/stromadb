@@ -13,6 +13,7 @@ pub mod fold;
 pub mod hybrid;
 pub mod query;
 pub mod vector;
+pub mod version;
 
 pub use catalog::{
     Cardinality, Catalog, ConstraintError, PredicateDef, Range, RelProps, ValueType,
@@ -22,3 +23,4 @@ pub use engine::Engine;
 pub use fact::{Fact, FieldId, NodeId, Object, Provenance, ProvenanceKind, ValidTime, Value};
 pub use fold::{Fold, ObjKey, Op, OrderKey, Snapshot, fold};
 pub use vector::VectorIndex;
+pub use version::{ReadMode, VersionVector};
