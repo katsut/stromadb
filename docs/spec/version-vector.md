@@ -35,8 +35,20 @@ tail excluded; audit/repro). `ReadMode::Fresh` — indexed prefix ∪ brute-forc
 **Guarantee:** `strict ⊆ fresh`, and fresh is recall-complete — a structurally-present, embedded
 node the index has not yet caught up to is still found (split-brain closed). Type-violations remain 0.
 
-## Out of scope (later)
+## Frozen contract decisions (v1, from injection spike H3)
+Embeddings arrive async and out-of-order w.r.t. seqno (external pipeline). A naive scalar watermark
+(max embedded seqno) dangles massively (spike: 4999/5000). The 2-tuple **survives** under these rules,
+now frozen:
+1. **each embedding is stamped with its node's changelog seqno** (Vesicle's responsibility);
+2. **`vector_watermark` = the contiguous embedded prefix** (stalls at the first gap — never claims a
+   hole);
+3. **fresh = prefix ∪ brute-force(embedded tail)** — complete regardless of arrival order.
+Cost: head-of-line stall (one very-late early embedding keeps the strict prefix small) → mitigated by
+fresh mode + bounded skew. If embeddings ever *cannot* be seqno-stamped, the scalar breaks and this
+axis must become a frontier (v2).
+
+## Out of scope (later / implementation)
 - Lance (cold) and MVCC txid axes of the version vector.
-- Sampling the cut under live concurrent ingest (the consistent-cut invariant; torn sampling dangles
-  — proven in Phase 0 `poc-crossstore-snapshot`) → wired with the concurrent engine.
+- Sampling the cut under live concurrent ingest (torn sampling dangles — proven in Phase 0
+  `poc-crossstore-snapshot`) → wired with the concurrent engine.
 - `skew > B` backpressure / sync-materialize of the vector index.
