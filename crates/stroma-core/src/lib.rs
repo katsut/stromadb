@@ -16,6 +16,7 @@ pub mod live;
 pub mod query;
 pub mod vector;
 pub mod version;
+pub mod wal;
 
 pub use catalog::{
     Cardinality, Catalog, ConstraintError, PredicateDef, Range, RelProps, ValueType,

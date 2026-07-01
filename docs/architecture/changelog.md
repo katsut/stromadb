@@ -1,7 +1,8 @@
 # Architecture — Changelog
 
 > Design and rationale for `stroma-core::changelog`. Companion WHAT: `../spec/changelog.md`.
-> Overview: `../ARCHITECTURE.md` §4, §7. Status: in-memory (Epic 1, Story 1.3).
+> Overview: `../ARCHITECTURE.md` §4, §7. Status: in-memory semantics + durable file-WAL backend
+> (Epic 1 + durability build); LSM is a later swap.
 
 ## Version authority (single source of truth)
 
@@ -25,13 +26,40 @@ in-flight (appended-but-not-materialized) backlog and returns explicit `Backpres
 the producer can slow down or shed load — never a silent OOM/stall (CAP-1). `mark_materialized`
 relieves it as derived stores catch up. The bound is the knob that ties write rate to read freshness.
 
-## In-memory now, durable behind the same contract
+## Durability: framed WAL + group-commit fsync
 
-This story implements the *semantics* (append, seqno authority, replay, watermark, backpressure) in
-memory so the rest of the engine can build on a stable contract. The durable backend — LSM
-(RocksDB/Speedb) for the append path, rkyv zero-copy records, O_DIRECT, WAL fsync, snapshot/PITR —
-slots in behind the same `append`/`replay`/watermark API in a later story. Nothing above the
-changelog needs to change when durability lands.
+Durability slots in behind the same `append`/`replay`/watermark API — additively, so nothing above
+the changelog changed when it landed. `Changelog::new` stays the pure in-memory mode; `Changelog::open`
+is the durable mode.
+
+**Group commit, not per-append fsync.** `append` does exactly what it always did (push a record to
+the in-memory log; assign a seqno) — no I/O, so its signature stays `Result<u64, Backpressure>` with
+no `io::Error`. Durability is a separate, explicit step: `sync` frames every record in
+`[durable_head, head)` and issues one `write_all` + `fsync` (`File::sync_all`). The caller batches the
+commit boundary — an ETL chunk is `append_batch` then one `sync` — so N appends cost one fsync, not N.
+A record is durable iff a `sync` returned `Ok` after it; a crash loses only the un-synced tail. This is
+the standard WAL group-commit shape and is why the write path hits ~7M facts/s with an fsync per chunk
+(measured, `examples/durability_slo.rs`).
+
+**Frame format & recovery.** Each record is written as `[payload_len u32][crc32 u32][payload]`
+(`wal.rs`). On `open`, `wal::recover` reads frames in order and **stops at the first torn frame** —
+a short read (crash mid-write), a checksum mismatch, or an undecodable payload. Everything before it
+is recovered intact; the torn tail is dropped. This makes crash recovery prefix-exact without a
+separate "commit marker": the checksum *is* the marker. A corrupt length field is bounded by a
+16 MiB per-record cap so a garbage tail can't trigger a huge allocation. `crc` is FNV-1a — a
+torn-write detector, not a cryptographic MAC (the WAL is trusted local storage).
+
+**Cold start = RTO.** `Engine::open` calls `Changelog::open` (recover the log) then `replay_into`
+(fold the whole recovered log back into the base state). That fold *is* the recovery-time objective.
+Measured on the real engine at the A1 representative point (5M facts): recovery **0.81s** — well
+under the 10s DONE SLO — with 0 data loss. Application-level framing overhead is ~34 B/edge-record
+(~1.7× the 20 B logical payload); device-level write amplification is a property of the LSM backend
+and is measured when that lands.
+
+**LSM later, same contract.** The eventual LSM backend (RocksDB/Speedb append path, rkyv zero-copy
+records, O_DIRECT, compaction, snapshot/PITR) replaces the file WAL behind this same
+open/sync/replay/watermark API. The frame codec and recovery discipline carry over; only the storage
+engine underneath changes.
 
 ## Relationship to the fold
 
@@ -40,7 +68,7 @@ in one place (the authority) is what guarantees the uniqueness the fold's LWW ti
 (`spec/fold.md`). The two compose as: ingest → `append` (assigns seqno) → `replay_into(fold)`.
 
 ## Boundaries / forward references
-- Durability/persistence backend → later story (trait-boundaried).
+- LSM storage engine (device-level WAF, compaction, PITR) → later swap behind the same contract.
 - `RemoveMany.observed` resolution (which tags a retraction removes) → ingest layer (needs current
   fold state).
 - Watermark coordination across multiple derived stores → version vector (Epic 4).
