@@ -14,9 +14,11 @@ use crate::query;
 use crate::vector::VectorIndex;
 use crate::version::{ReadMode, VersionVector};
 
-/// Default IVF probe / re-rank depth for the IR read path (tuning is issue #23 / #26).
-const IR_NPROBE: usize = 16;
-const IR_RERANK_R: usize = 100;
+/// Default IVF probe / re-rank depth for the IR read path — the operating point measured on
+/// overlapping-cluster data (`examples/ann_nprobe_curve`): nprobe=8 + R=256 gives recall@10 ~1.0 at
+/// authz-on warm p99 <1ms. Re-rank depth is the cheap recall lever (raw reads cost ~0.3ms, #19).
+const IR_NPROBE: usize = 8;
+const IR_RERANK_R: usize = 256;
 
 /// The vector backend the IR read path depends on — swappable under the frozen IR contract
 /// (`vector::VectorIndex` = exact oracle; `ivf::IvfPq` = production IVF-PQ + re-rank). `keep` combines

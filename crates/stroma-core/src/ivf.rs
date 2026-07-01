@@ -3,14 +3,19 @@
 //!
 //! - **IVF** (inverted file): a coarse quantizer partitions vectors into `nlist` cells; a query probes
 //!   only its `nprobe` nearest cells. The approximation knob — more probes → higher recall, more work.
-//! - **PQ** (product quantization): each vector's *residual* from its cell centroid is split into `m`
-//!   subvectors, each encoded to one byte against a 256-entry codebook (asymmetric distance / ADC).
-//!   A 768-dim f32 vector (3072 B) becomes `m` bytes — the compression that fits the A1 vector
-//!   footprint in RAM (raw 1.5 GB → ~48 MB @ m=96). This is the **hot** tier.
-//! - **Exact re-rank**: PQ ranking alone caps recall@10 well below 0.9 in high dim (reconstruction
-//!   error swamps fine ranking). [`IvfPq::search_rerank`] generates top-`rerank_r` candidates with PQ
-//!   (cheap), then re-scores just those with the **raw** vectors — recall@10 → ~1.0 for a bounded per-
-//!   query raw fetch. Raw is the **cold** tier (in-RAM here; mmap/SSD-backed later — A1 sizing).
+//! - **PQ** (product quantization, **non-residual**): each raw vector is split into `m` subvectors,
+//!   each encoded to one byte against a 256-entry codebook (asymmetric distance / ADC). A 768-dim f32
+//!   vector (3072 B) becomes `m` bytes — the compression that fits the A1 vector footprint in RAM (raw
+//!   1.5 GB → ~48 MB @ m=96). This is the **hot** tier. Non-residual (vs classic IVFADC residual) makes
+//!   the ADC table cell-independent → computed once per query, so candidate-gen cost stops scaling with
+//!   `nprobe` (the p99 driver, #19). Codes are stored struct-of-arrays per cell for cache locality.
+//! - **Exact re-rank**: PQ ranking alone caps recall@10 below 0.9 in high dim (quantization error
+//!   swamps fine ranking; non-residual caps lower still). [`IvfPq::search_rerank`] generates top-
+//!   `rerank_r` candidates with PQ (cheap), then re-scores just those with the **raw** vectors —
+//!   recall@10 → ~1.0. Re-rank depth `rerank_r` is the cheap recall lever (raw reads ~0.3 ms, #19), so
+//!   the operating point is a moderate `nprobe` + generous `rerank_r` (measured: nprobe=8, R=256 →
+//!   recall ~1.0, warm p99 <1 ms even on overlapping-cluster data). Raw is the **cold** tier (in-RAM
+//!   here; mmap/SSD-backed later — A1 sizing).
 //!
 //! Three orthogonal scoping axes ride on top, matching the frozen contracts:
 //! - **seqno watermark** (H3 / version vector): `max_seqno` reads the indexed prefix (strict) or all.
@@ -88,11 +93,24 @@ fn kmeans(points: &[&[f32]], k: usize, iters: usize, rng: &mut Rng) -> Vec<Vec<f
     centroids
 }
 
-struct Posting {
-    node: NodeId,
-    seqno: u64,
-    label: u32,
-    code: Vec<u8>, // length m
+/// One inverted list, struct-of-arrays for cache-friendly scanning: posting `i` is
+/// `codes[i*m..(i+1)*m]` + `nodes[i]`/`seqnos[i]`/`labels[i]`. Contiguous codes keep the ADC hot loop
+/// off the heap-pointer chase a `Vec<Vec<u8>>` would cause.
+#[derive(Default)]
+struct Cell {
+    codes: Vec<u8>, // flat, m bytes per posting
+    nodes: Vec<NodeId>,
+    seqnos: Vec<u64>,
+    labels: Vec<u32>,
+}
+
+impl Cell {
+    fn push(&mut self, node: NodeId, seqno: u64, label: u32, code: &[u8]) {
+        self.codes.extend_from_slice(code);
+        self.nodes.push(node);
+        self.seqnos.push(seqno);
+        self.labels.push(label);
+    }
 }
 
 /// Trained IVF-PQ index. Build with [`IvfPq::train`] on a sample, then [`IvfPq::add`] every vector.
@@ -104,7 +122,7 @@ pub struct IvfPq {
     coarse: Vec<Vec<f32>>,    // nlist × dim
     codebooks: Vec<Vec<f32>>, // m × (pq_ksub × dsub), flattened
     pq_ksub: usize,           // centroids per subquantizer (≤ KSUB)
-    lists: Vec<Vec<Posting>>, // nlist inverted lists (hot: PQ codes)
+    lists: Vec<Cell>,         // nlist inverted lists (hot: PQ codes, SoA)
     raw: Vec<f32>,            // cold tier: raw vectors, flat (ntotal × dim), for exact re-rank
     row_of: HashMap<NodeId, u32>,
     ntotal: usize,
@@ -159,7 +177,7 @@ impl IvfPq {
 
         self.coarse = kmeans(&refs, self.nlist, 12, &mut rng);
         self.nlist = self.coarse.len();
-        self.lists = (0..self.nlist).map(|_| Vec::new()).collect();
+        self.lists = (0..self.nlist).map(|_| Cell::default()).collect();
 
         // PQ codebooks are trained on RAW sub-vectors (non-residual). Because re-rank restores exact
         // recall, PQ only has to rank candidates, so we trade a little candidate precision for a huge
@@ -217,12 +235,7 @@ impl IvfPq {
         assert!(!self.coarse.is_empty(), "index not trained");
         let (cell, _) = nearest_centroid(embedding, &self.coarse);
         let code = self.encode(embedding);
-        self.lists[cell].push(Posting {
-            node,
-            seqno,
-            label,
-            code,
-        });
+        self.lists[cell].push(node, seqno, label, &code);
         self.row_of.insert(node, (self.raw.len() / self.dim) as u32);
         self.raw.extend_from_slice(embedding);
         self.ntotal += 1;
@@ -286,17 +299,20 @@ impl IvfPq {
         out: &mut Vec<(f32, NodeId)>,
         scored: &mut usize,
     ) {
-        for p in &self.lists[cell] {
-            if max_seqno.is_some_and(|w| p.seqno >= w) {
+        let c = &self.lists[cell];
+        for i in 0..c.nodes.len() {
+            if max_seqno.is_some_and(|w| c.seqnos[i] >= w) {
                 continue; // strict watermark: indexed prefix only
             }
-            if !allowed_label(p.label) {
+            if !allowed_label(c.labels[i]) {
                 continue; // authz: never score unauthorized postings
             }
-            if !keep(p.node) {
+            let node = c.nodes[i];
+            if !keep(node) {
                 continue; // ontology type / arbitrary filter
             }
-            out.push((self.adc_score(table, &p.code), p.node));
+            let code = &c.codes[i * self.m..(i + 1) * self.m];
+            out.push((self.adc_score(table, code), node));
             *scored += 1;
         }
     }
