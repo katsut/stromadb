@@ -161,6 +161,13 @@ pub struct IvfPq {
 }
 
 impl IvfPq {
+    /// A reasonable `nlist` for `n` vectors (~4·√n, clamped). Cells this size keep a query's probed
+    /// postings bounded — cell imbalance from too-small `nlist` was the integrated-read p99 driver
+    /// (#30: at 100K, nlist 256→1024 cut read p99 3.1→1.6ms). Callers should scale `nlist` with `n`.
+    pub fn suggested_nlist(n: usize) -> usize {
+        ((4.0 * (n as f64).sqrt()) as usize).clamp(16, 65_536)
+    }
+
     /// Create an untrained index. `dim` must be divisible by `m`.
     pub fn new(dim: usize, nlist: usize, m: usize) -> Self {
         assert!(m > 0 && dim.is_multiple_of(m), "dim must be divisible by m");

@@ -22,7 +22,6 @@ use stroma_core::version::{ReadMode, VersionVector};
 const N: usize = 100_000; // initial docs
 const DIM: usize = 768;
 const M: usize = 96;
-const NLIST: usize = 256;
 const TRAIN: usize = 20_000;
 const NC: usize = 1500;
 const NOISE: f32 = 0.35;
@@ -82,8 +81,8 @@ fn main() {
         cat.set_node_label(i, (i % 4) as u8);
     }
 
-    // real vector backend (IVF-PQ), parallel build
-    let mut ivf = IvfPq::new(DIM, NLIST, M);
+    // real vector backend (IVF-PQ), parallel build — nlist scales with N (#30: avoids cell imbalance)
+    let mut ivf = IvfPq::new(DIM, IvfPq::suggested_nlist(N), M);
     let t = Instant::now();
     ivf.train(&data[..TRAIN]);
     ivf.add_batch(
@@ -220,6 +219,36 @@ fn main() {
             read_idx += 1;
         }
     }
+
+    // --- read latency breakdown (isolate ANN vs authz+type filter vs +expand/IR overhead) ---
+    let vv = VersionVector::new(eng.durable_head(), ivf.len() as u64);
+    let keep_cat = |n: u64| {
+        cat.node_label(n).is_none_or(|l| principal.can_see_label(l))
+            && cat.node_type(n) == Some(doc)
+    };
+    let mut b_ann = Vec::new();
+    let mut b_filt = Vec::new();
+    let mut b_full = Vec::new();
+    for q in queries.iter().cycle().take(1000) {
+        let t = Instant::now();
+        let _ = ivf.search_rerank(q, K, 8, 256, None, |_| true, |_| true); // pure ANN
+        b_ann.push(t.elapsed().as_secs_f64() * 1e3);
+        let t = Instant::now();
+        let _ = ivf.search_rerank(q, K, 8, 256, None, |_| true, keep_cat); // + authz/type filter
+        b_filt.push(t.elapsed().as_secs_f64() * 1e3);
+        let t = Instant::now();
+        let _ = run(&snap, &cat, &ivf, &pipeline(q.to_vec()), &principal, vv); // + expand + IR
+        b_full.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    for v in [&mut b_ann, &mut b_filt, &mut b_full] {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    }
+    println!(
+        "breakdown p99: pure-ANN {:.3}ms | +filter {:.3}ms | +expand/IR (full) {:.3}ms",
+        pct(&b_ann, 0.99),
+        pct(&b_filt, 0.99),
+        pct(&b_full, 0.99)
+    );
 
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let total_writes = 2 * N + EPOCHS * WRITE_EDGES;
