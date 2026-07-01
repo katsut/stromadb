@@ -29,6 +29,7 @@ use crate::vector::sqdist;
 use std::collections::HashMap;
 
 const KSUB: usize = 256; // PQ centroids per subquantizer (fits one byte)
+const COARSE_FANOUT: usize = 8; // 2-level probe gathers ~FANOUT×nprobe candidate cells, then picks nprobe
 
 /// Deterministic splitmix64 PRNG — reproducible training without a `rand` dependency.
 struct Rng(u64);
@@ -151,11 +152,13 @@ pub struct IvfPq {
     m: usize,    // number of subquantizers
     dsub: usize, // dim / m
     nlist: usize,
-    coarse: Vec<Vec<f32>>,    // nlist × dim
-    codebooks: Vec<Vec<f32>>, // m × (pq_ksub × dsub), flattened
-    pq_ksub: usize,           // centroids per subquantizer (≤ KSUB)
-    lists: Vec<Cell>,         // nlist inverted lists (hot: PQ codes, SoA)
-    raw: Vec<f32>,            // cold tier: raw vectors, flat (ntotal × dim), for exact re-rank
+    coarse: Vec<Vec<f32>>,        // nlist × dim
+    super_coarse: Vec<Vec<f32>>, // 2-level coarse quantizer: ~√nlist super-centroids (empty if small)
+    super_members: Vec<Vec<u32>>, // per super-centroid: the coarse cell indices assigned to it
+    codebooks: Vec<Vec<f32>>,    // m × (pq_ksub × dsub), flattened
+    pq_ksub: usize,              // centroids per subquantizer (≤ KSUB)
+    lists: Vec<Cell>,            // nlist inverted lists (hot: PQ codes, SoA)
+    raw: Vec<f32>,               // cold tier: raw vectors, flat (ntotal × dim), for exact re-rank
     row_of: HashMap<NodeId, u32>,
     ntotal: usize,
 }
@@ -177,6 +180,8 @@ impl IvfPq {
             dsub: dim / m,
             nlist: nlist.max(1),
             coarse: Vec::new(),
+            super_coarse: Vec::new(),
+            super_members: Vec::new(),
             codebooks: Vec::new(),
             pq_ksub: 0,
             lists: Vec::new(),
@@ -217,6 +222,25 @@ impl IvfPq {
         self.coarse = kmeans(&refs, self.nlist, 12, &mut rng);
         self.nlist = self.coarse.len();
         self.lists = (0..self.nlist).map(|_| Cell::default()).collect();
+
+        // 2-level coarse quantizer (#32): for large nlist, cluster the coarse centroids into ~√nlist
+        // super-centroids so probe_cells routes via the supers (sub-linear) instead of scanning all
+        // nlist centroids (which was ~1ms at nlist≈2828 — the 0.5M read-p99 blocker). Small nlist keeps
+        // the plain linear scan (cheaper than two levels).
+        self.super_coarse = Vec::new();
+        self.super_members = Vec::new();
+        if self.nlist >= 512 {
+            let s = (self.nlist as f64).sqrt() as usize;
+            let crefs: Vec<&[f32]> = self.coarse.iter().map(|c| c.as_slice()).collect();
+            let supers = kmeans(&crefs, s, 10, &mut rng);
+            let mut members = vec![Vec::new(); supers.len()];
+            for (ci, c) in self.coarse.iter().enumerate() {
+                let (si, _) = nearest_centroid(c, &supers);
+                members[si].push(ci as u32);
+            }
+            self.super_coarse = supers;
+            self.super_members = members;
+        }
 
         // PQ codebooks are trained on RAW sub-vectors (non-residual). Because re-rank restores exact
         // recall, PQ only has to rank candidates, so we trade a little candidate precision for a huge
@@ -336,16 +360,49 @@ impl IvfPq {
         s
     }
 
-    /// The `nprobe` cells nearest to `q`, closest first.
+    /// The `nprobe` cells nearest to `q`, closest first. With the 2-level coarse quantizer (#32) this
+    /// routes via the super-centroids — gather the coarse cells under the nearest supers until there
+    /// are enough candidates, then pick the `nprobe` nearest among *those* — so the per-query coarse
+    /// work is ~√nlist + a bounded candidate set instead of a full O(nlist) scan. Exact re-rank absorbs
+    /// the small routing approximation. Falls back to a linear scan for small nlist.
     fn probe_cells(&self, q: &[f32], nprobe: usize) -> Vec<usize> {
-        let mut cd: Vec<(f32, usize)> = self
-            .coarse
+        let np = nprobe.max(1);
+        if self.super_coarse.is_empty() {
+            let mut cd: Vec<(f32, usize)> = self
+                .coarse
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (sqdist(q, c), i))
+                .collect();
+            cd.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            return cd.into_iter().take(np).map(|(_, i)| i).collect();
+        }
+        // level 1: rank super-centroids by distance to q
+        let mut sd: Vec<(f32, usize)> = self
+            .super_coarse
             .iter()
             .enumerate()
             .map(|(i, c)| (sqdist(q, c), i))
             .collect();
+        sd.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        // level 2: gather coarse cells from the nearest supers until we have a generous candidate pool
+        let target = (np * COARSE_FANOUT).min(self.nlist);
+        let mut cand: Vec<usize> = Vec::with_capacity(target + 64);
+        for (_, si) in sd {
+            for &ci in &self.super_members[si] {
+                cand.push(ci as usize);
+            }
+            if cand.len() >= target {
+                break;
+            }
+        }
+        // pick the np nearest coarse cells among the gathered candidates
+        let mut cd: Vec<(f32, usize)> = cand
+            .into_iter()
+            .map(|ci| (sqdist(q, &self.coarse[ci]), ci))
+            .collect();
         cd.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        cd.into_iter().take(nprobe.max(1)).map(|(_, i)| i).collect()
+        cd.into_iter().take(np).map(|(_, i)| i).collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -591,6 +648,40 @@ mod tests {
             b.search_rerank(q, 10, 8, 100, None, |_| true, |_| true)
         );
         assert_eq!(a.len(), b.len());
+    }
+
+    #[test]
+    fn two_level_coarse_preserves_recall() {
+        // nlist >= 512 activates the 2-level coarse quantizer; recall must stay high vs exact.
+        let dim = 32;
+        let ctr = centers(400, dim, 7);
+        let data = clustered(20_000, 2, &ctr, dim);
+        let mut idx = IvfPq::new(dim, 512, 8);
+        idx.train(&data);
+        assert!(
+            !idx.super_coarse.is_empty(),
+            "2-level path should be active at nlist=512"
+        );
+        for (i, v) in data.iter().enumerate() {
+            idx.add(i as NodeId, i as u64, v, 0);
+        }
+        let queries = clustered(40, 111, &ctr, dim);
+        let k = 10;
+        let mut rr = 0.0;
+        for q in &queries {
+            let truth = exact_topk(&data, q, k);
+            let got: BTreeSet<NodeId> = idx
+                .search_rerank(q, k, 16, 200, None, |_| true, |_| true)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+            rr += got.intersection(&truth).count() as f64 / k as f64;
+        }
+        let rr = rr / queries.len() as f64;
+        assert!(
+            rr >= 0.9,
+            "2-level coarse recall@10 must stay ≥0.9 (got {rr})"
+        );
     }
 
     #[test]
