@@ -14,10 +14,16 @@ are the *same algebra*, differing only in whether the result is returned once or
 
 The injection spike (`poc-authz-index-leak`) showed a shared index + post-authz filter leaks the
 unauthorized-near count (timing + top-k completeness). So authz is not a post-filter — it is threaded
-into each **source** as a scope: `TypeAnn` searches only authorized nodes (`nearest_scoped` with the
-authz predicate), and expands only cross authorized edges. A principal never scores or ranks against
-data it can't see, so there is no inference channel. The engine injects this at the head; a pipeline
-cannot opt out.
+into each **source** as a scope: `TypeAnn` searches only authorized nodes (the authz+type predicate is
+applied *before* scoring), and expands only across authorized edges. A principal never scores or ranks
+against data it can't see, so there is no inference channel. The engine injects this at the head; a
+pipeline cannot opt out.
+
+The vector backend is abstracted behind the `AnnBackend` trait, so `run` is generic over it: the exact
+`VectorIndex` (oracle) and the production `ivf::IvfPq` (IVF-PQ + exact re-rank) are interchangeable. The
+authz+type filter is passed as the `keep` predicate either way — with IVF-PQ it is checked before ADC
+scoring, preserving the "scoped, not post-filtered" property (H4). The IVF-PQ path is tested for id-set
+equivalence against the exact oracle through a full pipeline.
 
 ## The result is a contract
 

@@ -26,7 +26,7 @@ pub use changelog::{Backpressure, Changelog, WriteKind};
 pub use engine::Engine;
 pub use fact::{Fact, FieldId, NodeId, Object, Provenance, ProvenanceKind, ValidTime, Value};
 pub use fold::{Fold, ObjKey, Op, OrderKey, Snapshot, fold};
-pub use ir::{Pipeline, Principal, Source, Transform, Traverser};
+pub use ir::{AnnBackend, Pipeline, Principal, Source, Transform, Traverser};
 pub use live::{Diff, LiveQueries, QueryId};
 pub use vector::VectorIndex;
 pub use version::{ReadMode, VersionVector};

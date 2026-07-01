@@ -58,7 +58,19 @@ of a query, not scanned.
 - warm hybrid **p99 = 0.78 ms** with authz ON + type filter + rerank (SLO < 2 ms ✅); p50 0.41 ms.
 - compression **32×** (hot codes vs raw).
 
+> ⚠ **Measurement condition**: the p99 above was measured with the **raw (cold) tier in RAM**. Moving
+> raw to mmap/SSD makes re-rank a random read of `rerank_r` vectors per query, which changes p99 — so
+> "raw = cold **and** p99 < 2 ms" is **not yet jointly validated**. That re-measurement is the decisive
+> step of the integration leg. If it exceeds 2 ms, the staged fallback is OPQ → smaller `rerank_r` →
+> a thin hot re-rank set. The recall/compression numbers are condition-independent.
+
+## Query-IR integration (done)
+`IvfPq` and the exact `VectorIndex` both implement `ir::AnnBackend`, so `ir::run` is generic over the
+backend. The `TypeAnn` source calls `ann_search(q, k, scope, keep)` — `keep` carries authz+type and is
+applied before scoring; `scope` is the watermark. The IVF-PQ path is tested for id-set equivalence
+against the exact oracle through a full pipeline (`ir::tests::ivfpq_backend_matches_exact_through_ir`).
+IR probe/re-rank defaults (`IR_NPROBE`, `IR_RERANK_R`) are provisional pending tuning (#23/#26).
+
 ## Out of scope (later)
-- Wiring `search_rerank` into the query-IR `TopK` read path (replacing the exact stand-in there).
-- Cold tier on mmap/SSD (DiskANN-style) instead of RAM; OPQ rotation; SIMD/parallel build.
+- Cold tier on mmap/SSD (DiskANN-style) instead of RAM (#19); OPQ rotation (#26); SIMD/parallel build (#22).
 - Async embedding pipeline stamping `seqno` on arrival (Vesicle responsibility, H3).

@@ -2,9 +2,11 @@
 //!
 //! Embeddings are **received** (the engine never embeds — no-LLM substrate). Each carries the
 //! changelog `seqno` at which it became available; the index `watermark` is how far it has been
-//! indexed. ANN (the production quantized index, IVF-PQ/DiskANN) only "sees" the indexed prefix
+//! indexed. ANN (the production quantized index, `ivf::IvfPq`) only "sees" the indexed prefix
 //! `seqno < watermark`; the un-indexed tail is brute-forced in fresh reads (closes split-brain).
-//! This MVP uses exact distance (recall-complete) as the ANN stand-in behind the same scoped contract.
+//! This is the **exact stand-in / oracle** (recall-complete); production is `ivf::IvfPq`. Both impl
+//! `ir::AnnBackend`, so the query-IR read path is generic over the backend and the IVF-PQ path is
+//! tested for equivalence against this exact one.
 
 use std::collections::HashMap;
 
