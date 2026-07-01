@@ -10,3 +10,4 @@ description = "StromaDB core engine: Fact model, ontology catalog, fold, and que
 
 [dev-dependencies]
 proptest = "1"
+libc = "0.2" # examples only: fcntl(F_NOCACHE) to measure uncached SSD reads (ann_ssd_p99)
