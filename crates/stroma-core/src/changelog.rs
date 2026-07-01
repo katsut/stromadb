@@ -149,6 +149,28 @@ impl Changelog {
         Ok(seqno)
     }
 
+    /// Append a chunk of writes atomically w.r.t. backpressure (all-or-nothing). Returns their
+    /// seqnos in order. This is the ETL chunk/batch receiver (a chunk becomes one append).
+    pub fn append_batch(
+        &mut self,
+        writes: Vec<(FieldId, WriteKind)>,
+    ) -> Result<Vec<u64>, Backpressure> {
+        let unmaterialized = self.records.len() - self.materialized as usize;
+        if unmaterialized + writes.len() > self.max_unmaterialized {
+            return Err(Backpressure {
+                unmaterialized: unmaterialized + writes.len(),
+                limit: self.max_unmaterialized,
+            });
+        }
+        let mut seqnos = Vec::with_capacity(writes.len());
+        for (source, kind) in writes {
+            let seqno = self.records.len() as u64;
+            self.records.push(Record { source, kind });
+            seqnos.push(seqno);
+        }
+        Ok(seqnos)
+    }
+
     /// Next seqno that will be assigned (== current length).
     pub fn head(&self) -> u64 {
         self.records.len() as u64

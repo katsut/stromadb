@@ -328,6 +328,23 @@ impl Fold {
         }
     }
 
+    /// The live add-tags for a cardinality-Many element `(subject, predicate, object)` — the tags a
+    /// retraction must observe-and-remove. Empty if the element isn't currently present. This is the
+    /// resolver the DB↔ETL "diff reflection" needs (turn "remove this edge" into an observed-remove).
+    pub fn live_tags(&self, subject: NodeId, predicate: FieldId, object: &ObjKey) -> Vec<OrderKey> {
+        match self.keys.get(&(subject, predicate)) {
+            Some(KeyState::Many(s)) => s
+                .adds
+                .get(object)
+                .into_iter()
+                .flatten()
+                .filter(|t| !s.removes.contains(t) && s.hd.is_none_or(|h| **t > h))
+                .copied()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Canonical observation. Keys with no live state are omitted.
     pub fn observe(&self) -> Snapshot {
         let mut snap = Snapshot::default();
