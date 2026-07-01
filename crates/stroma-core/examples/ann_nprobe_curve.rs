@@ -60,9 +60,12 @@ fn main() {
     let data = gen_vecs(N, 42, &ctr);
     let mut idx = IvfPq::new(DIM, NLIST, M);
     idx.train(&data[..TRAIN]);
-    for (i, v) in data.iter().enumerate() {
-        idx.add(i as u64, i as u64, v, (i % 2) as u32);
-    }
+    idx.add_batch(
+        data.iter()
+            .enumerate()
+            .map(|(i, v)| (i as u64, i as u64, v.clone(), (i % 2) as u32))
+            .collect(),
+    );
     println!(
         "=== #23 nprobe operating-point (harder data: NC={NC}, noise={NOISE}, {N}×{DIM}d, type-sel 50%) ==="
     );

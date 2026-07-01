@@ -33,8 +33,17 @@ cell-independent: `table[j][code] = ‖ q_j − codebook[j][code] ‖²`, comput
 reused across every probed cell. A posting's distance is `Σ_j table[j][code_j]` — one lookup + add per
 subquantizer, no per-vector float math and no per-cell rebuild. This dropped warm p99 ~37% (4.0 → 2.5
 ms at `nprobe=16`) with recall unchanged. The table is flat (`m × pq_ksub`) to avoid hot-path allocation.
-Remaining p99 levers: contiguous (SoA) code layout for cache locality, SIMD ADC, and lower `nprobe` once
-recall is tuned on realistic data.
+The SoA cell layout (contiguous PQ codes per cell) landed for cache locality; remaining p99 headroom is
+SIMD ADC and OPQ (not needed for the SLO).
+
+## Parallel build
+
+Assignment (nearest coarse cell) and PQ encoding are the O(nlist·d) / O(m·ksub·dsub) per-vector build
+hot paths. They are embarrassingly parallel and read-only over the trained quantizer, so `train`'s
+k-means assignment step and `add_batch` fan out across CPUs via `std::thread::scope` (no external
+dependency, no `unsafe`); list insertion stays serial. This cut the 200K×768 build ~112 s → ~10 s
+(~11×), making the A1 representative point (0.5M) a ~25 s build — feasible for the integration bench.
+`add_batch` is order-equivalent to a sequence of `add` calls (tested).
 
 ## The three scopes are structural, not post-hoc
 
