@@ -102,6 +102,7 @@ pub struct Catalog {
     types: HashSet<FieldId>,
     predicates: HashMap<FieldId, PredicateDef>,
     node_types: HashMap<crate::fact::NodeId, FieldId>,
+    node_labels: HashMap<crate::fact::NodeId, u8>,
 }
 
 impl Catalog {
@@ -147,6 +148,16 @@ impl Catalog {
     /// The entity type assigned to a node, if any.
     pub fn node_type(&self, node: crate::fact::NodeId) -> Option<FieldId> {
         self.node_types.get(&node).copied()
+    }
+
+    /// Assign an ABAC sensitivity label to a node (for authz; unlabeled = public).
+    pub fn set_node_label(&mut self, node: crate::fact::NodeId, label: u8) {
+        self.node_labels.insert(node, label);
+    }
+
+    /// The sensitivity label of a node, if any (`None` = public / unlabeled).
+    pub fn node_label(&self, node: crate::fact::NodeId) -> Option<u8> {
+        self.node_labels.get(&node).copied()
     }
 
     pub fn field_id(&self, name: &str) -> Option<FieldId> {
