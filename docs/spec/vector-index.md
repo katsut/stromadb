@@ -58,11 +58,22 @@ of a query, not scanned.
 - warm hybrid **p99 = 0.78 ms** with authz ON + type filter + rerank (SLO < 2 ms ✅); p50 0.41 ms.
 - compression **32×** (hot codes vs raw).
 
-> ⚠ **Measurement condition**: the p99 above was measured with the **raw (cold) tier in RAM**. Moving
-> raw to mmap/SSD makes re-rank a random read of `rerank_r` vectors per query, which changes p99 — so
-> "raw = cold **and** p99 < 2 ms" is **not yet jointly validated**. That re-measurement is the decisive
-> step of the integration leg. If it exceeds 2 ms, the staged fallback is OPQ → smaller `rerank_r` →
-> a thin hot re-rank set. The recall/compression numbers are condition-independent.
+## Operating point (integration-leg measurements resolved)
+
+Two follow-up probes settled the p99 story:
+- **Raw tier is cheap** (`examples/ann_ssd_p99`): re-rank with raw on file, even UNCACHED (`F_NOCACHE`),
+  adds only ~0.3 ms at p99 vs raw-in-RAM for R=100. SSD is **not** the p99 blocker; the two-tier thesis
+  holds on I/O.
+- **Candidate-gen was the driver**, now optimized: non-residual PQ + once-per-query ADC table + SoA code
+  layout cut warm p99 ~4.0 → ~2.0 ms at nprobe=16.
+- **Operating point** (`examples/ann_nprobe_curve`, overlapping-cluster "hard" data, type-sel 50%): a
+  moderate `nprobe` + generous `rerank_r` clears both SLOs — **nprobe=8, R=256 → recall@10 ~1.0, authz-on
+  warm p99 <1 ms**. Non-residual PQ caps recall at small R (0.83 @ R=100), but re-rank depth is the cheap
+  lever (R=200 → 0.97; R=400 → 1.0), so recall is bought with `rerank_r`, not `nprobe`. These are the IR
+  defaults (`IR_NPROBE`, `IR_RERANK_R`).
+
+Remaining headroom (not needed for the SLO): SIMD ADC, OPQ (raises PQ recall so R can shrink), cold tier
+on mmap/SSD.
 
 ## Query-IR integration (done)
 `IvfPq` and the exact `VectorIndex` both implement `ir::AnnBackend`, so `ir::run` is generic over the
