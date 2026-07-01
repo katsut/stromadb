@@ -29,16 +29,15 @@ fn set_nocache(_file: &File) -> bool {
     false
 }
 
-const N: usize = 100_000;
+const N: usize = 100_000; // set higher (e.g. 500_000) for the A1 representative-scale run
 const DIM: usize = 768;
 const M: usize = 96;
-const NLIST: usize = 256;
 const TRAIN: usize = 20_000;
-const NC: usize = 1000;
+const NC: usize = 3000;
 const NOISE: f32 = 0.35;
-const R: usize = 100; // re-rank candidate depth
+const R: usize = 256; // re-rank candidate depth (matches IR operating point)
 const K: usize = 10;
-const NPROBE: usize = 16;
+const NPROBE: usize = 8; // operating point
 const ROW: usize = DIM * 4; // bytes per raw vector
 
 fn splitmix(s: &mut u64) -> f32 {
@@ -91,7 +90,7 @@ fn percentiles(mut lat: Vec<f64>, label: &str) {
 fn main() {
     let ctr = centers();
     let data = gen_vecs(N, 42, &ctr);
-    let mut idx = IvfPq::new(DIM, NLIST, M);
+    let mut idx = IvfPq::new(DIM, IvfPq::suggested_nlist(N), M);
     idx.train(&data[..TRAIN]);
     idx.add_batch(
         data.iter()
