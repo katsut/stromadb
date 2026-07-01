@@ -70,6 +70,16 @@ Training uses a fixed-seed splitmix64 PRNG for k-means init and dead-cluster re-
 built from the same sample is byte-identical run to run — required for reproducible tests and for the
 version vector's meaning to be stable.
 
+## Tuning: `nlist` must scale with N (integrated read p99)
+
+The integrated C2b measurement (durable Engine + IVF-PQ + IVM, real ANN read) found the read-path p99
+driver was **not** the authz/type filter but the ANN scan itself: with `nlist` too small for the corpus,
+coarse cells are large and imbalanced, so a query's probed postings blow up in the tail. At 100K vectors,
+`nlist` 256→1024 cut integrated read p99 from 3.1ms to 1.6ms (<2ms SLO). `IvfPq::suggested_nlist(n)`
+(~4·√n) encodes this; callers should size `nlist` to the corpus. A faster catalog (FxHash on
+`node_type`/`node_label`, hit per candidate by the filter) shaved a further ~1ms and removes a SipHash
+cost from the hot path, but the dominant lever is `nlist`.
+
 ## Boundaries / forward references
 - Query-IR `TopK` still calls the exact stand-in (`vector::VectorIndex`); swapping it to
   `IvfPq::search_rerank` (with the principal's label scope) is the next integration.
