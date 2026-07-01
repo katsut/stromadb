@@ -20,13 +20,21 @@ exact distance over the raw vectors. Re-rank fixes recall (0.38 → ~1.0, measur
 for only `rerank_r` vectors per query — so raw can live in the **cold** tier (mmap/SSD), and the hot
 RAM footprint stays the PQ codes (~48 MB @ A1 rep). This is the DiskANN/IVFADC-refine pattern.
 
-## Residual encoding and ADC
+## Non-residual PQ + a once-per-query ADC table (the p99 lever)
 
-PQ encodes the *residual* `x − centroid(cell)`, not `x` — residuals are small and same-scaled across
-cells, so one shared codebook set encodes all cells well. Search builds per-cell asymmetric distance
-(ADC) tables: for probed cell `c`, `table[j][code] = ‖ (q−centroid_c)_j − codebook[j][code] ‖²`, and a
-posting's approximate distance is `Σ_j table[j][code_j]` — one table lookup + add per subquantizer, no
-per-vector float math. Tables are flat (`m × pq_ksub`) to avoid per-query allocation on the hot path.
+Classic IVFADC encodes the *residual* `x − centroid(cell)`, which makes the ADC table depend on the
+cell — so a query rebuilds the table for every probed cell, and candidate-gen cost scales with
+`nprobe`. Measurement (`examples/ann_ssd_p99`) showed that per-cell table rebuild — not the raw tier —
+is the p99 driver: at `nprobe=16` candidate-gen alone was ~4 ms.
+
+Because **exact re-rank restores recall** (below), PQ only has to *rank candidates*, not reconstruct
+precisely. So we encode the **raw** sub-vectors (non-residual). The ADC table is then
+cell-independent: `table[j][code] = ‖ q_j − codebook[j][code] ‖²`, computed **once per query** and
+reused across every probed cell. A posting's distance is `Σ_j table[j][code_j]` — one lookup + add per
+subquantizer, no per-vector float math and no per-cell rebuild. This dropped warm p99 ~37% (4.0 → 2.5
+ms at `nprobe=16`) with recall unchanged. The table is flat (`m × pq_ksub`) to avoid hot-path allocation.
+Remaining p99 levers: contiguous (SoA) code layout for cache locality, SIMD ADC, and lower `nprobe` once
+recall is tuned on realistic data.
 
 ## The three scopes are structural, not post-hoc
 

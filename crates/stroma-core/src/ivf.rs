@@ -161,19 +161,14 @@ impl IvfPq {
         self.nlist = self.coarse.len();
         self.lists = (0..self.nlist).map(|_| Vec::new()).collect();
 
-        // residuals of the sample from their assigned cell centroids
-        let residuals: Vec<Vec<f32>> = refs
-            .iter()
-            .map(|p| {
-                let (c, _) = nearest_centroid(p, &self.coarse);
-                (0..self.dim).map(|i| p[i] - self.coarse[c][i]).collect()
-            })
-            .collect();
-
-        self.pq_ksub = KSUB.min(residuals.len()).max(1);
+        // PQ codebooks are trained on RAW sub-vectors (non-residual). Because re-rank restores exact
+        // recall, PQ only has to rank candidates, so we trade a little candidate precision for a huge
+        // query-time win: the ADC table becomes cell-independent (computed once per query, not per
+        // probed cell), so candidate-gen cost stops scaling with nprobe.
+        self.pq_ksub = KSUB.min(refs.len()).max(1);
         self.codebooks.clear();
         for j in 0..self.m {
-            let subs: Vec<&[f32]> = residuals
+            let subs: Vec<&[f32]> = refs
                 .iter()
                 .map(|r| &r[j * self.dsub..(j + 1) * self.dsub])
                 .collect();
@@ -191,9 +186,8 @@ impl IvfPq {
         &self.codebooks[j][c * self.dsub..(c + 1) * self.dsub]
     }
 
-    /// Encode a vector's residual from `cell` into `m` PQ code bytes (allocation-free inner loop).
-    fn encode(&self, x: &[f32], cell: usize) -> Vec<u8> {
-        let cen = &self.coarse[cell];
+    /// Encode a (raw, non-residual) vector into `m` PQ code bytes (allocation-free inner loop).
+    fn encode(&self, x: &[f32]) -> Vec<u8> {
         let mut code = vec![0u8; self.m];
         for (j, slot) in code.iter_mut().enumerate() {
             let off = j * self.dsub;
@@ -203,7 +197,7 @@ impl IvfPq {
                 let cb = self.sub_codebook(j, c);
                 let mut d = 0f32;
                 for i in 0..self.dsub {
-                    let r = x[off + i] - cen[off + i] - cb[i];
+                    let r = x[off + i] - cb[i];
                     d += r * r;
                 }
                 if d < best_d {
@@ -222,7 +216,7 @@ impl IvfPq {
         assert_eq!(embedding.len(), self.dim, "embedding dimension mismatch");
         assert!(!self.coarse.is_empty(), "index not trained");
         let (cell, _) = nearest_centroid(embedding, &self.coarse);
-        let code = self.encode(embedding, cell);
+        let code = self.encode(embedding);
         self.lists[cell].push(Posting {
             node,
             seqno,
@@ -240,10 +234,10 @@ impl IvfPq {
         &self.raw[row * self.dim..(row + 1) * self.dim]
     }
 
-    /// Flat ADC table for query `q` against `cell`: `m × pq_ksub` residual sub-distances.
-    /// `score(code) = Σ_j table[j*pq_ksub + code[j]]`.
-    fn adc_tables(&self, q: &[f32], cell: usize) -> Vec<f32> {
-        let cen = &self.coarse[cell];
+    /// Flat ADC table for query `q`: `m × pq_ksub` sub-distances, `score(code) = Σ_j table[j*ksub+code[j]]`.
+    /// Cell-independent (non-residual PQ), so it is computed **once per query** and reused across every
+    /// probed cell — candidate-gen cost no longer scales with `nprobe`.
+    fn adc_table(&self, q: &[f32]) -> Vec<f32> {
         let mut table = vec![0f32; self.m * self.pq_ksub];
         for j in 0..self.m {
             let off = j * self.dsub;
@@ -251,7 +245,7 @@ impl IvfPq {
                 let cb = self.sub_codebook(j, c);
                 let mut d = 0f32;
                 for i in 0..self.dsub {
-                    let r = q[off + i] - cen[off + i] - cb[i];
+                    let r = q[off + i] - cb[i];
                     d += r * r;
                 }
                 table[j * self.pq_ksub + c] = d;
@@ -284,7 +278,7 @@ impl IvfPq {
     #[allow(clippy::too_many_arguments)]
     fn scan_cell(
         &self,
-        q: &[f32],
+        table: &[f32],
         cell: usize,
         max_seqno: Option<u64>,
         allowed_label: &impl Fn(u32) -> bool,
@@ -292,7 +286,6 @@ impl IvfPq {
         out: &mut Vec<(f32, NodeId)>,
         scored: &mut usize,
     ) {
-        let table = self.adc_tables(q, cell);
         for p in &self.lists[cell] {
             if max_seqno.is_some_and(|w| p.seqno >= w) {
                 continue; // strict watermark: indexed prefix only
@@ -303,7 +296,7 @@ impl IvfPq {
             if !keep(p.node) {
                 continue; // ontology type / arbitrary filter
             }
-            out.push((self.adc_score(&table, &p.code), p.node));
+            out.push((self.adc_score(table, &p.code), p.node));
             *scored += 1;
         }
     }
@@ -325,11 +318,12 @@ impl IvfPq {
         allowed_label: impl Fn(u32) -> bool,
         keep: impl Fn(NodeId) -> bool,
     ) -> Vec<(NodeId, f32)> {
+        let table = self.adc_table(q); // once per query — reused across all probed cells
         let mut out = Vec::new();
         let mut scored = 0;
         for cell in self.probe_cells(q, nprobe) {
             self.scan_cell(
-                q,
+                &table,
                 cell,
                 max_seqno,
                 &allowed_label,
@@ -379,13 +373,14 @@ impl IvfPq {
         keep: impl Fn(NodeId) -> bool,
         tail_budget: usize,
     ) -> (Vec<(NodeId, f32)>, usize, bool) {
+        let table = self.adc_table(q); // once per query
         let probed: std::collections::HashSet<usize> =
             self.probe_cells(q, nprobe).into_iter().collect();
         let mut out = Vec::new();
         let mut scored = 0;
         for &cell in &probed {
             self.scan_cell(
-                q,
+                &table,
                 cell,
                 max_seqno,
                 &allowed_label,
@@ -403,7 +398,7 @@ impl IvfPq {
             let before = out.len();
             let mut cell_scored = 0;
             self.scan_cell(
-                q,
+                &table,
                 cell,
                 max_seqno,
                 &allowed_label,
