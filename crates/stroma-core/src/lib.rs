@@ -12,6 +12,7 @@ pub mod fact;
 pub mod fold;
 pub mod hybrid;
 pub mod ir;
+pub mod ivf;
 pub mod live;
 pub mod query;
 pub mod vector;

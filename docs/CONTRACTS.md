@@ -25,7 +25,10 @@ IVM engine) change freely without touching the contract.
 
 ## NOT frozen (implementation — swappable under the contracts)
 - changelog backend (in-memory / **framed file-WAL now** → LSM/RocksDB/Speedb + rkyv + O_DIRECT)
-- vector index (exact stand-in → quantized IVF-PQ/DiskANN)
+- vector index — **real IVF-PQ + exact re-rank landed** (`ivf.rs`; hot PQ codes 32× + cold raw re-rank
+  tier). Measured SLO: filtered recall@10 ~1.0 @ type-sel 50% (rerank R=100), authz-on warm p99 0.78ms
+  (`examples/ann_slo.rs`). Exact `vector::VectorIndex` retained as reference/oracle. See
+  `spec/vector-index.md`. Swap into the query-IR `TopK` read path is pending.
 - IVM engine (recompute-and-diff → differential-dataflow, validated in `poc-rkyv-ivm`)
 - **durability failure model (H1)** — **file-WAL backend landed**: group-commit fsync, prefix-exact
   crash recovery, cold-start replay = RTO (0.81s @5M facts measured, 0 data loss;
