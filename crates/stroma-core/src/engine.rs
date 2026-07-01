@@ -8,6 +8,8 @@
 use crate::changelog::{Backpressure, Changelog, WriteKind};
 use crate::fact::{FieldId, NodeId};
 use crate::fold::{Fold, ObjKey, Snapshot};
+use std::io;
+use std::path::Path;
 
 pub struct Engine {
     changelog: Changelog,
@@ -17,12 +19,39 @@ pub struct Engine {
 
 impl Engine {
     /// `n_max` bounds the un-merged (appended-but-not-materialized) backlog.
+    /// In-memory only — see [`Engine::open`] for the durable variant.
     pub fn new(n_max: usize) -> Self {
         Engine {
             changelog: Changelog::new(n_max),
             base: Fold::default(),
             watermark: 0,
         }
+    }
+
+    /// Open a durable engine backed by the WAL at `path`: recover the committed changelog prefix and
+    /// rebuild the fold from it (the cold-start replay = recovery-time-objective path). Writes become
+    /// durable via [`Engine::sync`]. A missing file starts empty.
+    pub fn open(path: impl AsRef<Path>, n_max: usize) -> io::Result<Self> {
+        let changelog = Changelog::open(path, n_max)?;
+        let mut base = Fold::default();
+        changelog.replay_into(&mut base); // fold the whole recovered log = cold-start rebuild
+        let watermark = changelog.head();
+        Ok(Engine {
+            changelog,
+            base,
+            watermark,
+        })
+    }
+
+    /// Durability commit point: fsync every appended-but-not-yet-durable write (group commit — the
+    /// caller picks the boundary, typically per ETL chunk). No-op in in-memory mode.
+    pub fn sync(&mut self) -> io::Result<()> {
+        self.changelog.sync()
+    }
+
+    /// Seqno up to which writes are guaranteed durable (fsynced); `0` in in-memory mode.
+    pub fn durable_head(&self) -> u64 {
+        self.changelog.durable_head()
     }
 
     /// Append a write; returns its seqno or [`Backpressure`] when the un-merged backlog is full
@@ -176,6 +205,39 @@ mod tests {
             .unwrap();
         assert_eq!(seqnos, vec![0, 1]);
         assert_eq!(query::point_many(&e.snapshot(), 1, 100).len(), 2);
+    }
+
+    #[test]
+    fn durable_engine_recovers_state_cold() {
+        let path = std::env::temp_dir().join("stroma_engine_recover.log");
+        let _ = std::fs::remove_file(&path);
+        let expected = {
+            let mut e = Engine::open(&path, 1024).unwrap();
+            e.write_batch(vec![(0, add(1, 100, 20)), (0, add(1, 100, 21))])
+                .unwrap();
+            e.write(
+                0,
+                WriteKind::SetOne {
+                    subject: 1,
+                    predicate: 0,
+                    object: ObjKey::Node(9),
+                    valid_from: 0,
+                },
+            )
+            .unwrap();
+            e.sync().unwrap();
+            assert_eq!(e.durable_head(), 3);
+            e.snapshot()
+        };
+        // cold restart: rebuild from the WAL, state must match
+        let e2 = Engine::open(&path, 1024).unwrap();
+        assert_eq!(e2.unmerged(), 0);
+        assert_eq!(e2.snapshot(), expected);
+        assert_eq!(
+            query::point_many(&e2.snapshot(), 1, 100),
+            [ObjKey::Node(20), ObjKey::Node(21)].into_iter().collect()
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
