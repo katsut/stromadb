@@ -9,9 +9,53 @@
 use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
 use crate::fold::Snapshot;
+use crate::ivf::IvfPq;
 use crate::query;
 use crate::vector::VectorIndex;
 use crate::version::{ReadMode, VersionVector};
+
+/// Default IVF probe / re-rank depth for the IR read path (tuning is issue #23 / #26).
+const IR_NPROBE: usize = 16;
+const IR_RERANK_R: usize = 100;
+
+/// The vector backend the IR read path depends on — swappable under the frozen IR contract
+/// (`vector::VectorIndex` = exact oracle; `ivf::IvfPq` = production IVF-PQ + re-rank). `keep` combines
+/// authz + type and is applied *before* scoring (H4 scoped, no post-filter leak); `scope` is the
+/// seqno watermark (`Some` = strict indexed-prefix, `None` = fresh). Distances: smaller = nearer.
+pub trait AnnBackend {
+    fn ann_search(
+        &self,
+        q: &[f32],
+        k: usize,
+        scope: Option<u64>,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> Vec<(NodeId, f32)>;
+}
+
+impl AnnBackend for VectorIndex {
+    fn ann_search(
+        &self,
+        q: &[f32],
+        k: usize,
+        scope: Option<u64>,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> Vec<(NodeId, f32)> {
+        self.nearest_scoped(q, k, scope, keep)
+    }
+}
+
+impl AnnBackend for IvfPq {
+    fn ann_search(
+        &self,
+        q: &[f32],
+        k: usize,
+        scope: Option<u64>,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> Vec<(NodeId, f32)> {
+        // authz+type ride on `keep` (checked before scoring); exact re-rank recovers recall.
+        self.search_rerank(q, k, IR_NPROBE, IR_RERANK_R, scope, |_| true, keep)
+    }
+}
 
 /// The querying end-user principal (ABAC label bitmask). Unlabeled nodes are public.
 #[derive(Clone, Copy, Debug)]
@@ -76,10 +120,10 @@ fn cap(ids: &mut Vec<NodeId>, scores: &mut Vec<f32>, max_nodes: usize) {
 
 /// Evaluate a pipeline one-shot over the read state. authz is enforced at the source (scoped) and on
 /// every expanded node; the result is bounded by `max_nodes` and carries `vv` as its as_of.
-pub fn run(
+pub fn run<A: AnnBackend>(
     snapshot: &Snapshot,
     catalog: &Catalog,
-    vector: &VectorIndex,
+    vector: &A,
     pipeline: &Pipeline,
     principal: &Principal,
     vv: VersionVector,
@@ -100,9 +144,10 @@ pub fn run(
                 ReadMode::Strict => Some(vv.vector_watermark),
                 ReadMode::Fresh => None,
             };
-            let hits = vector.nearest_scoped(q, *k, scope, |n| {
+            let keep = |n: NodeId| {
                 authorized(catalog, principal, n) && catalog.node_type(n) == Some(*target_type)
-            });
+            };
+            let hits = vector.ann_search(q, *k, scope, &keep);
             let ids = hits.iter().map(|(n, _)| *n).collect();
             // score = relevance (higher = better).
             let scores = hits.iter().map(|(_, d)| 1.0 / (1.0 + d)).collect();
@@ -280,6 +325,85 @@ mod tests {
         };
         let t2 = run(&snap, &c, &vec, &pl, &p_yes, VersionVector::new(3, 3));
         assert!(t2.ids.contains(&2));
+    }
+
+    // Build an IvfPq backend over the same vectors as `setup`'s VectorIndex.
+    fn ivf_backend() -> IvfPq {
+        let vecs = vec![
+            (1u64, 0u64, vec![0.0f32, 0.0]),
+            (2, 1, vec![0.9, 0.0]),
+            (20, 2, vec![0.05, 0.0]),
+        ];
+        let sample: Vec<Vec<f32>> = vecs.iter().map(|(_, _, v)| v.clone()).collect();
+        let mut idx = IvfPq::new(2, 2, 2);
+        idx.train(&sample);
+        for (n, s, v) in &vecs {
+            idx.add(*n, *s, v, 0);
+        }
+        idx
+    }
+
+    #[test]
+    fn ivfpq_backend_matches_exact_through_ir() {
+        let (snap, c, vec) = setup();
+        let ivf = ivf_backend();
+        let person = c.field_id("Person").unwrap();
+        let wo = c.field_id("worked-on").unwrap();
+        let pl = Pipeline {
+            source: Source::TypeAnn {
+                q: vec![0.0, 0.0],
+                target_type: person,
+                k: 5,
+            },
+            transforms: vec![Transform::Expand { predicate: wo }],
+            max_nodes: 100,
+            mode: ReadMode::Fresh,
+        };
+        // exact oracle vs IVF-PQ+rerank must agree on the id set through the whole pipeline
+        let exact = run(&snap, &c, &vec, &pl, &everyone(), VersionVector::new(3, 3));
+        let real = run(&snap, &c, &ivf, &pl, &everyone(), VersionVector::new(3, 3));
+        let set = |t: &Traverser| {
+            t.ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(set(&exact), set(&real));
+        assert_eq!(set(&real), [10, 11].into_iter().collect());
+    }
+
+    #[test]
+    fn ivfpq_backend_scopes_authz_at_source() {
+        let (snap, mut c, _) = setup();
+        c.set_node_label(2, 3); // person 2 sensitive
+        let ivf = ivf_backend();
+        let person = c.field_id("Person").unwrap();
+        let pl = Pipeline {
+            source: Source::TypeAnn {
+                q: vec![0.9, 0.0], // nearest is person 2
+                target_type: person,
+                k: 5,
+            },
+            transforms: vec![],
+            max_nodes: 100,
+            mode: ReadMode::Fresh,
+        };
+        let p_no = Principal {
+            allowed_labels: 0b1,
+        };
+        assert!(
+            !run(&snap, &c, &ivf, &pl, &p_no, VersionVector::new(3, 3))
+                .ids
+                .contains(&2)
+        );
+        let p_yes = Principal {
+            allowed_labels: 0b1 | (1 << 3),
+        };
+        assert!(
+            run(&snap, &c, &ivf, &pl, &p_yes, VersionVector::new(3, 3))
+                .ids
+                .contains(&2)
+        );
     }
 
     #[test]

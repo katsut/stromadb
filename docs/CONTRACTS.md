@@ -27,8 +27,10 @@ IVM engine) change freely without touching the contract.
 - changelog backend (in-memory / **framed file-WAL now** → LSM/RocksDB/Speedb + rkyv + O_DIRECT)
 - vector index — **real IVF-PQ + exact re-rank landed** (`ivf.rs`; hot PQ codes 32× + cold raw re-rank
   tier). Measured SLO: filtered recall@10 ~1.0 @ type-sel 50% (rerank R=100), authz-on warm p99 0.78ms
-  (`examples/ann_slo.rs`). Exact `vector::VectorIndex` retained as reference/oracle. See
-  `spec/vector-index.md`. Swap into the query-IR `TopK` read path is pending.
+  (`examples/ann_slo.rs`) — **p99 measured with raw in RAM; raw=SSD + p99<2ms not yet jointly validated**.
+  Exact `vector::VectorIndex` retained as reference/oracle. **Wired into query-IR via the `AnnBackend`
+  trait** (`ir::run` is generic over the backend; IVF-PQ path tested for equivalence vs the exact
+  oracle). See `spec/vector-index.md`. Raw=SSD p99 re-measure (#19) and probe/rerank tuning (#23) pending.
 - IVM engine (recompute-and-diff → differential-dataflow, validated in `poc-rkyv-ivm`)
 - **durability failure model (H1)** — **file-WAL backend landed**: group-commit fsync, prefix-exact
   crash recovery, cold-start replay = RTO (0.81s @5M facts measured, 0 data loss;
