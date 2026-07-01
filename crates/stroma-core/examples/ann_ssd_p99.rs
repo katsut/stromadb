@@ -93,9 +93,12 @@ fn main() {
     let data = gen_vecs(N, 42, &ctr);
     let mut idx = IvfPq::new(DIM, NLIST, M);
     idx.train(&data[..TRAIN]);
-    for (i, v) in data.iter().enumerate() {
-        idx.add(i as u64, i as u64, v, (i % 2) as u32);
-    }
+    idx.add_batch(
+        data.iter()
+            .enumerate()
+            .map(|(i, v)| (i as u64, i as u64, v.clone(), (i % 2) as u32))
+            .collect(),
+    );
     println!("=== I2/#19 raw-tier p99: raw in RAM vs on SSD ({N} vec × {DIM}d, R={R}) ===");
 
     // write raw tier to a file (flat rows)

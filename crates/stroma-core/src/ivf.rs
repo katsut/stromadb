@@ -49,6 +49,37 @@ impl Rng {
     }
 }
 
+/// Map `f` over `items` across available CPUs (scoped threads — no external dep), order-preserving.
+/// Falls back to serial for small inputs. Used for the embarrassingly-parallel build hot paths
+/// (k-means assignment, per-vector assign+encode).
+fn par_map<T, U, F>(items: &[T], f: F) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+    F: Fn(&T) -> U + Sync,
+{
+    let n = items.len();
+    let threads = std::thread::available_parallelism()
+        .map(|x| x.get())
+        .unwrap_or(1)
+        .min(n)
+        .max(1);
+    if threads == 1 || n < 2048 {
+        return items.iter().map(&f).collect();
+    }
+    let chunk = n.div_ceil(threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|ch| s.spawn(|| ch.iter().map(&f).collect::<Vec<U>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    })
+}
+
 fn nearest_centroid(x: &[f32], centroids: &[Vec<f32>]) -> (usize, f32) {
     let mut best = 0usize;
     let mut best_d = f32::INFINITY;
@@ -71,10 +102,11 @@ fn kmeans(points: &[&[f32]], k: usize, iters: usize, rng: &mut Rng) -> Vec<Vec<f
     let mut centroids: Vec<Vec<f32>> = (0..k).map(|_| points[rng.below(n)].to_vec()).collect();
 
     for _ in 0..iters {
+        // assignment is the O(k·d) hot loop — parallelize it; accumulation is cheap and stays serial
+        let assigns = par_map(points, |&p| nearest_centroid(p, &centroids).0);
         let mut sums = vec![vec![0f32; d]; k];
         let mut counts = vec![0usize; k];
-        for p in points {
-            let (c, _) = nearest_centroid(p, &centroids);
+        for (p, &c) in points.iter().zip(&assigns) {
             for i in 0..d {
                 sums[c][i] += p[i];
             }
@@ -239,6 +271,27 @@ impl IvfPq {
         self.row_of.insert(node, (self.raw.len() / self.dim) as u32);
         self.raw.extend_from_slice(embedding);
         self.ntotal += 1;
+    }
+
+    /// Bulk-add embeddings. The per-vector assign + PQ-encode (the build hot path) runs in parallel
+    /// across CPUs; insertion into the inverted lists is serial. Equivalent to calling [`IvfPq::add`]
+    /// for each item in order. Panics on dimension mismatch or if the index is untrained.
+    pub fn add_batch(&mut self, items: Vec<(NodeId, u64, Vec<f32>, u32)>) {
+        assert!(!self.coarse.is_empty(), "index not trained");
+        let computed: Vec<(usize, Vec<u8>)> = {
+            let this = &*self; // immutable borrow for the parallel phase
+            par_map(&items, |(_, _, emb, _)| {
+                assert_eq!(emb.len(), this.dim, "embedding dimension mismatch");
+                let (cell, _) = nearest_centroid(emb, &this.coarse);
+                (cell, this.encode(emb))
+            })
+        };
+        for ((node, seqno, emb, label), (cell, code)) in items.into_iter().zip(computed) {
+            self.lists[cell].push(node, seqno, label, &code);
+            self.row_of.insert(node, (self.raw.len() / self.dim) as u32);
+            self.raw.extend_from_slice(&emb);
+            self.ntotal += 1;
+        }
     }
 
     /// Raw vector for a node (the cold re-rank tier).
@@ -504,6 +557,33 @@ mod tests {
         let (pq, rr) = (pq / queries.len() as f64, rr / queries.len() as f64);
         assert!(rr > pq, "rerank must beat pure PQ (pq={pq}, rerank={rr})");
         assert!(rr >= 0.9, "rerank recall@10 must reach the SLO (got {rr})");
+    }
+
+    #[test]
+    fn add_batch_matches_serial_add() {
+        let dim = 32;
+        let ctr = centers(80, dim, 9);
+        let data = clustered(2000, 3, &ctr, dim);
+        let mut a = IvfPq::new(dim, 32, 8);
+        a.train(&data);
+        let mut b = IvfPq::new(dim, 32, 8);
+        b.train(&data);
+        for (i, v) in data.iter().enumerate() {
+            a.add(i as NodeId, i as u64, v, (i % 3) as u32);
+        }
+        b.add_batch(
+            data.iter()
+                .enumerate()
+                .map(|(i, v)| (i as NodeId, i as u64, v.clone(), (i % 3) as u32))
+                .collect(),
+        );
+        // identical index → identical search results
+        let q = &data[7];
+        assert_eq!(
+            a.search_rerank(q, 10, 8, 100, None, |_| true, |_| true),
+            b.search_rerank(q, 10, 8, 100, None, |_| true, |_| true)
+        );
+        assert_eq!(a.len(), b.len());
     }
 
     #[test]

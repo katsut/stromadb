@@ -75,11 +75,14 @@ fn main() {
     let t = Instant::now();
     let mut idx = IvfPq::new(DIM, NLIST, M);
     idx.train(&data[..TRAIN_SAMPLE]);
-    for (i, v) in data.iter().enumerate() {
-        idx.add(i as u64, i as u64, v, (i % 2) as u32); // label = type here
-    }
+    idx.add_batch(
+        data.iter()
+            .enumerate()
+            .map(|(i, v)| (i as u64, i as u64, v.clone(), (i % 2) as u32)) // label = type here
+            .collect(),
+    );
     println!(
-        "build       : {:.1}s  (train {TRAIN_SAMPLE}, add {N}, nlist={})",
+        "build       : {:.1}s  (train {TRAIN_SAMPLE}, add_batch {N}, nlist={})",
         t.elapsed().as_secs_f64(),
         idx.nlist()
     );
