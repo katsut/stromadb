@@ -19,7 +19,7 @@ use stroma_core::live::LiveQueries;
 use stroma_core::query;
 use stroma_core::version::{ReadMode, VersionVector};
 
-const N: usize = 100_000; // initial docs
+const N: usize = 100_000; // set higher (e.g. 500_000) for the A1 representative-scale re-measure // initial docs
 const DIM: usize = 768;
 const M: usize = 96;
 const TRAIN: usize = 20_000;
