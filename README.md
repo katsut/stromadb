@@ -1,8 +1,8 @@
 # StromaDB
 
-**StromaDB** is an open-source, Rust, **no-LLM neuro-symbolic knowledge-graph core** for AI agents:
-it fuses **meaning (vectors) × structure (ontology/graph) × time (bitemporal)** so an agent can pull
-semantically-correct decision context in low-ms — over a graph that is updated by a live stream.
+**StromaDB** is an open-source, Rust **real-time GraphRAG engine optimized for LLMs**:
+it fuses **meaning (vectors) × structure (typed graph) × time (bitemporal)** so an LLM can retrieve
+relevant, structurally-correct context in low-ms — over a graph that is updated by a live stream.
 
 It targets the **bounded scale of a single organization** (per-org graph is bounded), which is what
 makes low-cost *and* high-performance achievable at once: the hot working set fits in memory, the
@@ -13,7 +13,7 @@ footprint is small, and idle tenants can scale to zero.
 
 ## Why
 
-Real-time, agent-driven decisions need a graph that ingests a stream instantly and answers
+Real-time LLM retrieval needs a graph that ingests a stream instantly and answers
 **type-aware hybrid** queries cheaply. Existing options don't fit this shape:
 
 - Vector DBs are **type-blind** — they return semantically near but structurally wrong results
@@ -22,19 +22,19 @@ Real-time, agent-driven decisions need a graph that ingests a stream instantly a
 - `Postgres + pgvector` splits meaning from structure across separate I/O paths and contends on
   stream updates.
 
-StromaDB is built for the AI-agent case: stream-native, neuro-symbolic, low-cost, bounded-scale.
+StromaDB is built for LLM retrieval: stream-native, vector + typed-graph, low-cost, bounded-scale.
 
 ## Core capabilities
 
-- **Type-aware hybrid search** — ANN candidates filtered/reranked by ontology type, so disjoint-type
-  mis-fusion is rejected (the differentiator).
+- **Type-aware hybrid search** — ANN candidates filtered/reranked by graph type, so disjoint-type
+  mis-fusion is rejected.
 - **Stream ingest, no write stalls** — append-only changelog; explicit backpressure under overload.
 - **Composable operator query IR** — `point / type-ANN / expand / temporal / filter / score-rank`
   composed as a pipeline; **one algebra** evaluates both one-shot queries and incrementally-maintained
   Live Queries (IVM).
 - **Bitemporal** — valid-time + transaction-time; `now / as-of / ever / overlap` time scopes.
-- **No internal LLM** — a deterministic substrate; the LLM is always the caller. Agent-written
-  summaries are stored with provenance, kept distinct from asserted facts.
+- **No internal model** — a deterministic retrieval/query layer; the LLM is always the caller.
+  Model-written summaries are stored with provenance, kept distinct from asserted facts.
 - **Self-hostable single-node engine** under a source-available license.
 
 See **[SPEC.md](SPEC.md)** for the capability/constraint contract,

@@ -11,11 +11,11 @@ is CAP-1..7 and CAP-10..12.
 - **CAP-1 — High-frequency stream ingest, no write stalls.** Ingest org events/activity/knowledge
   into the graph in real time, append-only. Under sustained load no hard write stall occurs; overload
   returns explicit backpressure (never silent OOM/stop).
-- **CAP-2 — Co-located symbolic core for low-I/O local traversal.** Type/attributes + adjacency
+- **CAP-2 — Co-located typed core for low-I/O local traversal.** Type/attributes + adjacency
   skeleton are logically co-located so point lookups and 1–2 hop traversals resolve in few I/Os.
   Vectors live in a *separate* quantized index (nodes hold a pointer; see CAP-3).
-- **CAP-3 — Type-aware hybrid search (the differentiator).** ANN candidates are filtered/reranked by
-  ontology type/constraints, returning only semantically-coherent results (disjoint-type mis-fusion
+- **CAP-3 — Type-aware hybrid search.** ANN candidates are filtered/reranked by
+  graph type/constraints, returning only semantically-coherent results (disjoint-type mis-fusion
   rejected), cheaply and deterministically on the hot path. Recall completeness =
   ANN(indexed) ∪ brute-force(bounded un-indexed-but-embedded tail), closing index/structure split-brain.
 - **CAP-4 — Write-append / read-merge.** Partial updates are appended without read-modify-write and
@@ -39,9 +39,9 @@ is CAP-1..7 and CAP-10..12.
 - **CAP-11 — Collaborative abstraction layer.** Store caller-generated summaries/abstractions as graph
   data (provenance-stamped, distinct from asserted facts) and cheaply detect *structural staleness*
   when the source subgraph changes.
-- **CAP-12 — Absence detection (expected-but-absent).** Against the declarative ontology and opt-in
+- **CAP-12 — Absence detection (expected-but-absent).** Against the declared schema and opt-in
   completeness profiles, detect and surface facts/relations that *should* exist but don't
-  (negative knowledge) — no-LLM, symbolic, post-authz. Scope: absence only.
+  (negative knowledge) — deterministic, structural, post-authz. Scope: absence only.
 
 ## Constraints
 
@@ -49,12 +49,12 @@ is CAP-1..7 and CAP-10..12.
   The physical bound is an *envelope* (total facts × degree distribution × vector dim/count ×
   concurrent Live Queries × hot working-set) drawn against a per-tenant cost budget. Over-ceiling →
   degrade (latency) / shard / reject — never silently melt.
-- **No internal LLM (deterministic substrate).** No model inference inside the engine; the LLM is
+- **No internal model (deterministic engine).** No model inference inside the engine; the LLM is
   always the caller. The engine stores/serves/staleness-checks semantic summaries.
 - **Physical.** Rust + rkyv zero-copy. Writes = LSM (RocksDB/Speedb; O_DIRECT). Materialization =
   Lance V2 columnar (cold tier). Co-location is *logical* (io_uring coalescing), physical is separate.
   Every feature states whether its state is volatile (IVM) or durable (changelog).
-- **Node physical layout.** Symbolic core (type/hot props/adjacency skeleton) co-located and
+- **Node physical layout.** Typed core (type/hot props/adjacency skeleton) co-located and
   cache-resident; **vectors in a separate quantized index (IVF-PQ/DiskANN) + pointer**; high-degree
   hubs spill adjacency; fragment by community.
 - **Query planning.** Macro plan is the agent's; the engine is a thin micro-planner (operator fusion,
@@ -70,7 +70,7 @@ is CAP-1..7 and CAP-10..12.
   source labels.
 - **Embeddings.** Pre-computed and received (the engine does not embed). Model/dim changes run a new
   versioned index in parallel; mixed versions are rejected by index version.
-- **Operational completeness.** DR of the authoritative subset (changelog + ontology catalog +
+- **Operational completeness.** DR of the authoritative subset (changelog + type catalog +
   received embeddings) is in scope; derived stores rebuild on restore. Migration/backfill =
   snapshot(LSN) → map → bulk fold → CDC from that LSN. Observability = per-primitive SLO metrics +
   agent-pipeline traces + quality proxies; deterministic changelog replay for reproduction.
@@ -78,8 +78,8 @@ is CAP-1..7 and CAP-10..12.
 ## Non-goals
 
 - Giant-enterprise bespoke deployments; web-scale (billion-node) graphs.
-- Real-time bidirectional neuro-symbolic inference on the hot path (batch only).
-- A full ontology reasoner (OWL/description-logic); only minimal type/constraint validation.
+- Real-time bidirectional inference on the hot path (batch only).
+- A full schema reasoner (OWL/description-logic); only minimal type/constraint validation.
 - Heavy multi-tenant isolation machinery; heavy cost-based query optimizers.
 - General-purpose OLTP RDBMS / batch-analytics DWH replacement; multi-region distribution (v1).
 

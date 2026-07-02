@@ -1,7 +1,7 @@
 # Spec — Vector index & type-aware hybrid search
 
 > Contract for `stroma-core::vector` and `stroma-core::hybrid`. Companion HOW:
-> `../architecture/hybrid-search.md`. Status: implemented (Epic 3). The differentiator (CAP-3).
+> `../architecture/hybrid-search.md`. Status: implemented (Epic 3). Type-aware hybrid (CAP-3).
 
 ## VectorIndex
 

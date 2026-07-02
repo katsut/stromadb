@@ -1,7 +1,7 @@
-//! Type-aware hybrid search (CAP-3, the differentiator) + version-vector read modes (CAP-3 recall
+//! Type-aware hybrid search (CAP-3) + version-vector read modes (CAP-3 recall
 //! completeness, R-3).
 //!
-//! Plain ANN is type-blind: it returns vector-near results regardless of ontology type, so a query
+//! Plain ANN is type-blind: it returns vector-near results regardless of graph type, so a query
 //! for type T is polluted by semantically-near wrong-type distractors. Type-aware hybrid filters the
 //! ANN candidates by type (0 type violations). [`search`] additionally resolves the vector axis of a
 //! version vector: **strict** reads the indexed prefix only; **fresh** reads indexed ∪ brute-force
@@ -35,7 +35,7 @@ pub fn type_aware(
 
 /// Type-aware hybrid at a pinned version vector. `Strict` searches the indexed prefix
 /// (`seqno < vv.vector_watermark`) only; `Fresh` searches indexed ∪ brute-force tail (split-brain
-/// closed). Both apply the ontology-type filter.
+/// closed). Both apply the graph-type filter.
 pub fn search(
     index: &VectorIndex,
     catalog: &Catalog,

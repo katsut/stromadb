@@ -1,9 +1,10 @@
-//! The ontology catalog: Field-ID interning + predicate/type definitions + minimal constraint
+//! The type catalog: Field-ID interning + predicate/type definitions + minimal constraint
 //! validation at the ingest boundary (conceptual-model §1, §4; SPEC CAP-6).
 //!
-//! The catalog is the *declarative* half of the ontology: vocabulary (predicates, types) and
-//! structural rules (cardinality, relationship properties, domain/range). It does not reason; it
-//! validates the minimum (domain/range types, predicate existence). Full reasoning is the caller's.
+//! The catalog is the *declarative* half of the schema — a lightweight ontology: vocabulary
+//! (predicates, types) and structural rules (cardinality, relationship properties, domain/range),
+//! deliberately without axioms or a reasoner. It validates the minimum (domain/range types,
+//! predicate existence). Full reasoning is the caller's.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -121,7 +122,7 @@ fn value_type(v: &Value) -> ValueType {
     }
 }
 
-/// The ontology catalog. Predicates/types are interned and registered; node→type assignments enable
+/// The type catalog. Predicates/types are interned and registered; node→type assignments enable
 /// domain/range validation. Bounded by design (tens–hundreds of predicates).
 #[derive(Default)]
 pub struct Catalog {

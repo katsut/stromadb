@@ -1,4 +1,4 @@
-# Architecture — Data model & ontology catalog
+# Architecture — Data model & type catalog
 
 > Design and rationale for `stroma-core`'s Fact model + catalog. Companion WHAT: `../spec/data-model.md`.
 > Overview: `../ARCHITECTURE.md` §1, §4, §8. Status: implemented (Epic 1, Story 1.1).
@@ -18,9 +18,11 @@ evolution (CAP-6): a new predicate is a new interned id, not a migration.
 
 ## Minimal validation, not a reasoner
 
-Validation at the ingest boundary checks only what is cheap and load-bearing: predicate existence and
-domain/range types. It deliberately does **not** do ontology reasoning — that is relocated to the
-caller (no-LLM substrate). Validation is also **open-world**: unknown node types pass; only *known*
+The catalog is what the knowledge-representation literature calls a *lightweight ontology*: entity
+types and predicates with domain/range, cardinality, and relation properties — but deliberately no
+axioms and no reasoner. Validation at the ingest boundary checks only what is cheap and load-bearing:
+predicate existence and domain/range types. It deliberately does **not** do schema reasoning — that
+is relocated to the caller (no internal model). Validation is also **open-world**: unknown node types pass; only *known*
 mismatches fail. "What should exist but doesn't" is a separate, opt-in concern (absence detection,
 CAP-12), not a validation error.
 

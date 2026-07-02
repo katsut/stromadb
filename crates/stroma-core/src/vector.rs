@@ -1,6 +1,6 @@
 //! Vector index: pre-computed embeddings + nearest-neighbour search.
 //!
-//! Embeddings are **received** (the engine never embeds — no-LLM substrate). Each carries the
+//! Embeddings are **received** (the engine never embeds — no internal model). Each carries the
 //! changelog `seqno` at which it became available; the index `watermark` is how far it has been
 //! indexed. ANN (the production quantized index, `ivf::IvfPq`) only "sees" the indexed prefix
 //! `seqno < watermark`; the un-indexed tail is brute-forced in fresh reads (closes split-brain).
@@ -101,7 +101,7 @@ impl VectorIndex {
 
     /// k nearest among entries with `seqno < max_seqno` (if `Some`) — the indexed-prefix view — or
     /// all entries (`None`) — the fresh view (indexed ∪ brute-force tail). `keep` post-filters
-    /// (e.g. by ontology type). Deterministic tie-break by NodeId.
+    /// (e.g. by graph type). Deterministic tie-break by NodeId.
     pub fn nearest_scoped(
         &self,
         q: &[f32],

@@ -1,4 +1,4 @@
-# Spec — Data model & ontology catalog
+# Spec — Data model & type catalog
 
 > Contract for the `stroma-core` data model and catalog (crate `crates/stroma-core`).
 > Companion HOW: `../architecture/data-model.md`. Status: implemented (Epic 1, Story 1.1).
@@ -27,9 +27,11 @@ Fact = ⟨ subject, predicate, object, valid_time, transaction_time, provenance,
 - Queries default to `Asserted`; `Derived` (LLM/hypothesis) is returned only on explicit request.
 - `transaction_time` is owned by the changelog; producers leave it 0.
 
-## Ontology catalog (declarative half)
+## Type catalog (declarative half)
 
-Vocabulary + structural rules. Bounded by design (tens–hundreds of predicates).
+Vocabulary + structural rules — in effect a *lightweight ontology* (entity types, predicates with
+domain/range, cardinality, relation properties), deliberately **without** axioms or a reasoner.
+Bounded by design (tens–hundreds of predicates).
 
 - **Field-ID interning** — every type/predicate name interns to a stable `FieldId`. Names ↔ ids are
   1:1 and stable for the catalog's lifetime.
@@ -56,7 +58,7 @@ Vocabulary + structural rules. Bounded by design (tens–hundreds of predicates)
      (`RangeValueMismatch`); a `Node` object is `ExpectedValueObject`.
 
 **Out of scope here** (deferred to other components): cardinality enforcement (it is a multi-fact
-property → the **fold**, Story 1.2), full ontology reasoning (relocated to the caller), and dynamic
+property → the **fold**, Story 1.2), full schema reasoning (relocated to the caller), and dynamic
 schema-evolution lease semantics (CAP-6).
 
 ## Invariants

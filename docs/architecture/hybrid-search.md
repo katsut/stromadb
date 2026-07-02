@@ -5,7 +5,7 @@
 
 ## The failure mode it fixes
 
-Embeddings cluster by *semantics*; ontology types cut *across* those clusters. So a pure vector
+Embeddings cluster by *semantics*; graph types cut *across* those clusters. So a pure vector
 neighbourhood mixes types — a "Python" skill, a doc about Python, and a person named for it all sit
 near each other. Plain ANN returns that mix; for a query that wants type T, the wrong-type neighbours
 are noise (and silent: nothing flags them). This disjoint-type mis-fusion is the concrete thing CAP-3
@@ -14,7 +14,7 @@ targets, and the Phase 0 quality spike (`poc-quality-hybrid`) showed it is large
 
 ## The fix: filter ANN candidates by type
 
-Type-aware search is ANN + an ontology-type filter applied to the candidates (via the catalog's
+Type-aware search is ANN + an graph-type filter applied to the candidates (via the catalog's
 node→type map). Because the filter is exact, type-violations are **0 by construction**; recall rises
 because relevant type-T items are no longer evicted from top-k by closer wrong-type distractors. The
 "symbolic" half (types) makes the "neuro" half (vectors) correct — cheaply, deterministically, no ML
@@ -37,5 +37,5 @@ Two things this story defers because they need the cross-store version vector:
   both plug into.
 
 ## Embeddings are received
-The DB does not embed (no-LLM). Vectors are produced caller/Vesicle-side and inserted; model/dim
+The DB does not embed (no internal model). Vectors are produced caller/Vesicle-side and inserted; model/dim
 changes run a new versioned index in parallel and switch over (mixed versions rejected by version).
