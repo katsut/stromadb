@@ -14,6 +14,25 @@ pub fn point_one(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option
     snap.one.get(&(subject, predicate)).cloned().flatten()
 }
 
+/// Valid-time as-of read of a cardinality-One `(subject, predicate)`: the value in effect at
+/// valid-time `at`. Among the retained version rows with `valid_from <= at`, the one with the
+/// greatest `valid_from` wins (ties broken by the later write = a retroactive correction). Returns
+/// `None` if nothing was valid yet at `at`, or the effective version closed the value. This is
+/// *valid-time* as-of (bitemporal, single-valued); transaction-time as-of is the version-vector pin.
+pub fn point_one_asof(
+    snap: &Snapshot,
+    subject: NodeId,
+    predicate: FieldId,
+    at: i64,
+) -> Option<ObjKey> {
+    snap.one_history
+        .get(&(subject, predicate))?
+        .iter()
+        .filter(|(_ok, _obj, valid_from)| *valid_from <= at)
+        .max_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)))
+        .and_then(|(_ok, obj, _vf)| obj.clone())
+}
+
 /// Present element set of a cardinality-Many `(subject, predicate)` (empty if absent).
 pub fn point_many(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTreeSet<ObjKey> {
     snap.many
@@ -106,6 +125,41 @@ mod tests {
             },
         ];
         fold(&ops).observe()
+    }
+
+    #[test]
+    fn valid_time_as_of() {
+        // One-predicate (1, 5) history incl. a retroactive correction (written last, mid valid_from).
+        let ops = vec![
+            Op::SetOne {
+                subject: 1,
+                predicate: 5,
+                object: ObjKey::Node(100),
+                valid_from: 100,
+                ok: ok(0),
+            },
+            Op::SetOne {
+                subject: 1,
+                predicate: 5,
+                object: ObjKey::Node(200),
+                valid_from: 200,
+                ok: ok(1),
+            },
+            Op::SetOne {
+                subject: 1,
+                predicate: 5,
+                object: ObjKey::Node(150),
+                valid_from: 150,
+                ok: ok(2),
+            },
+        ];
+        let s = fold(&ops).observe();
+        assert_eq!(point_one_asof(&s, 1, 5, 50), None); // nothing valid yet
+        assert_eq!(point_one_asof(&s, 1, 5, 120), Some(ObjKey::Node(100)));
+        assert_eq!(point_one_asof(&s, 1, 5, 160), Some(ObjKey::Node(150))); // retroactive correction wins
+        assert_eq!(point_one_asof(&s, 1, 5, 250), Some(ObjKey::Node(200)));
+        // "now" (current functional value) = latest-written = the retroactive 150.
+        assert_eq!(point_one(&s, 1, 5), Some(ObjKey::Node(150)));
     }
 
     #[test]

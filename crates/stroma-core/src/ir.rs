@@ -8,7 +8,7 @@
 
 use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
-use crate::fold::Snapshot;
+use crate::fold::{ObjKey, Snapshot};
 use crate::ivf::IvfPq;
 use crate::query;
 use crate::vector::VectorIndex;
@@ -91,12 +91,83 @@ pub enum Source {
     },
 }
 
+/// Integer comparison for value filters.
+#[derive(Clone, Copy, Debug)]
+pub enum Cmp {
+    Lt,
+    Le,
+    Eq,
+    Ne,
+    Ge,
+    Gt,
+}
+
+impl Cmp {
+    fn test(self, a: i64, b: i64) -> bool {
+        match self {
+            Cmp::Lt => a < b,
+            Cmp::Le => a <= b,
+            Cmp::Eq => a == b,
+            Cmp::Ne => a != b,
+            Cmp::Ge => a >= b,
+            Cmp::Gt => a > b,
+        }
+    }
+}
+
+/// A predicate over a single node, used by [`Transform::Filter`] to keep/drop traverser members.
+pub enum Filter {
+    /// Keep nodes whose catalog type equals `ty`.
+    HasType { ty: FieldId },
+    /// Keep nodes that currently have any value for `predicate` (cardinality-One).
+    HasValue { predicate: FieldId },
+    /// Keep nodes whose current cardinality-One Int value compares to `value`.
+    IntCmp {
+        predicate: FieldId,
+        op: Cmp,
+        value: i64,
+    },
+    /// Keep nodes whose cardinality-One Int value **as of valid-time `as_of`** compares to `value`.
+    IntCmpAsOf {
+        predicate: FieldId,
+        op: Cmp,
+        value: i64,
+        as_of: i64,
+    },
+}
+
+impl Filter {
+    fn keep(&self, snapshot: &Snapshot, catalog: &Catalog, n: NodeId) -> bool {
+        match self {
+            Filter::HasType { ty } => catalog.node_type(n) == Some(*ty),
+            Filter::HasValue { predicate } => query::point_one(snapshot, n, *predicate).is_some(),
+            Filter::IntCmp {
+                predicate,
+                op,
+                value,
+            } => {
+                matches!(query::point_one(snapshot, n, *predicate), Some(ObjKey::Int(v)) if op.test(v, *value))
+            }
+            Filter::IntCmpAsOf {
+                predicate,
+                op,
+                value,
+                as_of,
+            } => {
+                matches!(query::point_one_asof(snapshot, n, *predicate, *as_of), Some(ObjKey::Int(v)) if op.test(v, *value))
+            }
+        }
+    }
+}
+
 /// Pipeline transforms.
 pub enum Transform {
     /// 1-hop expand over `predicate` (structural).
     Expand { predicate: FieldId },
     /// Keep the top-k by current score.
     TopK { k: usize },
+    /// Keep only members satisfying a per-node predicate (type / value / valid-time value).
+    Filter(Filter),
 }
 
 /// A composed pipeline submitted for one-shot evaluation.
@@ -184,6 +255,18 @@ pub fn run<A: AnnBackend>(
                 ids = order.iter().map(|&i| ids[i]).collect();
                 scores = order.iter().map(|&i| scores[i]).collect();
             }
+            Transform::Filter(f) => {
+                let mut ni = Vec::new();
+                let mut ns = Vec::new();
+                for (i, &n) in ids.iter().enumerate() {
+                    if f.keep(snapshot, catalog, n) {
+                        ni.push(n);
+                        ns.push(scores[i]);
+                    }
+                }
+                ids = ni;
+                scores = ns;
+            }
         }
         cap(&mut ids, &mut scores, pipeline.max_nodes);
     }
@@ -198,7 +281,7 @@ pub fn run<A: AnnBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{Cardinality, Range, RelProps};
+    use crate::catalog::{Cardinality, Range, RelProps, ValueType};
     use crate::fold::{ObjKey, Op, OrderKey, fold};
 
     fn ok(seq: u64) -> OrderKey {
@@ -270,6 +353,105 @@ mod tests {
         Principal {
             allowed_labels: u32::MAX,
         }
+    }
+
+    #[test]
+    fn filter_by_type_value_and_valid_time() {
+        use std::collections::BTreeSet;
+        let mut c = Catalog::new();
+        let person = c.register_type("Person");
+        let age = c.register_predicate(
+            "age",
+            Cardinality::One,
+            RelProps::default(),
+            person,
+            Range::Value(ValueType::Int),
+        );
+        for n in [1u64, 2, 3] {
+            c.set_node_type(n, person);
+        }
+        // node 5 has no type (a non-Person); node 2's age is retroactively 41 as of valid-time 100.
+        let snap = fold(&[
+            Op::SetOne {
+                subject: 1,
+                predicate: age,
+                object: ObjKey::Int(30),
+                valid_from: 0,
+                ok: ok(0),
+            },
+            Op::SetOne {
+                subject: 2,
+                predicate: age,
+                object: ObjKey::Int(40),
+                valid_from: 0,
+                ok: ok(1),
+            },
+            Op::SetOne {
+                subject: 3,
+                predicate: age,
+                object: ObjKey::Int(50),
+                valid_from: 0,
+                ok: ok(2),
+            },
+            Op::SetOne {
+                subject: 2,
+                predicate: age,
+                object: ObjKey::Int(41),
+                valid_from: 100,
+                ok: ok(3),
+            },
+        ])
+        .observe();
+        let vec = VectorIndex::new(2);
+        let ids = |transforms: Vec<Transform>| -> BTreeSet<u64> {
+            let pl = Pipeline {
+                source: Source::Point {
+                    subjects: vec![1, 2, 3, 5],
+                },
+                transforms,
+                max_nodes: 100,
+                mode: ReadMode::Fresh,
+            };
+            run(&snap, &c, &vec, &pl, &everyone(), VersionVector::new(4, 0))
+                .ids
+                .into_iter()
+                .collect()
+        };
+
+        // type filter drops the non-Person node 5
+        assert_eq!(
+            ids(vec![Transform::Filter(Filter::HasType { ty: person })]),
+            [1, 2, 3].into_iter().collect()
+        );
+        // current value filter: age >= 40 → {2, 3}
+        assert_eq!(
+            ids(vec![Transform::Filter(Filter::IntCmp {
+                predicate: age,
+                op: Cmp::Ge,
+                value: 40
+            })]),
+            [2, 3].into_iter().collect()
+        );
+        // valid-time as-of 50: node 2's age was still 40 (41 only valid from 100) → only {3}
+        assert_eq!(
+            ids(vec![Transform::Filter(Filter::IntCmpAsOf {
+                predicate: age,
+                op: Cmp::Ge,
+                value: 41,
+                as_of: 50
+            })]),
+            [3].into_iter().collect()
+        );
+        // valid-time as-of 150: node 2's age is 41 → {2, 3}
+        assert_eq!(
+            ids(vec![Transform::Filter(Filter::IntCmpAsOf {
+                predicate: age,
+                op: Cmp::Ge,
+                value: 41,
+                as_of: 150
+            })]),
+            [2, 3].into_iter().collect()
+        );
     }
 
     #[test]
