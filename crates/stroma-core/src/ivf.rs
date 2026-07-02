@@ -426,7 +426,7 @@ impl IvfPq {
             }
             let node = c.nodes[i];
             if !keep(node) {
-                continue; // ontology type / arbitrary filter
+                continue; // graph type / arbitrary filter
             }
             let code = &c.codes[i * self.m..(i + 1) * self.m];
             out.push((self.adc_score(table, code), node));

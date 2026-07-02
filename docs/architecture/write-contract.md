@@ -5,7 +5,7 @@
 
 ## Why this seam exists (and why it's the only one)
 
-Ontology *quality* (whether a good mapping was authored — the B2/self-serve question) does not change
+Schema *quality* (whether a good mapping was authored) does not change
 the DB's *design*: the DB consumes a predicate catalog + a stream of facts regardless of who authored
 them. The one place ETL realities actually meet the DB is the **write interface** — how source
 changes are chunked, and how a change becomes a fold op ("diff reflection"). Freezing this contract

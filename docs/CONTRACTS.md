@@ -14,7 +14,7 @@ IVM engine) change freely without touching the contract.
 | Contract | Spec | Frozen invariants (v1) |
 |---|---|---|
 | **Fact model** | `spec/data-model.md` | `Fact=⟨s,p,o,valid-time,tx-time,provenance,confidence⟩`; `Object=Node\|Value`; valid-time open (`to=None`); provenance `Asserted\|Derived`; `transaction_time` owned by the changelog |
-| **Ontology catalog** | `spec/data-model.md` | Field-ID interning stable; predicate `{cardinality, rel-props, domain, range}`; minimal ingest validation is open-world (only known mismatches fail) |
+| **Type catalog** | `spec/data-model.md` | Field-ID interning stable; predicate `{cardinality, rel-props, domain, range}`; minimal ingest validation is open-world (only known mismatches fail) |
 | **Fold semantics** | `spec/fold.md` | per-(subject,predicate) join-semilattice; One→LWW-Register+history, Many→OR-Set, hard-delete=max-floor; `OrderKey=(tx,source,seq)` must be globally unique |
 | **Changelog interface** | `spec/changelog.md` | `append`/`append_batch`/`replay(_range)`/watermark/backpressure; seqno = version authority; replay is a pure function of the log; **durable mode `open`/`sync`/`durable_head` — record durable iff `sync` returned Ok; recovery prefix-exact (torn tail dropped via `[len][crc]` frame)** |
 | **Write contract (DB↔ETL)** | `spec/write-contract.md` | `WriteKind` vocabulary; `append_batch` atomic w.r.t. backpressure; `retract_edge` resolves OR-Set tags (ETL names the edge) |

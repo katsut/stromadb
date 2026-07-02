@@ -1,5 +1,5 @@
-//! Differentiation SLO probe on the real IVF-PQ index at ~A1 representative scale.
-//! Checks the locked DONE SLO differentiation leg: filtered recall@10 ≥ 0.9 @ type-selectivity 50%,
+//! Hybrid-search SLO probe on the real IVF-PQ index at ~A1 representative scale.
+//! Checks the locked DONE SLO hybrid-search leg: filtered recall@10 ≥ 0.9 @ type-selectivity 50%,
 //! and authz-on warm hybrid p99 < 2ms. Also reports PQ compression (the A1 RAM load-bearing claim)
 //! and recall-completeness with a bounded tail (H2).
 //!
@@ -66,7 +66,7 @@ fn main() {
     let k = 10;
     let is_type = |i: usize| i.is_multiple_of(2); // target type = 50% selectivity
 
-    println!("=== differentiation SLO — real IVF-PQ ({N} vec × {DIM}d, type-sel 50%) ===");
+    println!("=== hybrid-search SLO — real IVF-PQ ({N} vec × {DIM}d, type-sel 50%) ===");
     let t = Instant::now();
     let ctr = centers();
     let data = gen_vecs(N, 42, &ctr);

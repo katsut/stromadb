@@ -8,7 +8,7 @@
 ## Role
 
 The received-embedding store + approximate nearest-neighbour search. Embeddings are **received**
-(the engine never embeds — no-LLM substrate); each carries the changelog `seqno` it became available
+(the engine never embeds — no internal model); each carries the changelog `seqno` it became available
 at and an authz `label`. Search returns `(node, distance)` top-k under three orthogonal scopes.
 
 ## Two tiers
@@ -43,7 +43,7 @@ of a query, not scanned.
 - **authz (H4)**: `allowed_label` is checked *before* a posting is scored — unauthorized vectors are
   never distance-computed, so neither timing nor completeness leaks their existence (scoped, not
   shared-index + post-filter).
-- **type/predicate (`keep`)**: ontology-type or arbitrary node filter.
+- **type/predicate (`keep`)**: graph-type or arbitrary node filter.
 
 ## Invariants
 - A posting failing `max_seqno`, `allowed_label`, or `keep` is never scored and never returned.
@@ -53,7 +53,7 @@ of a query, not scanned.
   never happens.
 - Deterministic tie-break by NodeId; deterministic training (fixed-seed k-means).
 
-## Measured (DONE SLO differentiation leg — `examples/ann_slo.rs`, 200K×768, type-sel 50%)
+## Measured (DONE SLO hybrid-search leg — `examples/ann_slo.rs`, 200K×768, type-sel 50%)
 - filtered recall@10: pure-PQ ~0.38 → **+rerank(R=100) ~0.99–1.0** (SLO ≥ 0.9 ✅).
 - warm hybrid **p99 = 0.78 ms** with authz ON + type filter + rerank (SLO < 2 ms ✅); p50 0.41 ms.
 - compression **32×** (hot codes vs raw).

@@ -4,7 +4,7 @@ Core design of the StromaDB engine. Companion to `../SPEC.md`. Technical scope o
 
 The load-bearing technical bets below were validated in Phase 0 via throwaway kill-switch spikes
 (single-algebra ownership, fold determinism, open-loop warm latency, cross-store snapshot
-consistency, integrated tail, and the type-aware-hybrid quality differentiator).
+consistency, integrated tail, and the type-aware-hybrid quality).
 
 ## 1. Data model — Fact-centric
 
@@ -57,12 +57,12 @@ consistency, integrated tail, and the type-aware-hybrid quality differentiator).
   one engine (validated).
 - Macro planning (which questions, in what order) is the agent's; intelligence is caller-side.
 
-## 6. Neuro-symbolic hybrid (CAP-3)
+## 6. Type-aware hybrid (CAP-3)
 
 - Vectors are pre-computed and received, stored in a separate quantized index + pointer.
-- **Type-aware hybrid**: ANN candidates are filtered/reranked by ontology type/constraints. On a
+- **Type-aware hybrid**: ANN candidates are filtered/reranked by graph type/constraints. On a
   constructed benchmark this returns dramatically more correct results than plain ANN with ~zero
-  type-violations — the differentiation. "symbolic" = the two-part ontology (§8).
+  type-violations. The "typed" half is the two-part schema (§8).
 
 ## 7. Cross-store consistency (the deepest risk, validated)
 
@@ -75,15 +75,17 @@ consistency, integrated tail, and the type-aware-hybrid quality differentiator).
 - An append-only log of immutable chunks gives **lock-free reads**, so concurrent ingest does not
   stall reads.
 
-## 8. Ontology — two parts
+## 8. Typed graph — two parts
 
 | Half | Where | Content |
 |---|---|---|
 | **Declarative** | DB | predicates, cardinality, properties, types, valid-time policy, embeddings — vocabulary + structural rules + *expectations* (completeness, CAP-12) |
 | **Procedural** | Caller (LLM) | decision recipes (how predicates are composed into a judgment) |
 
-The engine holds only minimal constraint validation (domain/range, cardinality); full reasoning is
-relocated to the caller (no-LLM principle).
+The declarative half amounts to a lightweight ontology (types, domain/range, cardinality, relation
+properties) — deliberately without axioms or a reasoner. The engine holds only minimal constraint
+validation (domain/range, cardinality); full reasoning is relocated to the caller (no-internal-model
+principle).
 
 ## 9. Access control
 
@@ -94,7 +96,7 @@ relocated to the caller (no-LLM principle).
 
 ## 10. Operational
 
-- **DR**: continuously back up the authoritative input (changelog + ontology catalog + received
+- **DR**: continuously back up the authoritative input (changelog + type catalog + received
   embeddings) + WAL fsync + snapshot/PITR; rebuild derived stores on restore.
 - **Migration/backfill**: snapshot(LSN) → map → bulk fold → CDC from that LSN (gap/dup-free cutover).
 - **Observability**: per-primitive p50/p99, backpressure rate, cache hit-rate, un-merged N, IVM

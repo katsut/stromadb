@@ -1,7 +1,7 @@
 //! #23: nprobe × (recall, p99) operating-point curve on *harder* data (heavily overlapping clusters ≈
 //! a continuous manifold), where nprobe actually drives recall — unlike the well-separated synthetic
 //! where nprobe=1 already suffices. Finds the minimum nprobe reaching recall@10 ≥ 0.9 and its warm p99,
-//! deciding the differentiation operating point (recall≥0.9 AND p99<2ms).
+//! deciding the operating point (recall≥0.9 AND p99<2ms).
 //!
 //! Run: `cargo run --release --example ann_nprobe_curve -p stroma-core`
 

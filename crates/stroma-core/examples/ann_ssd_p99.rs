@@ -1,5 +1,5 @@
 //! I2 (#19): re-rank p99 when the raw tier lives on SSD instead of RAM — the decisive integration-leg
-//! measurement. The differentiation p99 (0.78ms) was measured with raw in RAM; here we move raw to a
+//! measurement. The hybrid-search p99 (0.78ms) was measured with raw in RAM; here we move raw to a
 //! file and re-rank by `pread`, in three conditions:
 //!   1. raw in RAM        (baseline = IvfPq::search_rerank)
 //!   2. raw on file, page-cache WARM
