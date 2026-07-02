@@ -351,13 +351,28 @@ impl IvfPq {
         table
     }
 
+    /// ADC score = Σ_j table[j·ksub + code_j]. The loop is gather-bound (a table lookup per code
+    /// byte); NEON has no gather, so the win is instruction-level parallelism — four independent
+    /// accumulators break the add dependency chain and let loads pipeline, and `chunks_exact`
+    /// removes per-element bounds checks.
     #[inline]
     fn adc_score(&self, table: &[f32], code: &[u8]) -> f32 {
-        let mut s = 0f32;
-        for (j, &c) in code.iter().enumerate() {
-            s += table[j * self.pq_ksub + c as usize];
+        let ksub = self.pq_ksub;
+        let (mut s0, mut s1, mut s2, mut s3) = (0f32, 0f32, 0f32, 0f32);
+        let mut off = 0usize;
+        let mut it = code.chunks_exact(4);
+        for ch in &mut it {
+            s0 += table[off + ch[0] as usize];
+            s1 += table[off + ksub + ch[1] as usize];
+            s2 += table[off + 2 * ksub + ch[2] as usize];
+            s3 += table[off + 3 * ksub + ch[3] as usize];
+            off += 4 * ksub;
         }
-        s
+        for &c in it.remainder() {
+            s0 += table[off + c as usize];
+            off += ksub;
+        }
+        (s0 + s1) + (s2 + s3)
     }
 
     /// The `nprobe` cells nearest to `q`, closest first. With the 2-level coarse quantizer (#32) this
@@ -417,18 +432,22 @@ impl IvfPq {
         scored: &mut usize,
     ) {
         let c = &self.lists[cell];
-        for i in 0..c.nodes.len() {
-            if max_seqno.is_some_and(|w| c.seqnos[i] >= w) {
+        let rows = c
+            .codes
+            .chunks_exact(self.m)
+            .zip(&c.nodes)
+            .zip(&c.seqnos)
+            .zip(&c.labels);
+        for (((code, &node), &seqno), &label) in rows {
+            if max_seqno.is_some_and(|w| seqno >= w) {
                 continue; // strict watermark: indexed prefix only
             }
-            if !allowed_label(c.labels[i]) {
+            if !allowed_label(label) {
                 continue; // authz: never score unauthorized postings
             }
-            let node = c.nodes[i];
             if !keep(node) {
                 continue; // graph type / arbitrary filter
             }
-            let code = &c.codes[i * self.m..(i + 1) * self.m];
             out.push((self.adc_score(table, code), node));
             *scored += 1;
         }
