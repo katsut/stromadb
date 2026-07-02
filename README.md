@@ -44,6 +44,38 @@ See **[SPEC.md](SPEC.md)** for the capability/constraint contract,
 **[docs/DECISIONS.md](docs/DECISIONS.md)** for *why* the engine is shaped this way — the decision trail
 with the measurements that settled each call (and the known limitations / roadmap).
 
+## Quickstart (CLI)
+
+```bash
+cargo install --path crates/stroma-cli   # installs the `stroma` binary
+
+stroma init --db ./mydb
+
+cat > data.jsonl <<'EOF'
+{"type_def":{"name":"Person"}}
+{"type_def":{"name":"Project"}}
+{"pred_def":{"name":"works-on","cardinality":"many","domain":"Person","range":"Project"}}
+{"pred_def":{"name":"age","cardinality":"one","domain":"Person","range_value":"int"}}
+{"node":{"id":1,"type":"Person"}}
+{"node":{"id":2,"type":"Project"}}
+{"fact":{"subject":1,"predicate":"works-on","object":{"node":2}}}
+{"fact":{"subject":1,"predicate":"age","object":{"int":34}}}
+EOF
+stroma ingest data.jsonl --db ./mydb     # durable (fsync per chunk), typed, validated
+
+echo '{"node":1,"vector":[1.0,0.0,0.0,0.0]}' > emb.jsonl
+stroma embed emb.jsonl --db ./mydb       # embeddings are received, never computed
+
+stroma query point 1 age --db ./mydb                     # {"one":{"int":34}}
+stroma query expand 1 works-on --db ./mydb               # {"nodes":[2]}
+echo '[1.0,0.0,0.0,0.0]' > q.json
+stroma query search --type Person --k 5 --vector-file q.json --db ./mydb
+stroma stats --db ./mydb
+```
+
+The database directory holds only the authoritative inputs (changelog WAL, schema/node
+assignments, received embeddings); derived stores (the vector index) rebuild on open.
+
 ## Performance (measured, reproducible)
 
 Single node, single thread, in-process. Synthetic clustered 768-d vectors (bge-class distribution),
