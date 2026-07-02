@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/stroma-core", "crates/stroma-db", "crates/stroma-cli", "crates/stroma-serve"]
+members = ["crates/stroma-core", "crates/stroma-db", "crates/stroma-cli", "crates/stroma-serve", "crates/stroma-mcp"]
 resolver = "2"
 
 [workspace.package]

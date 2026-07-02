@@ -343,6 +343,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stroma-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "stroma-db",
+]
+
+[[package]]
 name = "stroma-serve"
 version = "0.1.0"
 dependencies = [
