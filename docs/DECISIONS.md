@@ -30,10 +30,11 @@
 
 ### D2. One Fact tuple as the unit of everything
 - **Decision:** `Fact = ⟨subject, predicate, object, valid-time, tx-time, provenance, confidence⟩`;
-  `Object = Node | Value`. Ontology is a typed catalog (Field-ID interning, cardinality, domain/range)
-  with *minimal* ingest validation (open-world: only known mismatches fail). No reasoner in the DB.
-- **Why:** every capability must compose on the same unit; a full OWL reasoner is a non-goal (the caller's
-  LLM reasons, the DB stays a deterministic no-LLM substrate).
+  `Object = Node | Value`. Types/predicates live in a typed catalog (Field-ID interning, cardinality,
+  domain/range) with *minimal* ingest validation (open-world: only known mismatches fail). No reasoner in
+  the DB.
+- **Why:** every capability must compose on the same unit; a full OWL-style reasoner is a non-goal — the
+  DB does not reason or call a model, that is the caller's job.
 
 ### D3. Fold = per-(subject,predicate) join-semilattice
 - **Decision:** cardinality-One → LWW-Register + history; cardinality-Many → OR-Set; hard-delete → a
@@ -148,8 +149,8 @@
   the head and threaded into every source/expand; every result is bounded (`max_nodes`, a token budget) and
   stamped with the version vector (`as_of`). The same operators back Live Query (one algebra). The vector
   backend is abstracted behind `AnnBackend` so the exact index (oracle) and IVF-PQ are interchangeable.
-- **Why:** agents call cheap primitives in a loop; the DB is a fast, self-describing, authz-safe substrate,
-  the intelligence is on the caller side.
+- **Why:** callers issue cheap primitives in a loop; the DB is a fast, self-describing, authz-safe query
+  layer, and the model stays on the caller side.
 
 ### D16. Live Query = recompute-and-diff (IVM stand-in)
 - **Decision:** a live query is any Snapshot→node-set function; on change the registry re-evaluates and
@@ -166,7 +167,7 @@
 | leg | target | measured |
 |---|---|---|
 | Durability | 0 data loss; cold-start replay < 10s @5M | 0 loss; RTO **0.81s** |
-| Differentiation | filtered recall@10 ≥ 0.9 @ type-sel 50%; authz-on warm hybrid p99 < 2ms | recall ~1.0; p99 **<1ms** (hard data) |
+| Type-aware hybrid | filtered recall@10 ≥ 0.9 @ type-sel 50%; authz-on warm hybrid p99 < 2ms | recall ~1.0; p99 **<1ms** (hard data) |
 | Integration | C2b open-loop, real ANN + real durability | 0.5M read p99 **1.84ms** (warm raw); 0 data loss; live diffs; version vector consistent |
 
 ## License
