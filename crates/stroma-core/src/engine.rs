@@ -10,10 +10,12 @@ use crate::fact::{FieldId, NodeId};
 use crate::fold::{Fold, ObjKey, Snapshot};
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 pub struct Engine {
     changelog: Changelog,
-    base: Fold, // materialized fold of records [0, watermark)
+    base: Fold,               // materialized fold of records [0, watermark)
+    base_snap: Arc<Snapshot>, // observed view of `base`, refreshed incrementally at materialize
     watermark: u64,
 }
 
@@ -24,6 +26,7 @@ impl Engine {
         Engine {
             changelog: Changelog::new(n_max),
             base: Fold::default(),
+            base_snap: Arc::new(Snapshot::default()),
             watermark: 0,
         }
     }
@@ -35,10 +38,12 @@ impl Engine {
         let changelog = Changelog::open(path, n_max)?;
         let mut base = Fold::default();
         changelog.replay_into(&mut base); // fold the whole recovered log = cold-start rebuild
+        let base_snap = Arc::new(base.observe());
         let watermark = changelog.head();
         Ok(Engine {
             changelog,
             base,
+            base_snap,
             watermark,
         })
     }
@@ -94,10 +99,20 @@ impl Engine {
         Ok(Some(seqno))
     }
 
-    /// Fold the tail `[watermark, head)` into the base and advance the watermark (relieves backpressure).
+    /// Fold the tail `[watermark, head)` into the base and advance the watermark (relieves
+    /// backpressure). Also refreshes the cached observed snapshot incrementally — only the
+    /// `(subject, predicate)` keys the tail touched are re-observed, so the fresh-view cost is
+    /// O(tail), not O(state).
     pub fn materialize(&mut self) {
-        self.changelog
-            .replay_range_into(self.watermark, &mut self.base);
+        let touched = self
+            .changelog
+            .replay_range_into_tracked(self.watermark, &mut self.base);
+        if !touched.is_empty() {
+            let snap = Arc::make_mut(&mut self.base_snap);
+            for k in &touched {
+                self.base.observe_key_into(k, snap);
+            }
+        }
         self.watermark = self.changelog.head();
         self.changelog.mark_materialized(self.watermark);
     }
@@ -109,9 +124,18 @@ impl Engine {
         eff
     }
 
-    /// Read-merge: base ∪ bounded tail, observed as a canonical snapshot.
+    /// Read-merge: base ∪ bounded tail, observed as a canonical snapshot. O(state) — prefer the
+    /// fresh-loop path (`materialize` then [`Engine::snapshot_arc`]) on hot paths.
     pub fn snapshot(&self) -> Snapshot {
         self.effective_fold().observe()
+    }
+
+    /// The cached observed snapshot of the materialized base, shared O(1). The cheap fresh-read
+    /// loop is `write → materialize() (O(tail)) → snapshot_arc()`: after materialize this equals
+    /// [`Engine::snapshot`] (merged read ≡ post-materialize read) without the O(state) rebuild.
+    /// Readers holding an old Arc keep a stable view; the next materialize copies-on-write.
+    pub fn snapshot_arc(&self) -> Arc<Snapshot> {
+        Arc::clone(&self.base_snap)
     }
 
     /// Number of appended-but-not-materialized records (the read-merge tail length, `<= n_max`).
@@ -205,6 +229,46 @@ mod tests {
             .unwrap();
         assert_eq!(seqnos, vec![0, 1]);
         assert_eq!(query::point_many(&e.snapshot(), 1, 100).len(), 2);
+    }
+
+    #[test]
+    fn snapshot_arc_matches_full_snapshot_after_materialize() {
+        let mut e = Engine::new(1024);
+        // mixed workload incl. supersession and removal so incremental observe hits every path
+        e.write(0, add(1, 100, 20)).unwrap();
+        e.write(0, add(1, 100, 21)).unwrap();
+        e.materialize();
+        let held = e.snapshot_arc(); // reader pins a view
+        e.write(
+            0,
+            WriteKind::SetOne {
+                subject: 2,
+                predicate: 0,
+                object: ObjKey::Node(9),
+                valid_from: 0,
+            },
+        )
+        .unwrap();
+        e.retract_edge(0, 1, 100, ObjKey::Node(20)).unwrap();
+        e.write(
+            0,
+            WriteKind::SetOne {
+                subject: 2,
+                predicate: 0,
+                object: ObjKey::Node(10), // supersedes 9
+                valid_from: 1,
+            },
+        )
+        .unwrap();
+        e.materialize();
+        // incremental refresh ≡ full observe
+        assert_eq!(*e.snapshot_arc(), e.snapshot());
+        // pinned reader view unchanged (copy-on-write)
+        assert_eq!(
+            query::point_many(&held, 1, 100),
+            [ObjKey::Node(20), ObjKey::Node(21)].into_iter().collect()
+        );
+        assert!(query::point_one(&held, 2, 0).is_none());
     }
 
     #[test]

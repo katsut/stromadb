@@ -126,7 +126,7 @@ fn main() {
         eng.sync().unwrap();
     }
     eng.materialize();
-    let mut snap = eng.snapshot();
+    let mut snap = eng.snapshot_arc();
 
     // 30 live queries: 1-hop expand of hot subjects
     let mut live = LiveQueries::new(LIVE_QUERIES);
@@ -198,7 +198,7 @@ fn main() {
         eng.materialize();
         t_mat += a.elapsed().as_secs_f64() * 1e3;
         let a = Instant::now();
-        snap = eng.snapshot();
+        snap = eng.snapshot_arc();
         t_snap += a.elapsed().as_secs_f64() * 1e3;
         let a = Instant::now();
         for (_, d) in live.on_change(&snap) {
