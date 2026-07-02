@@ -9,8 +9,9 @@ makes low-cost *and* high-performance achievable at once: the hot working set fi
 footprint is small, and idle tenants can scale to zero.
 
 > Status: **core engine implemented and measured** — durable changelog (framed WAL, group-commit
-> fsync), IVF-PQ vector index with exact re-rank, typed hybrid reads, live queries, composable query
-> IR. Pre-1.0: single-node, single-threaded serving; see [docs/DECISIONS.md](docs/DECISIONS.md) for
+> fsync), IVF-PQ vector index with exact re-rank, typed hybrid reads, a composable query IR
+> (point / type-ANN / expand / filter / top-k), incremental Live Query maintenance, and a `stroma`
+> CLI. Pre-1.0: single-node, single-threaded serving; see [docs/DECISIONS.md](docs/DECISIONS.md) for
 > known limitations and roadmap. Source-available (Elastic License v2).
 
 ## Why
@@ -31,10 +32,16 @@ StromaDB is built for LLM retrieval: stream-native, vector + typed-graph, low-co
 - **Type-aware hybrid search** — ANN candidates filtered/reranked by graph type, so disjoint-type
   mis-fusion is rejected.
 - **Stream ingest, no write stalls** — append-only changelog; explicit backpressure under overload.
-- **Composable operator query IR** — `point / type-ANN / expand / temporal / filter / score-rank`
-  composed as a pipeline; **one algebra** evaluates both one-shot queries and incrementally-maintained
-  Live Queries (IVM).
-- **Bitemporal** — valid-time + transaction-time; `now / as-of / ever / overlap` time scopes.
+- **Composable operator query IR** — `point / type-ANN / expand / filter / top-k` composed as a
+  pipeline (filters cover type, current value, and **valid-time as-of** value). Standing queries are
+  maintained incrementally: recompute-and-diff generally, plus **keyed-incremental** maintenance for
+  completeness/rule queries (O(touched), verified equal to a full recompute). Unifying one-shot and
+  Live evaluation under one algebra is the design direction; full differential-dataflow maintenance of
+  arbitrary pipelines is on the roadmap.
+- **Temporal reads** — facts carry valid-time; **valid-time as-of** point reads return the value in
+  effect at a past instant, and transaction-time as-of is a version-vector pin (`strict` / `fresh`
+  read modes). Full temporal query scopes (`ever` / `overlap`, and valid-time over multi-valued
+  edges) are on the roadmap.
 - **No internal model** — a deterministic retrieval/query layer; the LLM is always the caller.
   Model-written summaries are stored with provenance, kept distinct from asserted facts.
 - **Self-hostable single-node engine** under a source-available license.
