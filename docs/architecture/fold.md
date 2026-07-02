@@ -39,10 +39,11 @@ below the floor and is provably observation-preserving.
 
 ## One algebra
 
-This fold is the *write* side of StromaDB's single differential-dataflow algebra — the same algebra
-that runs read/IVM (Epic 5). Keeping write and read on one algebra is why a Live Query can be
-maintained incrementally over the same state the fold produces (validated separately in
-`poc-rkyv-ivm`).
+This fold is the *write* side of StromaDB's intended single read/IVM algebra. Live Queries are
+maintained incrementally over the same state the fold produces — recompute-and-diff generally, and
+keyed-incremental for completeness/rule queries (`incremental::Maintained`). A full
+differential-dataflow backend (validated in Phase 0 `poc-rkyv-ivm`) is the roadmap target that slots
+in behind the same contract.
 
 ## Boundaries / forward references
 - `OrderKey` assignment, durability, the authoritative changelog → Story 1.3.

@@ -4,8 +4,11 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.85"
 license = "LicenseRef-ELv2"
 repository = "https://github.com/katsut/stromadb"
+keywords = ["graph", "vector", "database", "graphrag", "retrieval"]
+categories = ["database-implementations"]
 
 [profile.dev]
 opt-level = 0

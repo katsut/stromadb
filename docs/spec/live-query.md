@@ -1,7 +1,9 @@
 # Spec — Live Query (IVM)
 
 > Contract for `stroma-core::live`. Companion HOW: `../architecture/live-query.md`.
-> Status: recompute-and-diff MVP (Epic 5); differential-dataflow backend deferred. CAP-5.
+> Status: recompute-and-diff MVP (Epic 5) + keyed-incremental maintenance for the completeness-rule
+> class (`incremental::Maintained`, O(touched), verified equal to full recompute); a general
+> differential-dataflow backend is deferred. CAP-5.
 
 ## Model
 
