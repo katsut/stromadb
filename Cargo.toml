@@ -1,10 +1,10 @@
 [workspace]
-members = ["crates/stroma-core", "crates/stroma-cli"]
+members = ["crates/stroma-core", "crates/stroma-db", "crates/stroma-cli", "crates/stroma-serve"]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "LicenseRef-ELv2"
 repository = "https://github.com/katsut/stromadb"
 keywords = ["graph", "vector", "database", "graphrag", "retrieval"]

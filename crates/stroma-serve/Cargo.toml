@@ -1,16 +1,17 @@
 [package]
-name = "stroma-cli"
+name = "stroma-serve"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "StromaDB command-line interface: init, ingest, query, stats."
+description = "StromaDB HTTP serving surface over a directory-backed database (single-node)."
 
 [[bin]]
-name = "stroma"
+name = "stroma-serve"
 path = "src/main.rs"
 
 [dependencies]
 stroma-db = { path = "../stroma-db" }
 serde_json = "1"
+tiny_http = "0.12"
