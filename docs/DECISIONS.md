@@ -1,0 +1,193 @@
+# Design Decisions & Measured Findings
+
+> The *why* behind StromaDB's design, in the order it was decided, with the evidence that settled each
+> call. This is the public rationale trail so a newcomer can follow how the engine got its shape —
+> complements `spec/` (WHAT), `architecture/` (HOW), and `CONTRACTS.md` (the frozen interfaces).
+> Format per entry: **Context → Decision → Why → Evidence/Status**. Numbers come from the reproducible
+> `crates/stroma-core/examples/*` probes.
+
+## Method
+
+### D0. De-risk with kill-switches before building
+- **Context:** an ambitious core (durable versioned graph + vector hybrid + reactive queries) has several
+  places it could be fundamentally infeasible.
+- **Decision:** before the full build, prove each scary variable with a cheap, isolated probe; only then
+  implement.
+- **Why:** cheapest place to kill a bad idea is before the code exists.
+- **Status:** the `examples/` probes (durability RTO, ANN recall/cost, SSD re-rank, integrated open-loop)
+  are the descendants of those kill-switches and stay in-tree as reproducible checks.
+
+### D1. Measure only under representative, unfriendly conditions
+- **Context:** early "green" numbers repeatedly turned out to be artifacts of easy conditions (nprobe=1,
+  cheap filters, in-RAM raw, 100K scale).
+- **Decision:** an SLO is only claimed when measured at the representative point (~0.5M vectors), on hard
+  (overlapping-cluster) data, with the authz+type filter active, and with the cold tier on SSD.
+- **Why:** each easy condition hid a real cost; stripping them surfaced the true drivers (nprobe, catalog
+  lookups, coarse-quantizer scan, cold-SSD re-rank).
+- **Status:** standing rule; the examples take scale/config knobs so results are reproducible.
+
+## Data model & write path
+
+### D2. One Fact tuple as the unit of everything
+- **Decision:** `Fact = ⟨subject, predicate, object, valid-time, tx-time, provenance, confidence⟩`;
+  `Object = Node | Value`. Ontology is a typed catalog (Field-ID interning, cardinality, domain/range)
+  with *minimal* ingest validation (open-world: only known mismatches fail). No reasoner in the DB.
+- **Why:** every capability must compose on the same unit; a full OWL reasoner is a non-goal (the caller's
+  LLM reasons, the DB stays a deterministic no-LLM substrate).
+
+### D3. Fold = per-(subject,predicate) join-semilattice
+- **Decision:** cardinality-One → LWW-Register + history; cardinality-Many → OR-Set; hard-delete → a
+  max-register floor. Total order via `OrderKey = (tx, source, seq)`, which the engine keeps globally
+  unique.
+- **Why:** a join-semilattice makes replay **order-independent and deterministic** — the basis of audit,
+  recovery, and multi-source merge.
+- **Evidence:** `tests/fold_determinism.rs` (proptest: permutation-invariance, multi-source split/merge,
+  idempotent re-delivery, GC invariance).
+
+### D4. Changelog is the append-only version authority; backpressure, never silent stall
+- **Decision:** every write is appended and assigned a monotonic `seqno` (the version authority);
+  derived stores chase its watermark; replay is a pure function of the log. Under overload the changelog
+  returns explicit `Backpressure`, it does not stall.
+- **Why:** centralizing *version* in one monotonic seqno makes cross-store consistency tractable and lets
+  any derived store be rebuilt; explicit backpressure keeps a slow consumer from melting the system.
+
+### D5. Durability = framed file-WAL + group-commit fsync (LSM later, same contract)
+- **Context:** durability must be crash-sound with a bounded recovery time, without (yet) a full LSM.
+- **Decision:** append writes to a framed WAL (`[len][crc32][payload]`), `fsync` per chunk (group commit);
+  `open` recovers the committed prefix and drops a torn tail via the frame checksum. `append` stays
+  in-memory/infallible; `sync` is the explicit durability point. The eventual LSM backend slots in behind
+  this same open/sync/replay/watermark contract.
+- **Why:** group commit gives durability at chunk granularity without an fsync per write; the checksum *is*
+  the commit marker, so recovery is prefix-exact with no separate journal.
+- **Evidence (`examples/durability_slo.rs`, 5M facts):** write+fsync 0.71s; cold-start recovery (RTO)
+  **0.81s** (< 10s target); **0 data loss** on torn-write.
+
+## Read path
+
+### D6. Read-merge: materialized base ∪ bounded tail
+- **Decision:** a read merges the materialized `base` fold with the un-materialized changelog tail (bounded
+  by `n_max`), on demand. Merged read ≡ post-materialize read.
+- **Why:** partial updates are never re-written; the un-merged backlog is bounded, tying write rate to read
+  freshness.
+
+### D7. Cross-store reads via a 2-tuple version vector (strict/fresh)
+- **Decision:** `(changelog_seqno, vector_watermark)`. **Strict** reads the indexed prefix only; **Fresh**
+  reads indexed ∪ a brute-forced tail, closing index/structure split-brain. The 2-tuple holds *iff*
+  embeddings are stamped with their node's changelog seqno and `vector_watermark` is the contiguous
+  embedded prefix.
+- **Why (H3):** a naive scalar watermark left ~1/5000 dangling refs under async embedding; the contiguous
+  prefix + fresh brute-force is always complete.
+- **Evidence:** injection spike `poc-multiclock-vv` (results in the design history).
+
+### D8. Type-aware hybrid with a recall-completeness clause (H2)
+- **Decision:** a type-ANN operator returns `ANN(probed) ∪ brute-force(unprobed type-T)`, with the
+  brute-force tail **bounded by a budget**. The recall tail (missed type-T members in unprobed cells) is a
+  distinct axis from the watermark tail.
+- **Why:** approximate ANN × a type filter collapses recall (pre/post-filter dilemma); the bounded
+  completeness tail restores it without an unbounded scan.
+- **Evidence:** `poc-filtered-ann-recall`; `IvfPq::search_complete`.
+
+### D9. Authz is scoped, not shared-index + post-filter (H4)
+- **Decision:** the authz+type predicate is applied **before** a candidate is scored; a principal never
+  computes distance against data it can't see.
+- **Why:** a shared index + post-authz filter leaks the unauthorized-near count through timing and top-k
+  completeness; skipping unauthorized postings before scoring closes that channel.
+- **Evidence:** `poc-authz-index-leak`.
+
+## Vector backend
+
+### D10. IVF-PQ + exact re-rank (hot codes / cold raw)
+- **Context:** the A1 envelope has 0.5M–5M × 768-dim vectors; raw f32 is 1.5–15 GB — too big for the hot
+  RAM budget.
+- **Decision:** PQ-compress each vector to `m` bytes (hot, ~48 MB @ m=96, 32×) for candidate generation;
+  re-rank the top-`rerank_r` candidates by **exact** distance over the raw vectors (cold tier). IVF routes
+  a query to its `nprobe` nearest cells.
+- **Why:** **pure-PQ recall@10 caps ~0.4 in 768-dim** (quantization error swamps fine ranking) — PQ alone
+  can't meet the recall SLO. Re-rank restores it while touching raw for only `rerank_r` vectors/query, so
+  raw can be a cold (SSD/mmap) tier and hot RAM stays the PQ codes.
+- **Evidence (`examples/ann_slo.rs`):** filtered recall@10 pure-PQ ~0.38 → +rerank ~1.0; 32× compression.
+
+### D11. Non-residual PQ + a once-per-query ADC table
+- **Context:** classic IVFADC encodes the residual from the cell centroid, making the ADC table
+  cell-dependent → rebuilt per probed cell → candidate-gen cost scales with `nprobe` (the p99 driver).
+- **Decision:** because exact re-rank restores recall, PQ only has to *rank candidates*, so encode the
+  **raw** sub-vectors (non-residual). The ADC table is then cell-independent and computed **once per
+  query**. Codes are stored struct-of-arrays per cell for cache locality.
+- **Why:** removes the `nprobe` dependence from candidate-gen; the cheap recall lever becomes `rerank_r`,
+  not `nprobe`.
+- **Evidence:** warm p99 dropped ~37% (4.0→2.5ms at nprobe=16, then to ~2.0ms with the SoA layout).
+
+### D12. `nlist` scales with N + a 2-level coarse quantizer
+- **Context:** with `nlist` too small, coarse cells are large/imbalanced → a query's probed postings blow
+  up (the 100K p99 driver). With `nlist` large (~√N-scaled), `probe_cells` becomes a linear O(nlist·dim)
+  scan (the 0.5M p99 driver).
+- **Decision:** `suggested_nlist(n) ≈ 4·√n`; and for `nlist ≥ 512`, a **2-level coarse quantizer** —
+  cluster the coarse centroids into ~√nlist super-centroids and route via them, so per-query coarse work
+  is ~√nlist + a bounded candidate pool instead of O(nlist). Exact re-rank absorbs the small routing
+  approximation.
+- **Evidence (`examples/c2b_integrated.rs`):** 100K read p99 3.1→1.6ms (nlist 256→1024); 0.5M read p99
+  3.2→**1.84ms** (2-level coarse); `two_level_coarse_preserves_recall` test (recall@10 ≥ 0.9).
+
+### D13. FxHash for the node→type/label maps
+- **Decision:** the catalog's `node_type`/`node_label` maps use FxHash (dependency-free), not the default
+  SipHash.
+- **Why:** the authz+type filter hits these once per candidate; SipHash was ~1ms of the read p99. FxHash is
+  chosen over a dense-Vec index so it works for any node-id distribution (no dense-id assumption).
+
+### D14. Operating point: nprobe=8, rerank_r=256 (raw must be warm for the p99 SLO)
+- **Decision:** the query-IR read path defaults to nprobe=8, R=256.
+- **Evidence:** on hard data, recall is bought with `rerank_r` (R=100→0.83, R=256→~1.0) at authz-on warm
+  p99 <1ms. **Caveat:** re-rank p99 <2ms holds when the *active* raw working set is warm (RAM/page cache);
+  fully-cold SSD re-rank at R=256 adds several ms (`examples/ann_ssd_p99.rs`) — mitigations (OPQ to shrink
+  R, a warm re-rank buffer) are tracked as roadmap.
+
+## Query IR, Live Query, build
+
+### D15. Composable operator IR — authz at the head, bounded result, single algebra
+- **Decision:** a pipeline is `Source → Transform*` evaluated one-shot server-side; authz is injected at
+  the head and threaded into every source/expand; every result is bounded (`max_nodes`, a token budget) and
+  stamped with the version vector (`as_of`). The same operators back Live Query (one algebra). The vector
+  backend is abstracted behind `AnnBackend` so the exact index (oracle) and IVF-PQ are interchangeable.
+- **Why:** agents call cheap primitives in a loop; the DB is a fast, self-describing, authz-safe substrate,
+  the intelligence is on the caller side.
+
+### D16. Live Query = recompute-and-diff (IVM stand-in)
+- **Decision:** a live query is any Snapshot→node-set function; on change the registry re-evaluates and
+  emits only the delta. The efficient differential-dataflow backend slots in behind the same
+  register/diff contract later.
+
+### D17. Parallel build via scoped threads (no dependency)
+- **Decision:** k-means assignment and per-vector assign+encode fan out across CPUs with
+  `std::thread::scope`; list insertion stays serial. `add_batch` is order-equivalent to serial `add`.
+- **Evidence:** 200K×768 build 112s → ~10s (~11×), making the 0.5M representative build feasible.
+
+## DONE SLO (the "unchanging core" bar) — measured
+
+| leg | target | measured |
+|---|---|---|
+| Durability | 0 data loss; cold-start replay < 10s @5M | 0 loss; RTO **0.81s** |
+| Differentiation | filtered recall@10 ≥ 0.9 @ type-sel 50%; authz-on warm hybrid p99 < 2ms | recall ~1.0; p99 **<1ms** (hard data) |
+| Integration | C2b open-loop, real ANN + real durability | 0.5M read p99 **1.84ms** (warm raw); 0 data loss; live diffs; version vector consistent |
+
+## License
+
+### D18. Elastic License 2.0 (source-available)
+- **Decision:** the OSS core is under the Elastic License 2.0 (`LICENSE.txt`).
+- **Why:** self-host, modify, embed are all allowed; only offering it as a hosted/managed service is
+  restricted. A permissive license (Apache-2.0) was rejected to avoid a permissive history that a
+  competing managed service could fork from.
+
+## Known limitations / roadmap (what is *not* done yet)
+
+These are deferred by decision, not oversights — the core is validated for a bounded, single-node,
+pre-production workload:
+
+- **LSM backend + compaction/checkpoint:** durability is a file-WAL today; without compaction the WAL grows
+  and cold-start RTO scales with total history, not live state.
+- **Concurrency:** the engine is single-threaded; concurrent reads during writes are not yet supported
+  (all current SLO numbers are sequential).
+- **Structural-sharing / MVCC snapshots:** `snapshot` full-clones the base fold (a per-epoch stall under
+  write load at scale).
+- **Cold-SSD re-rank:** the raw re-rank tier must be warm for the p99 SLO; fully-cold SSD at R=256 is slow
+  (OPQ / warm buffer are the mitigations).
+- **OPQ, index drift re-training, async embedding pipeline, real-machine cost validation.**

@@ -37,8 +37,10 @@ StromaDB is built for the AI-agent case: stream-native, neuro-symbolic, low-cost
   summaries are stored with provenance, kept distinct from asserted facts.
 - **Self-hostable single-node engine** under a source-available license.
 
-See **[SPEC.md](SPEC.md)** for the capability/constraint contract and
-**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the design.
+See **[SPEC.md](SPEC.md)** for the capability/constraint contract,
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the design, and
+**[docs/DECISIONS.md](docs/DECISIONS.md)** for *why* the engine is shaped this way — the decision trail
+with the measurements that settled each call (and the known limitations / roadmap).
 
 ## Where Vesicle fits
 
