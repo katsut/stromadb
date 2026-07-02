@@ -187,8 +187,9 @@ pre-production workload:
   and cold-start RTO scales with total history, not live state.
 - **Concurrency:** the engine is single-threaded; concurrent reads during writes are not yet supported
   (all current SLO numbers are sequential).
-- **Structural-sharing / MVCC snapshots:** `snapshot` full-clones the base fold (a per-epoch stall under
-  write load at scale).
+- **Full MVCC snapshots:** `materialize` now maintains the observed snapshot incrementally (O(changed
+  keys), shared via `Arc` — the per-epoch full-clone stall is gone); a generational MVCC for many
+  concurrent long-lived readers is still pending.
 - **Cold-SSD re-rank:** the raw re-rank tier must be warm for the p99 SLO; fully-cold SSD at R=256 is slow
   (OPQ / warm buffer are the mitigations).
 - **OPQ, index drift re-training, async embedding pipeline, real-machine cost validation.**

@@ -29,6 +29,7 @@ Transforms:
 |---|---|
 | `Expand { predicate }` | 1-hop expand (structural), authz-filtered |
 | `TopK { k }` | keep top-k by current score |
+| `Filter(..)` | keep members by type / current value / valid-time-as-of value |
 
 ## Execution — `run(snapshot, catalog, vector, pipeline, principal, vv) -> Traverser`
 
@@ -37,11 +38,13 @@ Transforms:
   expanded nodes are authz-filtered too. Callers cannot skip it.
 - **result contract:** the traverser is bounded by `max_nodes` (token budget) at every step and
   stamped with `vv` (as_of). `mode` selects strict/fresh on the vector axis.
-- **single algebra:** these are the same read operators one-shot and Live Query use.
+- **single algebra (direction):** the same read operators are intended for one-shot and Live Query.
+  Today the completeness-rule class is maintained incrementally (`incremental::Maintained`); unifying
+  arbitrary pipelines under one incrementally-maintained algebra is on the roadmap.
 
 ## Out of scope (later)
-- More operators: `temporal` (now/as-of/ever/overlap), `filter` (fact-attribute predicates),
-  `score-rank` with agent-supplied weights.
+- More operators: full temporal scopes (`ever`/`overlap`; valid-time-as-of value filtering already
+  exists via `Filter`), `score-rank` with agent-supplied weights.
 - A real micro-planner (operator fusion / predicate pushdown / cardinality reorder; post-authz
   cardinality exposure).
 - openCypher front-end → IR lowering.
