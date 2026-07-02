@@ -100,8 +100,20 @@ curl -s localhost:7700/stats
 ```
 
 Reads are authz-scoped (`allowed_labels` is the caller's ABAC bitmask) and stamped with an `as_of`
-version vector. v1 handles requests sequentially (single-threaded engine, pre-1.0); an MCP server and
-concurrent reads are on the roadmap.
+version vector. v1 handles requests sequentially (single-threaded engine, pre-1.0); concurrent reads
+are on the roadmap.
+
+## MCP (agent tools)
+
+`stroma-mcp` speaks the Model Context Protocol over stdio, exposing the database as tools an LLM agent
+can call directly — `point`, `expand`, `search` (authz-scoped hybrid), `stats`, `ingest`.
+
+```bash
+stroma-mcp --db ./mydb          # newline-delimited JSON-RPC 2.0 over stdin/stdout
+```
+
+Point an MCP client at that command; `tools/list` returns the schemas, `tools/call` runs a tool and
+returns the JSON result as text content.
 
 ## Performance (measured, reproducible)
 
