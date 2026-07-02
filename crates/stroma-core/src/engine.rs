@@ -104,6 +104,13 @@ impl Engine {
     /// `(subject, predicate)` keys the tail touched are re-observed, so the fresh-view cost is
     /// O(tail), not O(state).
     pub fn materialize(&mut self) {
+        let _ = self.materialize_tracked();
+    }
+
+    /// Like [`Engine::materialize`], but returns the `(subject, predicate)` keys the drained tail
+    /// touched — the driver for incremental Live-Query maintenance (`incremental::Maintained`):
+    /// re-check only the rules whose inputs changed instead of recomputing over the whole graph.
+    pub fn materialize_tracked(&mut self) -> std::collections::BTreeSet<(NodeId, FieldId)> {
         let touched = self
             .changelog
             .replay_range_into_tracked(self.watermark, &mut self.base);
@@ -115,6 +122,7 @@ impl Engine {
         }
         self.watermark = self.changelog.head();
         self.changelog.mark_materialized(self.watermark);
+        touched
     }
 
     /// The effective fold: materialized base merged with the bounded un-materialized tail.
