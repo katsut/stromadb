@@ -5,6 +5,7 @@
 //! Fact model + type catalog (here) → fold/changelog → read-merge → type-aware hybrid →
 //! version-vector snapshots → IVM/Live Query → composable IR.
 
+pub mod calendar;
 pub mod catalog;
 pub mod changelog;
 pub mod engine;
@@ -20,6 +21,7 @@ pub mod vector;
 pub mod version;
 pub mod wal;
 
+pub use calendar::{Calendar, Stamp};
 pub use catalog::{
     Cardinality, Catalog, ConstraintError, PredicateDef, Range, RelProps, ValueType,
 };
