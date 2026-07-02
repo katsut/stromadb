@@ -110,7 +110,7 @@ impl Op {
         })
     }
 
-    fn key(&self) -> (NodeId, FieldId) {
+    pub(crate) fn key(&self) -> (NodeId, FieldId) {
         match self {
             Op::SetOne {
                 subject, predicate, ..
@@ -348,42 +348,54 @@ impl Fold {
     /// Canonical observation. Keys with no live state are omitted.
     pub fn observe(&self) -> Snapshot {
         let mut snap = Snapshot::default();
-        for (k, st) in &self.keys {
-            match st {
-                KeyState::One(s) => {
-                    let live: Vec<(OrderKey, Version)> = s
-                        .versions
-                        .iter()
-                        .filter(|(ok, _)| s.hd.is_none_or(|h| **ok > h))
-                        .map(|(ok, v)| (*ok, v.clone()))
-                        .collect();
-                    if let Some((_, top)) = live.last() {
-                        snap.one.insert(*k, top.object.clone());
-                        snap.one_history.insert(
-                            *k,
-                            live.iter()
-                                .map(|(ok, v)| (*ok, v.object.clone(), v.valid_from))
-                                .collect(),
-                        );
-                    }
-                }
-                KeyState::Many(s) => {
-                    let mut present = BTreeSet::new();
-                    for (obj, tags) in &s.adds {
-                        let live = tags
-                            .iter()
-                            .any(|t| !s.removes.contains(t) && s.hd.is_none_or(|h| *t > h));
-                        if live {
-                            present.insert(obj.clone());
-                        }
-                    }
-                    if !present.is_empty() {
-                        snap.many.insert(*k, present);
-                    }
-                }
-            }
+        for k in self.keys.keys() {
+            self.observe_key_into(k, &mut snap);
         }
         snap
+    }
+
+    /// Re-observe a single `(subject, predicate)` key into an existing snapshot — the incremental
+    /// form of [`Fold::observe`]: after folding tail ops, refreshing just the touched keys keeps a
+    /// cached snapshot current in O(touched) instead of O(state). Removes the key's entries when it
+    /// has no live state (mirrors observe's omission).
+    pub fn observe_key_into(&self, k: &(NodeId, FieldId), snap: &mut Snapshot) {
+        snap.one.remove(k);
+        snap.one_history.remove(k);
+        snap.many.remove(k);
+        match self.keys.get(k) {
+            Some(KeyState::One(s)) => {
+                let live: Vec<(OrderKey, Version)> = s
+                    .versions
+                    .iter()
+                    .filter(|(ok, _)| s.hd.is_none_or(|h| **ok > h))
+                    .map(|(ok, v)| (*ok, v.clone()))
+                    .collect();
+                if let Some((_, top)) = live.last() {
+                    snap.one.insert(*k, top.object.clone());
+                    snap.one_history.insert(
+                        *k,
+                        live.iter()
+                            .map(|(ok, v)| (*ok, v.object.clone(), v.valid_from))
+                            .collect(),
+                    );
+                }
+            }
+            Some(KeyState::Many(s)) => {
+                let mut present = BTreeSet::new();
+                for (obj, tags) in &s.adds {
+                    let live = tags
+                        .iter()
+                        .any(|t| !s.removes.contains(t) && s.hd.is_none_or(|h| *t > h));
+                    if live {
+                        present.insert(obj.clone());
+                    }
+                }
+                if !present.is_empty() {
+                    snap.many.insert(*k, present);
+                }
+            }
+            None => {}
+        }
     }
 }
 

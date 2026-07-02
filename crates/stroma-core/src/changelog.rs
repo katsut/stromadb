@@ -259,12 +259,25 @@ impl Changelog {
 
     /// Fold records `[from, head)` into an existing fold (incremental catch-up / read-merge tail).
     pub fn replay_range_into(&self, from: u64, fold: &mut Fold) {
+        self.replay_range_into_tracked(from, fold);
+    }
+
+    /// Like [`Changelog::replay_range_into`], but returns the set of `(subject, predicate)` keys the
+    /// range touched — the input for incremental snapshot refresh (`Fold::observe_key_into`).
+    pub fn replay_range_into_tracked(
+        &self,
+        from: u64,
+        fold: &mut Fold,
+    ) -> std::collections::BTreeSet<(NodeId, u32)> {
+        let mut touched = std::collections::BTreeSet::new();
         let start = (from as usize).min(self.records.len());
         for (offset, r) in self.records[start..].iter().enumerate() {
             let seqno = (start + offset) as u64;
             let op = record_to_op(seqno, r.source, &r.kind);
+            touched.insert(op.key());
             fold.apply(&op);
         }
+        touched
     }
 }
 
