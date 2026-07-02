@@ -1,0 +1,12 @@
+[package]
+name = "stroma-db"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "StromaDB directory-backed database: open, ingest, embed, query over the core engine."
+
+[dependencies]
+stroma-core = { path = "../stroma-core" }
+serde_json = "1"
