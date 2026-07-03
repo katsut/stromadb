@@ -482,28 +482,34 @@ function pick(e){ const i=nodeAt(e); if(i<0) return;
 cv.addEventListener('dblclick', e=>{ const i=nodeAt(e); if(i>=0) recenter(ids[i]); });
 
 // ---------- drill-down history ----------
-let history=[];
-function updateBack(){ $('back').disabled = history.length===0; $('back').title = history.length ? `back to node ${history[history.length-1]}` : 'back to previous focus'; }
-window.recenter = id => { const cur=+$('focus').value; if(cur!==id){ history.push(cur); updateBack(); } $('focus').value=id; go(); };
-$('back').onclick=()=>{ if(!history.length) return; $('focus').value=history.pop(); updateBack(); go(); };
+// view history: each entry reproduces a whole view (kind + the controls that made it),
+// so Back returns to the previous view — a drill-down, a Show-all, an Overview, a predicate/hops change.
+let viewStack=[], curView=null, restoring=false;
+function snap(kind){ return { kind, focus:$('focus').value, pred:$('pred').value, hops:$('hops').value, cap:$('cap').value }; }
+function pushView(next){ if(!restoring && curView && JSON.stringify(curView)!==JSON.stringify(next)){ viewStack.push(curView); } curView=next; updateBack(); }
+function updateBack(){ $('back').disabled = viewStack.length===0; }
+function applyView(v){ restoring=true; $('focus').value=v.focus; $('pred').value=v.pred; $('hops').value=v.hops; $('hopsv').textContent=v.hops; $('cap').value=v.cap; curView=v;
+  if(v.kind==='ov') overviewDraw(); else if(v.kind==='all') drawAll(); else go(); restoring=false; updateBack(); }
+window.recenter = id => { $('focus').value=id; go(); };
+$('back').onclick=()=>{ if(!viewStack.length) return; applyView(viewStack.pop()); };
 
 // ---------- data ----------
 function toast(m,err){ const t=$('toast'); t.textContent=m; t.className='toast'+(err?' err':''); t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),2800); }
 async function go(){ if($('focus').value.trim()===''){ toast(t('enterFocus'),true); return; }
-  const btn=$('go'); btn.disabled=true; hasFocus=true; overviewMode=false; $('inspect').classList.add('hidden');
+  pushView(snap('nb')); const btn=$('go'); btn.disabled=true; hasFocus=true; overviewMode=false; $('inspect').classList.add('hidden');
   try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
     if($('pred').value) req.predicate=$('pred').value; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     lastReq=req; loadGraph(r.nodes, r.edges); toast(t('tWithin',{n:r.nodes.length,e:r.edges.length,h:$('hops').value})); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
-$('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
-async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; overviewMode=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
+$('go').onclick=()=>go(); $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
+async function drawAll(){ pushView(snap('all')); const btn=$('all'); btn.disabled=true; hasFocus=false; overviewMode=false; $('focus').value=''; $('inspect').classList.add('hidden');
   try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     lastReq=req; loadGraph(r.nodes, r.edges); toast(t('tWhole',{n:r.nodes.length,e:r.edges.length,cap:r.truncated?t('capped'):''})); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('all').onclick=drawAll;
-async function overviewDraw(){ const btn=$('map'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
+async function overviewDraw(){ pushView(snap('ov')); const btn=$('map'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden');
   try{ const req={ op:'overview' }; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     overviewSamples = new Map(r.nodes.map(n=>[n.id, n.sample]));
