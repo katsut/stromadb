@@ -250,6 +250,53 @@ fn graph_all_nodes_and_authz() {
 }
 
 #[test]
+fn overview_type_aggregate() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_ovw_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"type_def\":{\"name\":\"Team\"}}\n",
+        "{\"pred_def\":{\"name\":\"works-on\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"member-of\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Team\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":10,\"type\":\"Project\",\"label\":0}}\n",
+        "{\"node\":{\"id\":100,\"type\":\"Team\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":10}}}\n",
+        "{\"fact\":{\"subject\":2,\"predicate\":\"works-on\",\"object\":{\"node\":10}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"member-of\",\"object\":{\"node\":100}}}\n",
+        "{\"fact\":{\"subject\":2,\"predicate\":\"member-of\",\"object\":{\"node\":100}}}\n",
+    ))
+    .unwrap();
+
+    let r = db.query(&json!({"op":"overview"})).unwrap();
+    assert_eq!(r["overview"], json!(true));
+    let node = |name: &str| -> serde_json::Value {
+        r["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    // one super-node per type, member counts, and a sample member id
+    assert_eq!(node("Person")["count"], json!(2));
+    assert_eq!(node("Project")["count"], json!(1));
+    assert_eq!(node("Team")["count"], json!(1));
+    assert_eq!(node("Person")["sample"], json!(1));
+    // inter-type edges only: Person–Project and Person–Team (no intra-type self edge)
+    assert_eq!(r["edges"].as_array().unwrap().len(), 2);
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn retrieve_context_current_value_chronological() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_ctx_test_{}", std::process::id()))

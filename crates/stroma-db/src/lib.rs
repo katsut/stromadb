@@ -357,6 +357,7 @@ impl Db {
             "neighborhood" => self.neighborhood(req, &snap),
             "node" => self.node_detail(req, &snap),
             "graph" => self.graph(req, &snap),
+            "overview" => self.overview(req, &snap),
             other => Err(format!("unknown op: {other}")),
         }
     }
@@ -509,6 +510,75 @@ impl Db {
             .map(|(a, b)| json!([a, b, strengths.get(&(*a, *b)).copied().unwrap_or(1)]))
             .collect();
         Ok(json!({ "nodes": nodes, "edges": edges, "truncated": truncated }))
+    }
+
+    /// Structural overview ("map"): one super-node per entity type — its member count and a sample
+    /// member id — plus inter-type edges (how many node-valued edges cross each type pair). A cheap
+    /// orientation view for graphs too large to render node-by-node; the UI sizes super-nodes by count
+    /// and drills into a type by re-centring on its sample. Authz-scoped. Super-node id = the type's
+    /// field id (unique within this response); `sample` carries the real node id to drill to.
+    fn overview(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+        const UNTYPED: u32 = u32::MAX;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let visible = |n: u64| {
+            self.cat
+                .node_label(n)
+                .is_none_or(|l| (labels >> l) & 1 == 1)
+        };
+        let type_of = |n: u64| self.cat.node_type(n).unwrap_or(UNTYPED);
+
+        let mut count: HashMap<u32, u64> = HashMap::new();
+        let mut sample: HashMap<u32, u64> = HashMap::new();
+        for n in self.cat.node_ids().into_iter().filter(|&n| visible(n)) {
+            let t = type_of(n);
+            *count.entry(t).or_default() += 1;
+            sample
+                .entry(t)
+                .and_modify(|s| *s = (*s).min(n))
+                .or_insert(n);
+        }
+
+        // inter-type edge weights: count node-valued edges whose endpoints are different types
+        let mut ew: HashMap<(u32, u32), u64> = HashMap::new();
+        let bump = |a: u64, b: u64, ew: &mut HashMap<(u32, u32), u64>| {
+            if !visible(a) || !visible(b) {
+                return;
+            }
+            let (ta, tb) = (type_of(a), type_of(b));
+            if ta != tb {
+                let key = if ta < tb { (ta, tb) } else { (tb, ta) };
+                *ew.entry(key).or_default() += 1;
+            }
+        };
+        for (&(s, _), v) in snap.one.iter() {
+            if let Some(ObjKey::Node(o)) = v {
+                bump(s, *o, &mut ew);
+            }
+        }
+        for (&(s, _), set) in snap.many.iter() {
+            for o in set {
+                if let ObjKey::Node(o) = o {
+                    bump(s, *o, &mut ew);
+                }
+            }
+        }
+
+        let nodes: Vec<Value> = count
+            .iter()
+            .map(|(&t, &c)| {
+                let name = if t == UNTYPED {
+                    "(untyped)"
+                } else {
+                    self.cat.name(t).unwrap_or("?")
+                };
+                json!({ "id": t, "depth": 0, "name": name, "count": c, "sample": sample[&t] })
+            })
+            .collect();
+        let edges: Vec<Value> = ew.iter().map(|(&(a, b), &w)| json!([a, b, w])).collect();
+        Ok(json!({ "nodes": nodes, "edges": edges, "overview": true }))
     }
 
     /// A node's display name — the value of its first `name`/`title`/`display_name`/`full_name`
