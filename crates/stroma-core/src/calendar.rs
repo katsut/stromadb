@@ -8,16 +8,21 @@
 /// A rendering frame: fixed UTC offset (minutes) + business-day window. The org/site calendar.
 #[derive(Clone, Copy, Debug)]
 pub struct Calendar {
-    pub utc_offset_min: i32, // e.g. +540 for JST, -240 for EDT
-    pub business_start_min: u32, // minutes from local midnight, e.g. 540 = 09:00
-    pub business_end_min: u32, // e.g. 1080 = 18:00
+    pub utc_offset_min: i32,          // e.g. +540 for JST, -240 for EDT
+    pub business_start_min: u32,      // minutes from local midnight, e.g. 540 = 09:00
+    pub business_end_min: u32,        // e.g. 1080 = 18:00
     pub fiscal_year_start_month: u32, // 1..=12; 4 = April-start fiscal year
 }
 
 impl Default for Calendar {
     /// UTC, 09:00–18:00, calendar-year fiscal.
     fn default() -> Self {
-        Calendar { utc_offset_min: 0, business_start_min: 540, business_end_min: 1080, fiscal_year_start_month: 1 }
+        Calendar {
+            utc_offset_min: 0,
+            business_start_min: 540,
+            business_end_min: 1080,
+            fiscal_year_start_month: 1,
+        }
     }
 }
 
@@ -27,7 +32,7 @@ const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as i64; // [0, 146096]
+    let doe = z - era * 146_097; // [0, 146096]
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
@@ -40,11 +45,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// A timestamp's calendar facets under a frame — the precomputed derivations handed to the reader.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stamp {
-    pub iso: String,          // "2023-05-30 08:40 +09:00" (local, framed)
+    pub iso: String,           // "2023-05-30 08:40 +09:00" (local, framed)
     pub weekday: &'static str, // local weekday
     pub in_business_hours: bool,
-    pub fiscal_year: i64,      // fiscal year the date falls in (start-month aware)
-    pub fiscal_quarter: u32,   // 1..=4
+    pub fiscal_year: i64,    // fiscal year the date falls in (start-month aware)
+    pub fiscal_quarter: u32, // 1..=4
     pub rel_days_to_asof: i64, // asof_day - this_day; +N = N days before the question, -N = after, 0 = same day
 }
 
@@ -56,9 +61,10 @@ impl Calendar {
         let secs = local.rem_euclid(86_400);
         let (y, m, d) = civil_from_days(days);
         let (hh, mm) = ((secs / 3600) as u32, ((secs % 3600) / 60) as u32);
-        let weekday = WEEKDAYS[(days.rem_euclid(7) + 4).rem_euclid(7) as usize];
+        let weekday_idx = (days.rem_euclid(7) + 4).rem_euclid(7); // 0 = Sunday
+        let weekday = WEEKDAYS[weekday_idx as usize];
         let min_of_day = (secs / 60) as u32;
-        let in_business_hours = (1..=5).contains(&(((days.rem_euclid(7) + 4).rem_euclid(7)))) // Mon..Fri
+        let in_business_hours = (1..=5).contains(&weekday_idx) // Mon..Fri
             && min_of_day >= self.business_start_min
             && min_of_day < self.business_end_min;
         // fiscal year/quarter (start-month aware)
@@ -75,7 +81,14 @@ impl Calendar {
         );
         let asof_local = as_of + self.utc_offset_min as i64 * 60;
         let rel_days_to_asof = asof_local.div_euclid(86_400) - days;
-        Stamp { iso, weekday, in_business_hours, fiscal_year, fiscal_quarter, rel_days_to_asof }
+        Stamp {
+            iso,
+            weekday,
+            in_business_hours,
+            fiscal_year,
+            fiscal_quarter,
+            rel_days_to_asof,
+        }
     }
 
     /// One-line human tag for a context excerpt, e.g.
@@ -87,7 +100,11 @@ impl Calendar {
             n if n > 0 => format!("{n} days before"),
             n => format!("{} days after", -n),
         };
-        let bh = if s.in_business_hours { ", business hours" } else { "" };
+        let bh = if s.in_business_hours {
+            ", business hours"
+        } else {
+            ""
+        };
         format!(
             "{} ({}, {}{}, FY{} Q{})",
             s.iso, s.weekday, rel, bh, s.fiscal_year, s.fiscal_quarter
@@ -113,7 +130,10 @@ mod tests {
 
     #[test]
     fn jst_frame_shifts_local_civil_day() {
-        let c = Calendar { utc_offset_min: 540, ..Calendar::default() };
+        let c = Calendar {
+            utc_offset_min: 540,
+            ..Calendar::default()
+        };
         let s = c.stamp(T, T);
         assert!(s.iso.starts_with("2023-05-30 08:40 +09:00"), "{}", s.iso);
         assert_eq!(s.weekday, "Tue"); // crosses midnight into Tuesday in Tokyo
@@ -122,7 +142,11 @@ mod tests {
 
     #[test]
     fn business_hours_flag() {
-        let c = Calendar { utc_offset_min: 540, business_start_min: 480, ..Calendar::default() }; // 08:00 start
+        let c = Calendar {
+            utc_offset_min: 540,
+            business_start_min: 480,
+            ..Calendar::default()
+        }; // 08:00 start
         assert!(c.stamp(T, T).in_business_hours); // Tue 08:40, window 08:00-18:00
     }
 
@@ -135,7 +159,10 @@ mod tests {
 
     #[test]
     fn fiscal_year_april_start() {
-        let c = Calendar { fiscal_year_start_month: 4, ..Calendar::default() };
+        let c = Calendar {
+            fiscal_year_start_month: 4,
+            ..Calendar::default()
+        };
         let s = c.stamp(T, T); // 2023-05-29 -> FY2023 (Apr-start), Q1 (Apr-Jun)
         assert_eq!(s.fiscal_year, 2023);
         assert_eq!(s.fiscal_quarter, 1);

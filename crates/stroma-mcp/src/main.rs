@@ -56,6 +56,24 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "retrieve_context",
+            "description": "Assemble LLM-ready context from a hybrid search: each hit's current value of a `content` predicate with a calendar-framed timestamp of its `date` predicate (weekday, days relative to `as_of`, business hours), ordered oldest→newest. Returns a ready-to-inject context block + structured hits.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "type": { "type": "string", "description": "target node type name" },
+                    "vector": { "type": "array", "items": { "type": "number" }, "description": "query embedding" },
+                    "content": { "type": "string", "description": "predicate whose text value is the excerpt" },
+                    "date": { "type": "string", "description": "predicate whose Int value (epoch seconds) is the valid-time to stamp" },
+                    "k": { "type": "integer", "default": 10 },
+                    "allowed_labels": { "type": "integer", "description": "caller ABAC label bitmask (default: all)" },
+                    "as_of": { "type": "integer", "description": "reference instant (epoch seconds) for relative-day stamping; default = newest hit" },
+                    "tz_offset_min": { "type": "integer", "description": "calendar frame: minutes offset from UTC (default 0)" }
+                },
+                "required": ["type", "vector", "content"]
+            }
+        },
+        {
             "name": "stats",
             "description": "Database counters: durable head, schema/embedding counts, storage bytes.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -74,14 +92,9 @@ fn tools() -> Value {
 
 fn call_tool(db: &mut Db, name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "point" | "expand" => {
+        "point" | "expand" | "search" | "retrieve_context" => {
             let mut req = args.clone();
             req["op"] = json!(name);
-            db.query(&req)
-        }
-        "search" => {
-            let mut req = args.clone();
-            req["op"] = json!("search");
             db.query(&req)
         }
         "stats" => Ok(db.stats()),
