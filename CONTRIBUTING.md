@@ -27,9 +27,9 @@ CI runs `fmt`, `clippy -D warnings`, and the test suite; a PR must be green befo
 - **No unwrap in library code** except at documented init points; return typed errors.
 - **New behavior needs a test.** Prefer property tests for invariants (see `fold` determinism,
   incremental-maintenance equivalence).
-- **Docs are part of the change.** If you change a contract, update the matching `docs/spec/` and
-  `docs/architecture/` page; if you change *why*, add a line to `docs/DECISIONS.md`. Capability claims
-  in `README.md` must match implemented code — no target-state described as done.
+- **Docs are part of the change.** Component contracts live in each crate's module docs (rustdoc) —
+  keep them accurate; if you change *why*, add a line to `docs/DECISIONS.md`. Capability claims in
+  `README.md` must match implemented code — no target-state described as done.
 - Keep dependencies minimal (`stroma-core` has no runtime deps by design).
 
 ## License of contributions

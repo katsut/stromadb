@@ -1,8 +1,8 @@
 # Design Decisions & Measured Findings
 
 > The *why* behind StromaDB's design, in the order it was decided, with the evidence that settled each
-> call. This is the public rationale trail so a newcomer can follow how the engine got its shape —
-> complements `spec/` (WHAT), `architecture/` (HOW), and `CONTRACTS.md` (the frozen interfaces).
+> call. This is the public rationale trail so a newcomer can follow how the engine got its shape.
+> Component-level contracts live in each crate's module docs (rustdoc).
 > Format per entry: **Context → Decision → Why → Evidence/Status**. Numbers come from the reproducible
 > `crates/stroma-core/examples/*` probes.
 

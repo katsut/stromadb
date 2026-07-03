@@ -1,2 +1,77 @@
-/target
-**/target
+# --- Rust ---
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+# Cargo.lock IS committed (this workspace ships binaries).
+
+# --- Secrets / env (never commit) ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+secrets/
+
+# --- Coverage / profiling ---
+*.profraw
+*.profdata
+lcov.info
+/coverage/
+/criterion/
+
+# --- Local scratch databases ---
+# A `stroma init` / `stroma-serve` database directory normally lives outside the repo; ignore the
+# common file/dir names so an in-tree scratch DB is not committed by accident.
+/db/
+/*.wal
+wal.log
+schema.jsonl
+nodes.jsonl
+embeddings.bin
+embeddings.ids
+meta.json
+
+# --- OS ---
+.DS_Store
+.AppleDouble
+Thumbs.db
+desktop.ini
+
+# --- Editor / IDE ---
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.code-workspace
+.zed/
+.helix/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# --- AI assistants (keep assistant configs/artifacts out of the public repo) ---
+CLAUDE.md
+GEMINI.md
+AGENTS.local.md
+.claude/
+.cursor/
+.cursorrules
+.cursorignore
+.aider*
+.continue/
+.windsurf/
+.windsurfrules
+.gemini/
+.github/copilot-instructions.md
+.codeium/
+.aiderignore
+
+# --- Local notes ---
+/scratch/
+TODO.local.md
+*.local.md

@@ -1,12 +1,9 @@
 # StromaDB — Spec
 
-The capability / constraint / non-goal contract for the StromaDB core. Technical scope only;
-business strategy lives in the (private) platform planning repo. Companion: `docs/ARCHITECTURE.md`.
+The capability / constraint / non-goal contract for the StromaDB core. Technical scope only.
+Companion: `docs/ARCHITECTURE.md`.
 
 ## Capabilities
-
-Items marked **(Vesicle)** are the commercial layer, listed here for the full picture; the OSS core
-is CAP-1..7 and CAP-10..12.
 
 - **CAP-1 — High-frequency stream ingest, no write stalls.** Ingest org events/activity/knowledge
   into the graph in real time, append-only. Under sustained load no hard write stall occurs; overload
@@ -29,10 +26,6 @@ is CAP-1..7 and CAP-10..12.
   explicit migration.
 - **CAP-7 — Self-hostable OSS core.** Run a single-org engine (ingest → hybrid query → Live Query)
   on one node under a source-available license.
-- **CAP-8 — (Vesicle) Managed, multi-tenant, scale-to-zero, Zero-ETL CDC.** Connect a source
-  (e.g. Postgres); changes flow to the graph; idle tenants cost zero compute.
-- **CAP-9 — (Vesicle) Flexible source→graph mapping** — no-code (AI-proposed → approve/edit),
-  low-code (expressions), or programmable API; driven by anyone (self-serve / consultant / embedded).
 - **CAP-10 — Composable operator query model (one algebra).** Search/traversal is expressed as
   composable primitives an agent chains in a loop; the *same* pipeline runs as a one-shot evaluation
   or an incrementally-maintained Live Query.

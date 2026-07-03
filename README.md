@@ -134,8 +134,3 @@ Notes: numbers are from our runs on the hardware above — run the examples on y
 (p99) are reported, not just medians. No vendor comparisons here; see
 [docs/DECISIONS.md](docs/DECISIONS.md) for known limitations (single-threaded serving, file-WAL
 compaction pending, cold-SSD re-rank caveat).
-
-## Where Vesicle fits
-
-StromaDB is the OSS core. **Vesicle** is the commercial managed layer (real-time source→graph
-mapping, Zero-ETL CDC, managed multi-tenant, scale-to-zero) built on top of it.
