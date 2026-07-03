@@ -358,6 +358,7 @@ impl Db {
             "node" => self.node_detail(req, &snap),
             "graph" => self.graph(req, &snap),
             "overview" => self.overview(req, &snap),
+            "schema" => Ok(self.schema()),
             other => Err(format!("unknown op: {other}")),
         }
     }
@@ -462,9 +463,50 @@ impl Db {
             .node_type(subject)
             .and_then(|t| self.cat.name(t))
             .map(|s| s.to_string());
-        Ok(
-            json!({ "id": subject, "type": ty, "label": self.cat.node_label(subject), "props": props }),
-        )
+        // the node's stored embedding, if any (so the console can show it carries a vector)
+        let embedding: Option<Vec<f32>> = self
+            .emb_ids
+            .iter()
+            .position(|&id| id == subject)
+            .map(|i| self.emb[i * self.dim..(i + 1) * self.dim].to_vec());
+        Ok(json!({
+            "id": subject,
+            "type": ty,
+            "label": self.cat.node_label(subject),
+            "props": props,
+            "embedding": embedding,
+            "dim": self.dim,
+        }))
+    }
+
+    /// The schema vocabulary: registered predicates (name, cardinality, domain/range) and the set of
+    /// node labels actually in use — so a client can discover what is queryable and which sensitivity
+    /// labels exist, instead of guessing predicate names or bitmask values.
+    fn schema(&self) -> Value {
+        let mut preds: Vec<Value> = self
+            .cat
+            .predicates()
+            .map(|p| {
+                let name = self.cat.name(p.id).unwrap_or("?");
+                let card = match p.cardinality {
+                    Cardinality::One => "one",
+                    Cardinality::Many => "many",
+                };
+                let domain = self.cat.name(p.domain).map(|s| s.to_string());
+                let range = match p.range {
+                    Range::Type(t) => json!({ "type": self.cat.name(t) }),
+                    Range::Value(v) => json!({ "value": match v {
+                        ValueType::Int => "int",
+                        ValueType::Float => "float",
+                        ValueType::Text => "text",
+                        ValueType::Bool => "bool",
+                    } }),
+                };
+                json!({ "name": name, "card": card, "domain": domain, "range": range })
+            })
+            .collect();
+        preds.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        json!({ "predicates": preds, "labels": self.cat.labels_in_use() })
     }
 
     /// Whole-graph view: every declared node and its node-valued edges, authz-scoped and capped at
