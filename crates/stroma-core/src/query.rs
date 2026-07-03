@@ -4,7 +4,7 @@
 //! engine produces (read-merge, see [`crate::engine`]); physical co-location (CSR adjacency) is a
 //! later optimization that does not change these contracts.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::fact::{FieldId, NodeId};
 use crate::fold::{ObjKey, Snapshot};
@@ -97,6 +97,41 @@ pub fn describe(
         }
     }
     (ones, manys)
+}
+
+/// Build the **undirected** node adjacency of the whole snapshot: every node-valued edge
+/// `subject -p-> object` contributes a link in *both* directions, so a BFS over it reaches what a
+/// node points to *and* what points at it (an interactive explorer wants connectivity, not edge
+/// direction). Optionally restricted to a single predicate `p`. O(node-valued edges) — a full scan;
+/// a maintained reverse index is the later optimization. Isolated nodes (no edges) are absent.
+pub fn undirected_adjacency(
+    snap: &Snapshot,
+    predicate: Option<FieldId>,
+) -> HashMap<NodeId, BTreeSet<NodeId>> {
+    let mut adj: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
+    let link = |a: NodeId, b: NodeId, adj: &mut HashMap<NodeId, BTreeSet<NodeId>>| {
+        adj.entry(a).or_default().insert(b);
+        adj.entry(b).or_default().insert(a);
+    };
+    for (&(s, p), v) in snap.one.iter() {
+        if predicate.is_some_and(|pp| pp != p) {
+            continue;
+        }
+        if let Some(ObjKey::Node(n)) = v {
+            link(s, *n, &mut adj);
+        }
+    }
+    for (&(s, p), set) in snap.many.iter() {
+        if predicate.is_some_and(|pp| pp != p) {
+            continue;
+        }
+        for o in set {
+            if let ObjKey::Node(n) = o {
+                link(s, *n, &mut adj);
+            }
+        }
+    }
+    adj
 }
 
 /// 1-hop expand from a set of subjects (multi-source frontier).

@@ -393,6 +393,8 @@ impl Db {
             return Ok(json!({ "nodes": [], "edges": [] }));
         }
         depth.insert(focus, 0);
+        // undirected adjacency: reach both what the focus points to and what points at it.
+        let adj = query::undirected_adjacency(snap, pred);
         let mut frontier = vec![focus];
         for d in 0..hops {
             if frontier.is_empty() || depth.len() >= cap {
@@ -400,11 +402,7 @@ impl Db {
             }
             let mut next = Vec::new();
             for &u in &frontier {
-                let ns = match pred {
-                    Some(p) => query::expand(snap, u, p),
-                    None => query::neighbors(snap, u),
-                };
-                for v in ns {
+                for &v in adj.get(&u).into_iter().flatten() {
                     if !visible(v) {
                         continue;
                     }

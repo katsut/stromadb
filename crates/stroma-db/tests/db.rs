@@ -111,6 +111,12 @@ fn neighborhood_khop_and_authz() {
     );
     assert_eq!(r["edges"].as_array().unwrap().len(), 3);
 
+    // undirected: from the middle node, reach the incoming (2->3) *and* outgoing (3->4) neighbours
+    let r = db
+        .query(&json!({"op":"neighborhood","subject":3,"hops":1}))
+        .unwrap();
+    assert_eq!(depths(&r), [(3, 0), (2, 1), (4, 1)].into_iter().collect());
+
     // authz: label 3 denied → node 3 pruned, so node 4 is unreachable through it
     let r = db
         .query(&json!({"op":"neighborhood","subject":1,"hops":3,"allowed_labels":1}))
