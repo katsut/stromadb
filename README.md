@@ -56,6 +56,28 @@ See **[SPEC.md](SPEC.md)** for the capability/constraint contract,
 **[docs/DECISIONS.md](docs/DECISIONS.md)** for *why* the engine is shaped this way — the decision trail
 with the measurements that settled each call (and the known limitations / roadmap).
 
+## Console (web UI)
+
+`stroma-serve` ships a built-in web console — one dependency-free HTML file, no build step — served
+at `http://localhost:7687/`. It's a GPU-rendered (WebGL2) graph explorer with three peer modes:
+
+- **Explore** — walk a node's neighbourhood filtered by hop distance and type scope, with live force
+  layout, draggable nodes, and on-graph distance labels; inspect any node down to its embedding.
+- **Query** — run a point/expand read, a type-aware vector search, or "find similar", and see the
+  result laid out on the graph.
+- **Compose** — chain primitives (source → expand → filter → top-k) step by step, with a result
+  count at each stage.
+
+The graph updates in place as the database changes (a red **LIVE** indicator shows when a stream is
+feeding it). Session login, light/dark themes, and EN / JA / ZH are built in.
+
+```bash
+stroma-serve --db ./mydb --addr 127.0.0.1:7687
+# then open http://localhost:7687/ in a browser
+```
+
+Load the [sample dataset](examples/) first to explore a populated graph in about a minute.
+
 ## Quickstart (CLI)
 
 ```bash
@@ -107,11 +129,8 @@ The image ships `stroma-serve` (entrypoint), plus the `stroma` CLI and `stroma-m
 ## Serve (HTTP)
 
 `stroma-serve` exposes the same database over HTTP so an agent or service can query and ingest it
-without embedding the engine — the intended surface for an LLM caller. It also serves a
-dependency-free web console (single HTML file, no build step) at `http://localhost:7687/` — a
-GPU-rendered graph explorer (pictured above) with distance-filtered exploration, type-aware vector
-search, per-node inspection, composable step-by-step queries, and live updates as the database changes.
-Load the [sample dataset](examples/) to try it in a minute.
+without embedding the engine — the intended surface for an LLM caller. It also serves the built-in
+web [Console](#console-web-ui) (pictured above) at the same address.
 
 ```bash
 stroma-serve --db ./mydb --addr 127.0.0.1:7687   # worker pool: concurrent reads, exclusive writes
