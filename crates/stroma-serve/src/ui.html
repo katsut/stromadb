@@ -140,7 +140,7 @@
     <canvas id="cv"></canvas>
     <canvas id="labels"></canvas>
     <div class="renderer-tag" id="rtag"></div>
-    <div class="hud"><button id="back" title="back to previous focus" disabled>←</button><button id="labtog" class="active" title="toggle labels">A</button><button id="zin" title="zoom in">+</button><button id="zout" title="zoom out">−</button><button id="fit" title="fit">⊡</button></div>
+    <div class="hud"><button id="back" title="back to previous focus" disabled>←</button><button id="livetog" class="active" title="live updates on (click to pause)">◉</button><button id="labtog" class="active" title="toggle labels">A</button><button id="zin" title="zoom in">+</button><button id="zout" title="zoom out">−</button><button id="fit" title="fit">⊡</button></div>
     <div class="stage-note" id="note">Draw a neighbourhood to explore the graph.</div>
     <div class="inspect hidden" id="inspect"></div>
     <div class="toast hidden" id="toast"></div>
@@ -168,16 +168,27 @@ let eW = [];                 // per-edge strength (distinct predicates connectin
 const cam = { x:0, y:0, z:1 };
 let W=0, H=0; const dpr = Math.min(devicePixelRatio||1, 2);
 let dragging=false, moved=false, lastX=0, lastY=0, dragIdx=-1, pinned=new Set();
+let liveHead=0, liveOn=true, lastReq=null, pollStarted=false;   // live update state
 
-function loadGraph(nodes, edges) {
-  dragIdx = -1; pinned.clear();
+// live=true keeps existing nodes where they are (position-preserving update) and doesn't re-fit —
+// used by the live poll so the graph flexes instead of teleporting. Fresh draws seed nodes on
+// concentric rings by hop depth, close to where the force layout settles, so the opening barely moves.
+function loadGraph(nodes, edges, live) {
+  const prev = live ? new Map() : null;
+  const pinnedIds = live ? [...pinned].map(i=>ids[i]) : [];
+  if (live) for (let i=0;i<N;i++) prev.set(ids[i], [px[i],py[i],vx[i],vy[i]]);
+  dragIdx = -1; if (!live) pinned.clear();
   N = nodes.length; ids = new Array(N); idx = new Map(); depth = new Array(N); names = new Array(N);
   px = new Float32Array(N); py = new Float32Array(N); vx = new Float32Array(N); vy = new Float32Array(N);
   nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth; names[i]=nd.name||null;
-    const a = (i*2.399963), r = 30 + Math.sqrt(i)*22; px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; });
+    const p = prev && prev.get(nd.id);
+    if (p) { px[i]=p[0]; py[i]=p[1]; vx[i]=p[2]; vy[i]=p[3]; }
+    else { const a=i*2.399963, r = nd.depth>0 ? nd.depth*82 + (i%5)*7 : (N>1 ? 24+Math.sqrt(i)*20 : 0);
+      px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; } });
   ePairs = []; eW = []; for (const [a,b,w] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined){ ePairs.push(i,j); eW.push(w||1); } }
+  if (live) pinned = new Set(pinnedIds.map(id=>idx.get(id)).filter(x=>x!==undefined));
   $('note').style.display = N ? 'none' : '';
-  settle = 260; autoFit = true; buildBuffers();
+  settle = live ? 80 : 200; autoFit = !live; buildBuffers();
 }
 
 // ---------- WebGL2 ----------
@@ -366,15 +377,30 @@ async function go(){ if($('focus').value.trim()===''){ toast('enter a focus node
   try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
     if($('pred').value) req.predicate=$('pred').value; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
-    loadGraph(r.nodes, r.edges); toast(`${r.nodes.length} nodes · ${r.edges.length} edges within ${$('hops').value} hops`); fit();
+    lastReq=req; loadGraph(r.nodes, r.edges); toast(`${r.nodes.length} nodes · ${r.edges.length} edges within ${$('hops').value} hops`); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
 async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
   try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
-    loadGraph(r.nodes, r.edges); toast(`whole graph · ${r.nodes.length} nodes · ${r.edges.length} edges${r.truncated?' (capped)':''}`); fit();
+    lastReq=req; loadGraph(r.nodes, r.edges); toast(`whole graph · ${r.nodes.length} nodes · ${r.edges.length} edges${r.truncated?' (capped)':''}`); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('all').onclick=drawAll;
+
+// ---------- live updates: long-poll /events, re-query the current slice on change ----------
+async function startPoll(){ if(pollStarted) return; pollStarted=true;
+  try{ const s=await api('/stats'); liveHead = s.facts?.durable_head ?? 0; }catch(x){}
+  while(true){
+    let head;
+    try{ const r=await fetch('/events?since='+liveHead); if(!r.ok){ await new Promise(z=>setTimeout(z,2000)); continue; } head=(await r.json()).head; }
+    catch(x){ await new Promise(z=>setTimeout(z,2000)); continue; }
+    if(head===liveHead) continue;      // timeout tick, no change
+    liveHead=head; setLivePill(); stats();   // refresh header counters too
+    if(liveOn && lastReq){ try{ const res=await api('/query', lastReq); if(!res.error){ loadGraph(res.nodes, res.edges, true); toast('live · updated'); } }catch(x){} }
+  }
+}
+function setLivePill(){ const b=$('livetog'); if(!b) return; b.classList.toggle('active', liveOn); b.title = liveOn ? 'live updates on (click to pause)' : 'paused (click to resume)'; }
+$('livetog').onclick=()=>{ liveOn=!liveOn; setLivePill(); if(liveOn && lastReq){ (async()=>{ try{ const res=await api('/query',lastReq); if(!res.error) loadGraph(res.nodes,res.edges,true); }catch(x){} })(); } };
 
 function legend(){ const nm=['focus','1-hop','2-hop','3-hop','4-hop','deep']; $('legend').innerHTML=nm.map((n,i)=>`<span><i class="swatch" style="background:${hex(DEPTH[i])}"></i>${n}</span>`).join(''); }
 async function stats(){ try{ const s=await api('/stats'); $('statpills').innerHTML=`<span class="pill"><span class="dot"></span>live</span><span class="pill"><b>${s.schema.nodes}</b> nodes</span><span class="pill"><b>${s.embeddings.count}</b> vec</span><span class="pill">head <b>${s.facts.durable_head}</b></span>`; }catch{ $('statpills').innerHTML='<span class="pill">offline</span>'; } }
