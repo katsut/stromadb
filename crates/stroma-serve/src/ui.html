@@ -32,8 +32,16 @@
   .pills { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
   .pill { font:500 11.5px/1 var(--mono); color:var(--fg-dim); background:var(--panel); border:1px solid var(--line); border-radius:100px; padding:6px 10px; }
   .pill b { color:var(--fg); } .dot { width:7px; height:7px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px var(--accent); display:inline-block; margin-right:6px; vertical-align:middle; }
-  aside { border-right:1px solid var(--line); background:var(--bg-2); overflow-y:auto; padding:18px; }
-  section.q { background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:16px; box-shadow:var(--shadow); }
+  .pill.live-ind { cursor:pointer; user-select:none; letter-spacing:.06em; }
+  .pill.live-ind.on { color:#ff5a6a; border-color:color-mix(in oklab,#ff5a6a 48%,var(--line)); }
+  .pill.live-ind.on .dot { background:#ff5a6a; box-shadow:0 0 9px #ff5a6a; animation:livepulse 1.3s ease-in-out infinite; }
+  .pill.live-ind:not(.on) .dot { background:var(--mut); box-shadow:none; }
+  @keyframes livepulse { 0%,100%{opacity:1} 50%{opacity:.28} }
+  section.q.collapsed { padding-bottom:14px; } section.q.collapsed > :not(h2) { display:none; }
+  h2.clp { cursor:pointer; display:flex; align-items:center; gap:6px; } h2.clp .caret { transition:transform .15s; } section.q.collapsed h2.clp .caret { transform:rotate(-90deg); }
+  aside { border-right:1px solid var(--line); background:linear-gradient(180deg, color-mix(in oklab, var(--bg-2) 80%, transparent), color-mix(in oklab, var(--bg-2) 90%, transparent)); backdrop-filter:blur(10px); overflow-y:auto; padding:18px; }
+  /* metallic-glass panels floating over the starfield: brushed-steel gradient + top bevel + soft glow */
+  section.q { background:linear-gradient(163deg, color-mix(in oklab, var(--panel) 84%, #38466a 16%), color-mix(in oklab, var(--panel) 94%, transparent)); border:1px solid var(--line); border-radius:var(--r); padding:16px; backdrop-filter:blur(6px); box-shadow:inset 0 1px 0 rgba(255,255,255,.06), inset 0 0 0 1px rgba(255,255,255,.015), var(--shadow); }
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:var(--mut); margin:0 0 12px; font-weight:600; }
   label { display:block; color:var(--fg-dim); font-size:12px; margin:12px 0 5px; }
   .lbl-row { display:flex; justify-content:space-between; align-items:baseline; } .lbl-row b { color:var(--accent); font:600 12px var(--mono); }
@@ -43,7 +51,7 @@
   input[type=range] { padding:0; accent-color:var(--accent); }
   select { appearance:none; background-image:linear-gradient(45deg,transparent 50%,var(--mut) 50%),linear-gradient(135deg,var(--mut) 50%,transparent 50%); background-position:calc(100% - 16px) 55%, calc(100% - 11px) 55%; background-size:5px 5px,5px 5px; background-repeat:no-repeat; }
   .row { display:flex; gap:10px; } .row > * { flex:1; min-width:0; }
-  button.primary { width:100%; margin-top:16px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); color:var(--accent-ink); border:0; border-radius:var(--r-sm); padding:11px; font:640 14px var(--sans); cursor:pointer; transition:filter .15s, transform .05s; }
+  button.primary { width:100%; margin-top:16px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); color:var(--accent-ink); border:0; border-radius:var(--r-sm); padding:11px; font:640 14px var(--sans); cursor:pointer; transition:filter .15s, transform .05s; box-shadow:inset 0 1px 0 rgba(255,255,255,.3), 0 6px 16px -8px color-mix(in oklab, var(--accent) 60%, transparent); }
   button.primary:hover { filter:brightness(1.06); } button.primary:active { transform:translateY(1px); } button.primary:disabled { opacity:.6; cursor:progress; }
   .legend { margin-top:14px; display:flex; flex-wrap:wrap; gap:8px 14px; } .legend span { font-size:11.5px; color:var(--fg-dim); display:flex; align-items:center; gap:6px; } .swatch { width:9px; height:9px; border-radius:50%; }
   .tip { color:var(--mut); font-size:11.5px; margin-top:12px; line-height:1.45; }
@@ -98,7 +106,8 @@
       <span class="name">Stroma<b>DB</b></span>
     </div>
     <div class="pills">
-      <span id="statpills"><span class="pill"><span class="dot"></span>connecting…</span></span>
+      <span class="pill live-ind on" id="livePill" title="live"><span class="dot"></span>LIVE</span>
+      <span id="statpills"></span>
       <span class="pill role" id="rolePill">view as <b>—</b></span>
       <span class="pill" id="userPill" style="display:none">signed in <b id="userName"></b></span>
     </div>
@@ -108,8 +117,8 @@
   </header>
 
   <aside>
-    <section class="q">
-      <h2 data-i18n="explore">Explore</h2>
+    <section class="q" id="exploreSec">
+      <h2 class="clp" id="exploreH"><span class="caret">▾</span><span data-i18n="explore">Explore</span></h2>
       <div class="row">
         <div><label data-i18n="focusNode">focus node</label><input id="focus" type="number" value="1"></div>
         <div><label data-i18n="predicate">predicate (blank = all)</label><input id="pred" data-i18n-ph="allEdges" placeholder="all edges"></div>
@@ -142,7 +151,7 @@
     <canvas id="cv"></canvas>
     <canvas id="labels"></canvas>
     <div class="renderer-tag" id="rtag"></div>
-    <div class="hud"><button id="back" data-i18n-title="back" title="back to previous focus" disabled>←</button><button id="livetog" class="active" data-i18n-title="liveOn" title="live updates on (click to pause)">◉</button><button id="labtog" class="active" data-i18n-title="labels" title="toggle labels">A</button><button id="zin" data-i18n-title="zoomIn" title="zoom in">+</button><button id="zout" data-i18n-title="zoomOut" title="zoom out">−</button><button id="fit" data-i18n-title="fit" title="fit">⊡</button></div>
+    <div class="hud"><button id="back" data-i18n-title="back" title="back to previous focus" disabled>←</button><button id="labtog" class="active" data-i18n-title="labels" title="toggle labels">A</button><button id="zin" data-i18n-title="zoomIn" title="zoom in">+</button><button id="zout" data-i18n-title="zoomOut" title="zoom out">−</button><button id="fit" data-i18n-title="fit" title="fit">⊡</button></div>
     <div class="stage-note" id="note" data-i18n="note">Draw a neighbourhood to explore the graph.</div>
     <div class="inspect hidden" id="inspect"></div>
     <div class="toast hidden" id="toast"></div>
@@ -157,19 +166,19 @@ const api = (p,b) => fetch(p, b?{method:'POST',body:JSON.stringify(b)}:{}).then(
 const I18N = {
   en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.",
        theme:"Toggle light / dark", signOut:"Sign out", back:"back to previous focus", liveOn:"live updates on (click to pause)", livePaused:"paused (click to resume)", labels:"toggle labels", zoomIn:"zoom in", zoomOut:"zoom out", fit:"fit", allEdges:"all edges", egAnalyst:"e.g. analyst",
-       connecting:"connecting…", live:"live", offline:"offline", nodes:"nodes", vec:"vec", head:"head", signedIn:"signed in", viewAsPill:"view as",
+       connecting:"connecting…", live:"LIVE", paused:"paused", offline:"offline", nodes:"nodes", vec:"vec", head:"head", signedIn:"signed in", viewAsPill:"view as",
        lgFocus:"focus", lgDeep:"deep", hop:"hop",
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”" },
   ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。",
        theme:"ライト/ダーク切替", signOut:"サインアウト", back:"前の焦点に戻る", liveOn:"ライブ更新中（クリックで一時停止）", livePaused:"一時停止中（クリックで再開）", labels:"ラベル表示切替", zoomIn:"拡大", zoomOut:"縮小", fit:"全体表示", allEdges:"全ての辺", egAnalyst:"例: analyst",
-       connecting:"接続中…", live:"ライブ", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
+       connecting:"接続中…", live:"ライブ", paused:"一時停止", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
        lgFocus:"焦点", lgDeep:"遠方", hop:"ホップ",
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用" },
   zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。",
        theme:"切换明暗", signOut:"退出登录", back:"返回上一焦点", liveOn:"实时更新中（点击暂停）", livePaused:"已暂停（点击恢复）", labels:"切换标签", zoomIn:"放大", zoomOut:"缩小", fit:"适配", allEdges:"所有边", egAnalyst:"例: analyst",
-       connecting:"连接中…", live:"实时", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
+       connecting:"连接中…", live:"实时", paused:"暂停", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
        lgFocus:"焦点", lgDeep:"更远", hop:"跳",
        detNode:"节点", detType:"类型", detLabel:"标签", untyped:"无类型", recentre:"以此为中心 ›", noProps:"无存储属性。", loading:"加载中…", restricted:"角色“{r}”下受限。",
        tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”" },
@@ -449,13 +458,14 @@ async function startPoll(){ if(pollStarted) return; pollStarted=true;
       loadGraph(nodes, res.edges, true); toast(t('tLive')); } }catch(x){} }
   }
 }
-function setLivePill(){ const b=$('livetog'); if(!b) return; b.classList.toggle('active', liveOn); b.title = liveOn ? t('liveOn') : t('livePaused'); }
-$('livetog').onclick=()=>{ liveOn=!liveOn; setLivePill(); if(liveOn && lastReq){ (async()=>{ try{ const res=await api('/query',lastReq); if(!res.error) loadGraph(res.nodes,res.edges,true); }catch(x){} })(); } };
+function setLivePill(){ const b=$('livePill'); if(!b) return; b.classList.toggle('on', liveOn); b.title = liveOn ? t('liveOn') : t('livePaused'); b.innerHTML = `<span class="dot"></span>${liveOn ? t('live') : t('paused')}`; }
+$('livePill').onclick=()=>{ liveOn=!liveOn; setLivePill(); if(liveOn && lastReq){ (async()=>{ try{ const res=await api('/query',lastReq); if(!res.error) loadGraph(res.nodes,res.edges,true); }catch(x){} })(); } };
+$('exploreH').onclick=()=>$('exploreSec').classList.toggle('collapsed');
 
 function legend(){ const nm=[t('lgFocus'), '1-'+t('hop'), '2-'+t('hop'), '3-'+t('hop'), '4-'+t('hop'), t('lgDeep')];
   $('legend').innerHTML=nm.map((n,i)=>`<span><i class="swatch" style="background:${hex(DEPTH[i])}"></i>${n}</span>`).join(''); }
 let _stats=null;
-function renderStats(){ if(!_stats){ return; } const s=_stats; $('statpills').innerHTML=`<span class="pill"><span class="dot"></span>${t('live')}</span><span class="pill"><b>${s.schema.nodes}</b> ${t('nodes')}</span><span class="pill"><b>${s.embeddings.count}</b> ${t('vec')}</span><span class="pill">${t('head')} <b>${s.facts.durable_head}</b></span>`; }
+function renderStats(){ if(!_stats){ return; } const s=_stats; $('statpills').innerHTML=`<span class="pill"><b>${s.schema.nodes}</b> ${t('nodes')}</span><span class="pill"><b>${s.embeddings.count}</b> ${t('vec')}</span><span class="pill">${t('head')} <b>${s.facts.durable_head}</b></span>`; }
 async function stats(){ try{ _stats=await api('/stats'); renderStats(); }catch{ $('statpills').innerHTML=`<span class="pill">${t('offline')}</span>`; } }
 
 // ---------- access roles (view-as label presets; console-side, localStorage) ----------
