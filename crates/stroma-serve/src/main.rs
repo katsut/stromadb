@@ -123,12 +123,18 @@ fn json_response(status: u16, body: &Value) -> Response<std::io::Cursor<Vec<u8>>
 
 fn html_response() -> Response<std::io::Cursor<Vec<u8>>> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
-    Response::from_string(UI_HTML).with_header(ct)
+    // send with a Content-Length rather than chunked, so the page arrives as one clean body
+    // (chunk framing can otherwise split a multi-byte UTF-8 char across boundaries for naive readers)
+    Response::from_string(UI_HTML)
+        .with_header(ct)
+        .with_chunked_threshold(usize::MAX)
 }
 
 fn login_response() -> Response<std::io::Cursor<Vec<u8>>> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
-    Response::from_string(LOGIN_HTML).with_header(ct)
+    Response::from_string(LOGIN_HTML)
+        .with_header(ct)
+        .with_chunked_threshold(usize::MAX)
 }
 
 fn json_cookie_response(
