@@ -19,11 +19,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use stroma_core::calendar::Calendar;
 use stroma_core::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
 use stroma_core::changelog::WriteKind;
 use stroma_core::engine::Engine;
-use stroma_core::fold::ObjKey;
-use stroma_core::ir::{Pipeline, Principal, Source, Transform, run};
+use stroma_core::fold::{ObjKey, Snapshot};
+use stroma_core::ir::{Pipeline, Principal, Source, Transform, Traverser, run};
 use stroma_core::ivf::IvfPq;
 use stroma_core::query;
 use stroma_core::version::{ReadMode, VersionVector};
@@ -347,65 +348,143 @@ impl Db {
                 )
             }
             "search" => {
-                let ty = req["type"].as_str().ok_or("search.type missing")?;
-                let tid = self.cat.field_id(ty).ok_or(format!("unknown type: {ty}"))?;
-                let k = req["k"].as_u64().unwrap_or(10) as usize;
-                let labels = req["allowed_labels"]
-                    .as_u64()
-                    .map(|m| m as u32)
-                    .unwrap_or(u32::MAX);
-                let mode = if req["mode"].as_str() == Some("strict") {
-                    ReadMode::Strict
-                } else {
-                    ReadMode::Fresh
-                };
-                let qv: Vec<f32> = req["vector"]
-                    .as_array()
-                    .ok_or("search.vector missing")?
-                    .iter()
-                    .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                    .collect();
-                let idx = self.index.as_ref().ok_or("no embeddings ingested")?;
-                let mut transforms = Vec::new();
-                if let Some(p) = req["expand"].as_str() {
-                    let pid = self
-                        .cat
-                        .field_id(p)
-                        .ok_or(format!("unknown predicate: {p}"))?;
-                    transforms.push(Transform::Expand { predicate: pid });
-                }
-                let pipeline = Pipeline {
-                    source: Source::TypeAnn {
-                        q: qv,
-                        target_type: tid,
-                        k,
-                    },
-                    transforms,
-                    max_nodes: req["max_nodes"].as_u64().unwrap_or(100) as usize,
-                    mode,
-                };
-                // embeddings arrive on a separate channel here (not seqno-stamped from the changelog),
-                // so clamp the vector watermark to the changelog head to keep the version-vector
-                // invariant (vector <= changelog). Fresh mode (default) ignores the watermark anyway.
-                let head = self.eng.durable_head();
-                let vw = (self.emb_ids.len() as u64).min(head);
-                let vv = VersionVector::new(head, vw);
-                let t = run(
-                    &snap,
-                    &self.cat,
-                    idx,
-                    &pipeline,
-                    &Principal {
-                        allowed_labels: labels,
-                    },
-                    vv,
-                );
+                let t = self.run_hybrid(req, &snap)?;
                 Ok(
-                    json!({ "ids": t.ids, "scores": t.scores, "as_of": { "changelog": vv.changelog_seqno, "vector": vv.vector_watermark } }),
+                    json!({ "ids": t.ids, "scores": t.scores, "as_of": { "changelog": t.as_of.changelog_seqno, "vector": t.as_of.vector_watermark } }),
                 )
             }
+            "retrieve_context" => self.retrieve_context(req, &snap),
             other => Err(format!("unknown op: {other}")),
         }
+    }
+
+    /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,
+    /// `k`, `allowed_labels`, `expand`, `mode`, `max_nodes`) and evaluates it, authz-scoped.
+    fn run_hybrid(&self, req: &Value, snap: &Snapshot) -> DbResult<Traverser> {
+        let ty = req["type"].as_str().ok_or("type missing")?;
+        let tid = self.cat.field_id(ty).ok_or(format!("unknown type: {ty}"))?;
+        let k = req["k"].as_u64().unwrap_or(10) as usize;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let mode = if req["mode"].as_str() == Some("strict") {
+            ReadMode::Strict
+        } else {
+            ReadMode::Fresh
+        };
+        let qv: Vec<f32> = req["vector"]
+            .as_array()
+            .ok_or("vector missing")?
+            .iter()
+            .map(|x| x.as_f64().unwrap_or(0.0) as f32)
+            .collect();
+        let idx = self.index.as_ref().ok_or("no embeddings ingested")?;
+        let mut transforms = Vec::new();
+        if let Some(p) = req["expand"].as_str() {
+            let pid = self
+                .cat
+                .field_id(p)
+                .ok_or(format!("unknown predicate: {p}"))?;
+            transforms.push(Transform::Expand { predicate: pid });
+        }
+        let pipeline = Pipeline {
+            source: Source::TypeAnn {
+                q: qv,
+                target_type: tid,
+                k,
+            },
+            transforms,
+            max_nodes: req["max_nodes"].as_u64().unwrap_or(100) as usize,
+            mode,
+        };
+        // embeddings arrive on a separate channel (not seqno-stamped from the changelog), so clamp
+        // the vector watermark to the changelog head to keep the version-vector invariant.
+        let head = self.eng.durable_head();
+        let vw = (self.emb_ids.len() as u64).min(head);
+        let vv = VersionVector::new(head, vw);
+        Ok(run(
+            snap,
+            &self.cat,
+            idx,
+            &pipeline,
+            &Principal {
+                allowed_labels: labels,
+            },
+            vv,
+        ))
+    }
+
+    /// Assemble LLM-ready context from a hybrid search: for each hit, the *current* value of the
+    /// `content` predicate plus a calendar-framed stamp of its `date` predicate (weekday, days
+    /// relative to `as_of`, business-hours, fiscal quarter), ordered oldest→newest. An optional
+    /// calendar frame (`tz_offset_min`, `business_start_min`, `business_end_min`,
+    /// `fiscal_year_start_month`) shapes the stamps. Returns `{context, hits, as_of}`.
+    fn retrieve_context(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+        let content_p = self
+            .cat
+            .field_id(
+                req["content"]
+                    .as_str()
+                    .ok_or("content predicate required")?,
+            )
+            .ok_or("unknown content predicate")?;
+        let date_p = match req["date"].as_str() {
+            Some(d) => Some(self.cat.field_id(d).ok_or("unknown date predicate")?),
+            None => None,
+        };
+        let cal = Calendar {
+            utc_offset_min: req["tz_offset_min"].as_i64().unwrap_or(0) as i32,
+            business_start_min: req["business_start_min"].as_u64().unwrap_or(540) as u32,
+            business_end_min: req["business_end_min"].as_u64().unwrap_or(1080) as u32,
+            fiscal_year_start_month: req["fiscal_year_start_month"].as_u64().unwrap_or(1) as u32,
+        };
+
+        let t = self.run_hybrid(req, snap)?;
+        // gather (node, score, date, content) — current values (fold LWW resolves supersession)
+        let mut rows: Vec<(u64, f32, Option<i64>, String)> = t
+            .ids
+            .iter()
+            .zip(&t.scores)
+            .map(|(&n, &sc)| {
+                let content = match query::point_one(snap, n, content_p) {
+                    Some(ObjKey::Text(s)) => s,
+                    _ => String::new(),
+                };
+                let date = date_p.and_then(|dp| match query::point_one(snap, n, dp) {
+                    Some(ObjKey::Int(v)) => Some(v),
+                    _ => None,
+                });
+                (n, sc, date, content)
+            })
+            .collect();
+
+        // as_of = request value, else the most recent hit date, else 0
+        let as_of = req["as_of"]
+            .as_i64()
+            .unwrap_or_else(|| rows.iter().filter_map(|r| r.2).max().unwrap_or(0));
+
+        // chronological order (oldest first); undated last, then by score
+        rows.sort_by(|a, b| {
+            a.2.unwrap_or(i64::MAX)
+                .cmp(&b.2.unwrap_or(i64::MAX))
+                .then(b.1.partial_cmp(&a.1).unwrap())
+        });
+
+        let mut lines = Vec::with_capacity(rows.len());
+        let hits: Vec<Value> = rows
+            .iter()
+            .map(|(n, sc, date, content)| {
+                let stamp = date.map(|d| cal.tag(d, as_of));
+                lines.push(match &stamp {
+                    Some(s) => format!("- [{s}] {content}"),
+                    None => format!("- {content}"),
+                });
+                json!({ "node": n, "score": sc, "date": date, "stamp": stamp, "content": content })
+            })
+            .collect();
+        let context = format!("(excerpts oldest→newest)\n{}", lines.join("\n"));
+        Ok(json!({ "context": context, "hits": hits, "as_of": as_of }))
     }
 
     pub fn cardinality_of(&self, predicate: &str) -> Option<Cardinality> {

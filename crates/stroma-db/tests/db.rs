@@ -63,3 +63,56 @@ fn ingest_embed_query_reopen() {
     assert_eq!(db.stats()["facts"]["durable_head"], json!(5));
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn retrieve_context_current_value_chronological() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_ctx_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Doc\"}}\n",
+        "{\"pred_def\":{\"name\":\"content\",\"cardinality\":\"one\",\"domain\":\"Doc\",\"range_value\":\"text\"}}\n",
+        "{\"pred_def\":{\"name\":\"at\",\"cardinality\":\"one\",\"domain\":\"Doc\",\"range_value\":\"int\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Doc\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Doc\"}}\n",
+        "{\"node\":{\"id\":3,\"type\":\"Doc\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"content\",\"object\":{\"text\":\"alpha\"}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"at\",\"object\":{\"int\":1000000}}}\n",
+        "{\"fact\":{\"subject\":2,\"predicate\":\"content\",\"object\":{\"text\":\"beta\"}}}\n",
+        "{\"fact\":{\"subject\":2,\"predicate\":\"at\",\"object\":{\"int\":3000000}}}\n",
+        "{\"fact\":{\"subject\":3,\"predicate\":\"content\",\"object\":{\"text\":\"gamma\"}}}\n",
+        "{\"fact\":{\"subject\":3,\"predicate\":\"at\",\"object\":{\"int\":2000000}}}\n",
+        // supersede doc 1's content (LWW) — retrieve must return the current value
+        "{\"fact\":{\"subject\":1,\"predicate\":\"content\",\"object\":{\"text\":\"alpha-v2\"},\"valid_from\":1}}\n",
+    ))
+    .unwrap();
+    db.embed_str("{\"node\":1,\"vector\":[1,0,0,0]}\n{\"node\":2,\"vector\":[0.99,0.01,0,0]}\n{\"node\":3,\"vector\":[0.98,0.02,0,0]}\n").unwrap();
+
+    let r = db
+        .query(&json!({"op":"retrieve_context","type":"Doc","vector":[1,0,0,0],"content":"content","date":"at","k":5,"as_of":4000000}))
+        .unwrap();
+    let hits = r["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 3);
+    // chronological (oldest → newest)
+    assert_eq!(
+        hits.iter()
+            .map(|h| h["date"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1000000, 2000000, 3000000]
+    );
+    // current-value bias: doc 1's superseded content is "alpha-v2", not "alpha"
+    assert_eq!(hits[0]["content"], json!("alpha-v2"));
+    assert_eq!(hits[1]["content"], json!("gamma"));
+    assert_eq!(hits[2]["content"], json!("beta"));
+    // each hit carries a calendar stamp; the assembled block is chronological
+    assert!(hits.iter().all(|h| h["stamp"].is_string()));
+    let ctx = r["context"].as_str().unwrap();
+    assert!(ctx.find("alpha-v2").unwrap() < ctx.find("gamma").unwrap());
+    assert!(ctx.find("gamma").unwrap() < ctx.find("beta").unwrap());
+    assert_eq!(r["as_of"], json!(4000000));
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}

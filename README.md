@@ -111,6 +111,8 @@ stroma-serve --db ./mydb --addr 127.0.0.1:7687   # single-threaded, one writer
 curl -s localhost:7687/health
 curl -s -X POST localhost:7687/query  -d '{"op":"expand","subject":1,"predicate":"works-on"}'
 curl -s -X POST localhost:7687/query  -d '{"op":"search","type":"Person","vector":[...],"k":10,"allowed_labels":7}'
+# retrieve_context: assembled, date-stamped, current-value context ready for an LLM
+curl -s -X POST localhost:7687/query  -d '{"op":"retrieve_context","type":"Doc","vector":[...],"content":"body","date":"created_at","k":8}'
 curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2}}}'
 curl -s localhost:7687/stats
 ```
