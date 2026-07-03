@@ -7,6 +7,7 @@
 //!   POST /login  {user,password} → session cookie     (public)
 //!   POST /logout          → clears the session
 //!   GET  /me              → {"user": name}
+//!   GET  /events?since=N  → long-poll; returns {"head": M} when the durable head advances (or ~20s)
 //!   GET  /stats           → engine/schema/embedding/storage counters
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stroma_db::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,durable_head}
@@ -298,6 +299,25 @@ fn main() {
                     let _ = req.respond(json_cookie_response(200, &json!({ "ok": true }), clear));
                 } else if method == Method::Get && path == "/me" {
                     let _ = req.respond(json_response(200, &json!({ "user": auth.user })));
+                } else if method == Method::Get && path == "/events" {
+                    // long-poll: block until the durable head advances past `since` (or ~20s), so the
+                    // console can re-query its current slice the moment the database changes.
+                    let since = req
+                        .url()
+                        .split("since=")
+                        .nth(1)
+                        .and_then(|s| s.split('&').next())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    let head_now = || db.read().unwrap_or_else(|e| e.into_inner()).durable_head();
+                    let mut head = head_now();
+                    let mut waited = 0u32;
+                    while head == since && waited < 20_000 {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        waited += 250;
+                        head = head_now();
+                    }
+                    let _ = req.respond(json_response(200, &json!({ "head": head })));
                 } else if method == Method::Get && (path == "/" || path == "/ui") {
                     let _ = req.respond(html_response());
                 } else {

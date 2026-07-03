@@ -660,6 +660,12 @@ impl Db {
         self.cardinality.get(predicate).copied()
     }
 
+    /// Current durable changelog head — a cheap in-memory monotonic counter used by the console's
+    /// live-update poll to detect that the database has advanced.
+    pub fn durable_head(&self) -> u64 {
+        self.eng.durable_head()
+    }
+
     pub fn stats(&self) -> Value {
         let wal_bytes = fs::metadata(self.dir.join("wal.log"))
             .map(|m| m.len())
