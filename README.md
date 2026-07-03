@@ -106,7 +106,7 @@ The image ships `stroma-serve` (entrypoint), plus the `stroma` CLI and `stroma-m
 without embedding the engine — the intended surface for an LLM caller.
 
 ```bash
-stroma-serve --db ./mydb --addr 127.0.0.1:7687   # single-threaded, one writer
+stroma-serve --db ./mydb --addr 127.0.0.1:7687   # worker pool: concurrent reads, exclusive writes
 
 curl -s localhost:7687/health
 curl -s -X POST localhost:7687/query  -d '{"op":"expand","subject":1,"predicate":"works-on"}'

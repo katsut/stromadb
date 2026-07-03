@@ -32,6 +32,8 @@ stroma-serve
 
 ## Deployment shape (v1)
 
-`stroma-serve` is single-threaded (one writer, requests handled sequentially) — the honest pre-1.0
-shape. Concurrent reads, a thread-count setting, TLS, and structured logging are on the roadmap; none
-are configurable yet because they are not built yet.
+`stroma-serve` runs a worker pool sharing the database behind an `RwLock`: reads (`/query`, `/stats`,
+`/health`) are concurrent; writes (`/ingest`, `/embed`) take the write lock and are exclusive. The
+worker count defaults to the available parallelism (clamped to 2–32). Fully lock-free reads *during*
+a write (over a pinned snapshot), a thread-count setting, TLS, and structured logging are on the
+roadmap; none of those are configurable yet because they are not built yet.
