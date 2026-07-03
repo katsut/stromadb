@@ -7,13 +7,24 @@ use std::time::Duration;
 
 use stroma_db::Db;
 
-fn http(addr: &str, method: &str, path: &str, body: &str) -> (u16, String) {
+/// Minimal HTTP/1.1 client: returns (status, set-cookie token if any, body). An optional session
+/// cookie is sent on the request.
+fn http(
+    addr: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+    cookie: Option<&str>,
+) -> (u16, Option<String>, String) {
     let mut stream = TcpStream::connect(addr).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
+    let cookie_hdr = cookie
+        .map(|c| format!("Cookie: stroma_session={c}\r\n"))
+        .unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{cookie_hdr}Connection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(req.as_bytes()).unwrap();
@@ -24,8 +35,14 @@ fn http(addr: &str, method: &str, path: &str, body: &str) -> (u16, String) {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let body = resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
-    (status, body)
+    let (head, body) = resp.split_once("\r\n\r\n").unwrap_or((&resp, ""));
+    let set_cookie = head.lines().find_map(|l| {
+        l.strip_prefix("Set-Cookie: stroma_session=")
+            .and_then(|v| v.split(';').next())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    });
+    (status, set_cookie, body.to_string())
 }
 
 struct Kill(Child);
@@ -72,37 +89,80 @@ fn serve_health_query_ingest() {
     }
     assert!(up, "server did not come up");
 
-    let (st, body) = http(&addr, "GET", "/health", "");
+    // /health is public (container probes need no auth)
+    let (st, _, body) = http(&addr, "GET", "/health", "", None);
     assert_eq!(st, 200, "health: {body}");
     assert!(body.contains("\"ok\""), "health body: {body}");
 
-    // web UI is served at /
-    let (st, body) = http(&addr, "GET", "/", "");
-    assert_eq!(st, 200, "ui: {body}");
-    assert!(body.contains("<title>StromaDB"), "ui body missing title");
-
-    let (st, body) = http(
+    // unauthenticated API call is rejected
+    let (st, _, _) = http(
         &addr,
         "POST",
         "/query",
         "{\"op\":\"expand\",\"subject\":1,\"predicate\":\"knows\"}",
+        None,
+    );
+    assert_eq!(st, 401, "unauthenticated query must be 401");
+
+    // unauthenticated page load gets the login page
+    let (st, _, body) = http(&addr, "GET", "/", "", None);
+    assert_eq!(st, 200, "login page: {body}");
+    assert!(body.contains("Sign in"), "expected login page, got: {body}");
+
+    // wrong credentials rejected
+    let (st, _, _) = http(
+        &addr,
+        "POST",
+        "/login",
+        "{\"user\":\"admin\",\"password\":\"nope\"}",
+        None,
+    );
+    assert_eq!(st, 401, "bad credentials must be 401");
+
+    // default admin/password logs in and returns a session cookie
+    let (st, cookie, _) = http(
+        &addr,
+        "POST",
+        "/login",
+        "{\"user\":\"admin\",\"password\":\"password\"}",
+        None,
+    );
+    assert_eq!(st, 200, "login must succeed");
+    let tok = cookie.expect("login must set a session cookie");
+
+    // authenticated page load serves the app
+    let (st, _, body) = http(&addr, "GET", "/", "", Some(&tok));
+    assert_eq!(st, 200, "ui: {body}");
+    assert!(
+        body.contains("Draw neighbourhood"),
+        "ui body missing app marker"
+    );
+
+    let (st, _, body) = http(
+        &addr,
+        "POST",
+        "/query",
+        "{\"op\":\"expand\",\"subject\":1,\"predicate\":\"knows\"}",
+        Some(&tok),
     );
     assert_eq!(st, 200, "query: {body}");
     assert!(body.contains("[2]"), "query body: {body}");
 
     // live ingest over HTTP, then read it back
-    let (st, _) = http(
+    let (st, _, _) = http(
         &addr,
         "POST",
         "/ingest",
         "{\"fact\":{\"subject\":2,\"predicate\":\"knows\",\"object\":{\"node\":1}}}",
+        Some(&tok),
     );
     assert_eq!(st, 200);
-    let (_, body) = http(
+    let (_, _, body) = http(
         &addr,
         "POST",
         "/query",
         "{\"op\":\"expand\",\"subject\":2,\"predicate\":\"knows\"}",
+        Some(&tok),
     );
     assert!(body.contains("[1]"), "post-ingest query: {body}");
 
@@ -110,12 +170,14 @@ fn serve_health_query_ingest() {
     let mut threads = Vec::new();
     for _ in 0..16 {
         let a = addr.clone();
+        let c = tok.clone();
         threads.push(std::thread::spawn(move || {
-            let (st, body) = http(
+            let (st, _, body) = http(
                 &a,
                 "POST",
                 "/query",
                 "{\"op\":\"expand\",\"subject\":1,\"predicate\":\"knows\"}",
+                Some(&c),
             );
             (st, body.contains("[2]"))
         }));
