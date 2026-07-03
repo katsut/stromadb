@@ -56,6 +56,26 @@ pub fn expand(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTreeSet<
     out
 }
 
+/// All node-valued neighbours of `subject` across *every* predicate (One current value + Many
+/// present set) — the predicate-agnostic 1-hop expansion used to grow a distance-bounded view of a
+/// heterogeneous (ontology) graph. O(predicates on the subject) via a range scan over the fold.
+pub fn neighbors(snap: &Snapshot, subject: NodeId) -> BTreeSet<NodeId> {
+    let mut out = BTreeSet::new();
+    for (_, v) in snap.one.range((subject, u32::MIN)..=(subject, u32::MAX)) {
+        if let Some(ObjKey::Node(n)) = v {
+            out.insert(*n);
+        }
+    }
+    for (_, set) in snap.many.range((subject, u32::MIN)..=(subject, u32::MAX)) {
+        for o in set {
+            if let ObjKey::Node(n) = o {
+                out.insert(*n);
+            }
+        }
+    }
+    out
+}
+
 /// 1-hop expand from a set of subjects (multi-source frontier).
 pub fn expand_set(
     snap: &Snapshot,

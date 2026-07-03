@@ -65,6 +65,47 @@ fn ingest_embed_query_reopen() {
 }
 
 #[test]
+fn neighborhood_khop_and_authz() {
+    let dir = std::env::temp_dir().join(format!("stroma_nbhd_test_{}", std::process::id())).join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    // chain 1 -> 2 -> 3 -> 4 via `knows`; node 3 is restricted (label 3)
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":3,\"type\":\"Person\",\"label\":3}}\n",
+        "{\"node\":{\"id\":4,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+        "{\"fact\":{\"subject\":2,\"predicate\":\"knows\",\"object\":{\"node\":3}}}\n",
+        "{\"fact\":{\"subject\":3,\"predicate\":\"knows\",\"object\":{\"node\":4}}}\n",
+    ))
+    .unwrap();
+
+    let depths = |r: &serde_json::Value| -> std::collections::BTreeMap<u64, u64> {
+        r["nodes"].as_array().unwrap().iter().map(|n| (n["id"].as_u64().unwrap(), n["depth"].as_u64().unwrap())).collect()
+    };
+
+    // hops=1 (all predicates): focus + direct neighbours only
+    let r = db.query(&json!({"op":"neighborhood","subject":1,"hops":1})).unwrap();
+    assert_eq!(depths(&r), [(1, 0), (2, 1)].into_iter().collect());
+
+    // hops=3: the whole reachable chain with correct BFS depth
+    let r = db.query(&json!({"op":"neighborhood","subject":1,"hops":3})).unwrap();
+    assert_eq!(depths(&r), [(1, 0), (2, 1), (3, 2), (4, 3)].into_iter().collect());
+    assert_eq!(r["edges"].as_array().unwrap().len(), 3);
+
+    // authz: label 3 denied → node 3 pruned, so node 4 is unreachable through it
+    let r = db.query(&json!({"op":"neighborhood","subject":1,"hops":3,"allowed_labels":1})).unwrap();
+    assert_eq!(depths(&r), [(1, 0), (2, 1)].into_iter().collect());
+    assert_eq!(r["edges"], json!([[1, 2]]));
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn retrieve_context_current_value_chronological() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_ctx_test_{}", std::process::id()))
