@@ -78,6 +78,7 @@
   html[data-theme="light"] header { background:rgba(255,255,255,.7); }
   .icon-btn { background:var(--panel); border:1px solid var(--line-2); color:var(--fg-dim); border-radius:var(--r-sm); width:34px; height:34px; font-size:15px; cursor:pointer; transition:color .15s, border-color .15s; }
   .icon-btn:hover { color:var(--fg); border-color:var(--accent); }
+  .lang { width:auto; min-width:0; padding:7px 26px 7px 10px; font:500 12px var(--sans); color:var(--fg-dim); }
   h2 .h2-note { text-transform:none; letter-spacing:0; color:var(--accent); font:600 10.5px var(--mono); margin-left:8px; }
   button.ghost { width:100%; margin-top:10px; background:transparent; color:var(--fg-dim); border:1px dashed var(--line-2); border-radius:var(--r-sm); padding:9px; font:600 12.5px var(--sans); cursor:pointer; transition:color .15s, border-color .15s; }
   button.ghost:hover { color:var(--accent); border-color:var(--accent); }
@@ -101,38 +102,39 @@
       <span class="pill role" id="rolePill">view as <b>—</b></span>
       <span class="pill" id="userPill" style="display:none">signed in <b id="userName"></b></span>
     </div>
-    <button class="icon-btn" id="theme" title="Toggle light / dark">☾</button>
-    <button class="icon-btn" id="logout" title="Sign out">⏻</button>
+    <select class="lang" id="lang" title="language"><option value="en">EN</option><option value="ja">日本語</option><option value="zh">中文</option></select>
+    <button class="icon-btn" id="theme" data-i18n-title="theme">☾</button>
+    <button class="icon-btn" id="logout" data-i18n-title="signOut">⏻</button>
   </header>
 
   <aside>
     <section class="q">
-      <h2>Explore</h2>
+      <h2 data-i18n="explore">Explore</h2>
       <div class="row">
-        <div><label>focus node</label><input id="focus" type="number" value="1"></div>
-        <div><label>predicate (blank = all)</label><input id="pred" placeholder="all edges"></div>
+        <div><label data-i18n="focusNode">focus node</label><input id="focus" type="number" value="1"></div>
+        <div><label data-i18n="predicate">predicate (blank = all)</label><input id="pred" data-i18n-ph="allEdges" placeholder="all edges"></div>
       </div>
-      <div class="lbl-row"><label>distance (hops)</label><b id="hopsv">2</b></div>
+      <div class="lbl-row"><label data-i18n="distance">distance (hops)</label><b id="hopsv">2</b></div>
       <input id="hops" type="range" min="1" max="5" value="2">
       <div class="row">
-        <div><label>view as</label><select id="role"></select></div>
-        <div><label>max nodes</label><input id="cap" type="number" value="3000"></div>
+        <div><label data-i18n="viewAs">view as</label><select id="role"></select></div>
+        <div><label data-i18n="maxNodes">max nodes</label><input id="cap" type="number" value="3000"></div>
       </div>
-      <button class="primary" id="go">Draw neighbourhood</button>
-      <div class="row"><button class="ghost" id="all">Show all nodes</button><button class="ghost" id="map">Overview map</button></div>
+      <button class="primary" id="go" data-i18n="draw">Draw neighbourhood</button>
+      <div class="row"><button class="ghost" id="all" data-i18n="showAll">Show all nodes</button><button class="ghost" id="map" data-i18n="overviewMap">Overview map</button></div>
       <div class="legend" id="legend"></div>
-      <div class="tip">Drag the background to pan · scroll to zoom · <b>drag a node</b> to move it · <b>click</b> for details · <b>double-click</b> to focus.</div>
+      <div class="tip" data-i18n="tipMain">Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.</div>
     </section>
 
     <section class="q" style="margin-top:14px">
-      <h2>Access roles <span class="h2-note">view-as</span></h2>
+      <h2><span data-i18n="accessRoles">Access roles</span> <span class="h2-note" data-i18n="viewAsTag">view-as</span></h2>
       <div id="roleList"></div>
       <div class="row">
-        <div><label>name</label><input id="rName" placeholder="e.g. analyst"></div>
-        <div><label>labels (blank = all)</label><input id="rLabels" placeholder="0,1,3"></div>
+        <div><label data-i18n="roleName">name</label><input id="rName" data-i18n-ph="egAnalyst" placeholder="e.g. analyst"></div>
+        <div><label data-i18n="roleLabels">labels (blank = all)</label><input id="rLabels" placeholder="0,1,3"></div>
       </div>
-      <button class="ghost" id="rAdd">+ save role</button>
-      <div class="tip">A role is a preset of visible <b>authz labels</b>. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.</div>
+      <button class="ghost" id="rAdd" data-i18n="saveRole">+ save role</button>
+      <div class="tip" data-i18n="tipRoles">A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.</div>
     </section>
   </aside>
 
@@ -140,8 +142,8 @@
     <canvas id="cv"></canvas>
     <canvas id="labels"></canvas>
     <div class="renderer-tag" id="rtag"></div>
-    <div class="hud"><button id="back" title="back to previous focus" disabled>←</button><button id="livetog" class="active" title="live updates on (click to pause)">◉</button><button id="labtog" class="active" title="toggle labels">A</button><button id="zin" title="zoom in">+</button><button id="zout" title="zoom out">−</button><button id="fit" title="fit">⊡</button></div>
-    <div class="stage-note" id="note">Draw a neighbourhood to explore the graph.</div>
+    <div class="hud"><button id="back" data-i18n-title="back" title="back to previous focus" disabled>←</button><button id="livetog" class="active" data-i18n-title="liveOn" title="live updates on (click to pause)">◉</button><button id="labtog" class="active" data-i18n-title="labels" title="toggle labels">A</button><button id="zin" data-i18n-title="zoomIn" title="zoom in">+</button><button id="zout" data-i18n-title="zoomOut" title="zoom out">−</button><button id="fit" data-i18n-title="fit" title="fit">⊡</button></div>
+    <div class="stage-note" id="note" data-i18n="note">Draw a neighbourhood to explore the graph.</div>
     <div class="inspect hidden" id="inspect"></div>
     <div class="toast hidden" id="toast"></div>
   </main>
@@ -150,6 +152,35 @@
 <script>
 const $ = id => document.getElementById(id);
 const api = (p,b) => fetch(p, b?{method:'POST',body:JSON.stringify(b)}:{}).then(r=>r.json());
+
+// ---------- i18n (EN / JA / ZH) ----------
+const I18N = {
+  en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.",
+       theme:"Toggle light / dark", signOut:"Sign out", back:"back to previous focus", liveOn:"live updates on (click to pause)", livePaused:"paused (click to resume)", labels:"toggle labels", zoomIn:"zoom in", zoomOut:"zoom out", fit:"fit", allEdges:"all edges", egAnalyst:"e.g. analyst",
+       connecting:"connecting…", live:"live", offline:"offline", nodes:"nodes", vec:"vec", head:"head", signedIn:"signed in", viewAsPill:"view as",
+       lgFocus:"focus", lgDeep:"deep", hop:"hop",
+       detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
+       tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”" },
+  ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。",
+       theme:"ライト/ダーク切替", signOut:"サインアウト", back:"前の焦点に戻る", liveOn:"ライブ更新中（クリックで一時停止）", livePaused:"一時停止中（クリックで再開）", labels:"ラベル表示切替", zoomIn:"拡大", zoomOut:"縮小", fit:"全体表示", allEdges:"全ての辺", egAnalyst:"例: analyst",
+       connecting:"接続中…", live:"ライブ", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
+       lgFocus:"焦点", lgDeep:"遠方", hop:"ホップ",
+       detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
+       tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用" },
+  zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。",
+       theme:"切换明暗", signOut:"退出登录", back:"返回上一焦点", liveOn:"实时更新中（点击暂停）", livePaused:"已暂停（点击恢复）", labels:"切换标签", zoomIn:"放大", zoomOut:"缩小", fit:"适配", allEdges:"所有边", egAnalyst:"例: analyst",
+       connecting:"连接中…", live:"实时", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
+       lgFocus:"焦点", lgDeep:"更远", hop:"跳",
+       detNode:"节点", detType:"类型", detLabel:"标签", untyped:"无类型", recentre:"以此为中心 ›", noProps:"无存储属性。", loading:"加载中…", restricted:"角色“{r}”下受限。",
+       tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”" },
+};
+let lang = 'en';
+function t(k, v){ let s=(I18N[lang]&&I18N[lang][k])||I18N.en[k]||k; if(v) for(const p in v) s=s.split('{'+p+'}').join(v[p]); return s; }
+function applyLang(l){ lang = I18N[l] ? l : 'en'; localStorage.setItem('stroma_lang', lang); if($('lang')) $('lang').value=lang; document.documentElement.lang=lang;
+  document.querySelectorAll('[data-i18n]').forEach(e=>e.textContent=t(e.dataset.i18n));
+  document.querySelectorAll('[data-i18n-ph]').forEach(e=>e.placeholder=t(e.dataset.i18nPh));
+  document.querySelectorAll('[data-i18n-title]').forEach(e=>e.title=t(e.dataset.i18nTitle));
+  legend(); renderRoles(); renderUser(); renderStats(); setLivePill(); }
 const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
 const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
@@ -346,21 +377,21 @@ function fmtVal(o){ if(o==null) return '∅';
 window.hideDetail = ()=> $('inspect').classList.add('hidden');
 const NAME_PREDS = ['name','title','label','display_name','full_name'];
 function displayName(props){ for(const k of NAME_PREDS){ const p=props.find(x=>x.predicate===k && x.card==='one' && x.value && x.value.text!==undefined); if(p) return p.value.text; } return null; }
-const insHead = (id, dep, nm) => `<div class="ins-h"><span class="ins-x" onclick="hideDetail()">✕</span>node <b>${id}</b>${nm?` · <span class="ins-name">${esc(nm)}</span>`:''}${dep!=null?` · ${dep} hop${dep===1?'':'s'}`:''}</div>`;
+const insHead = (id, dep, nm) => `<div class="ins-h"><span class="ins-x" onclick="hideDetail()">✕</span>${t('detNode')} <b>${id}</b>${nm?` · <span class="ins-name">${esc(nm)}</span>`:''}${dep!=null?` · ${dep} ${t('hop')}`:''}</div>`;
 async function showDetail(id, dep){
   const ins=$('inspect'); ins.classList.remove('hidden');
   ins.innerHTML = insHead(id, dep, null)+`<div class="ins-load">loading…</div>`;
   const mask=maskOf(activeRole()); const req={op:'node', subject:id}; if(mask!==null) req.allowed_labels=mask;
   try{ const r=await api('/query', req);
     if(r.error){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">${esc(r.error)}</div>`; return; }
-    if(r.denied){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">restricted under role “${esc(activeRole().name)}”.</div>`; return; }
+    if(r.denied){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">${t('restricted',{r:esc(activeRole().name)})}</div>`; return; }
     const nm=displayName(r.props||[]);
     const rows=(r.props||[]).map(p=>{ const v = p.card==='one'?fmtVal(p.value):(p.values.length?p.values.map(fmtVal).join(', '):'∅');
       return `<div class="ins-r"><span class="ins-k">${esc(p.predicate)}</span><span class="ins-v">${v}</span></div>`; }).join('');
     ins.innerHTML = insHead(id, dep, nm)
-      + `<div class="ins-meta">${r.type?`type <b>${esc(r.type)}</b>`:'untyped'}${r.label!=null?` · label ${r.label}`:''}</div>`
-      + `<div class="ins-props">${rows||'<span class="ins-load">no stored properties.</span>'}</div>`
-      + `<div class="ins-act"><span onclick="recenter(${id})">re-centre here ›</span></div>`;
+      + `<div class="ins-meta">${r.type?`${t('detType')} <b>${esc(r.type)}</b>`:t('untyped')}${r.label!=null?` · ${t('detLabel')} ${r.label}`:''}</div>`
+      + `<div class="ins-props">${rows||`<span class="ins-load">${t('noProps')}</span>`}</div>`
+      + `<div class="ins-act"><span onclick="recenter(${id})">${t('recentre')}</span></div>`;
   }catch(x){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">${esc(x)}</div>`; } }
 function nodeAt(e){ const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left, my=e.clientY-rc.top; const [wx,wy]=world(mx,my);
   let best=-1, bd=1e9; for(let i=0;i<N;i++){ const dx=px[i]-wx, dy=py[i]-wy; const d=dx*dx+dy*dy; if(d<bd){bd=d;best=i;} }
@@ -378,18 +409,18 @@ $('back').onclick=()=>{ if(!history.length) return; $('focus').value=history.pop
 
 // ---------- data ----------
 function toast(m,err){ const t=$('toast'); t.textContent=m; t.className='toast'+(err?' err':''); t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),2800); }
-async function go(){ if($('focus').value.trim()===''){ toast('enter a focus node, or use “Show all nodes”',true); return; }
+async function go(){ if($('focus').value.trim()===''){ toast(t('enterFocus'),true); return; }
   const btn=$('go'); btn.disabled=true; hasFocus=true; overviewMode=false; $('inspect').classList.add('hidden');
   try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
     if($('pred').value) req.predicate=$('pred').value; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
-    lastReq=req; loadGraph(r.nodes, r.edges); toast(`${r.nodes.length} nodes · ${r.edges.length} edges within ${$('hops').value} hops`); fit(); startPoll();
+    lastReq=req; loadGraph(r.nodes, r.edges); toast(t('tWithin',{n:r.nodes.length,e:r.edges.length,h:$('hops').value})); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
 async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; overviewMode=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
   try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
-    lastReq=req; loadGraph(r.nodes, r.edges); toast(`whole graph · ${r.nodes.length} nodes · ${r.edges.length} edges${r.truncated?' (capped)':''}`); fit(); startPoll();
+    lastReq=req; loadGraph(r.nodes, r.edges); toast(t('tWhole',{n:r.nodes.length,e:r.edges.length,cap:r.truncated?t('capped'):''})); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('all').onclick=drawAll;
 async function overviewDraw(){ const btn=$('map'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
@@ -399,7 +430,7 @@ async function overviewDraw(){ const btn=$('map'); btn.disabled=true; hasFocus=f
     // show "Type ×count" on the map by folding the count into the label
     const nodes = r.nodes.map(n=>({ id:n.id, depth:0, name:`${n.name} ×${n.count}`, count:n.count }));
     lastReq=req; loadGraph(nodes, r.edges); overviewMode=true;
-    toast(`overview · ${r.nodes.length} types`); fit(); startPoll();
+    toast(t('tOverview',{n:r.nodes.length})); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('map').onclick=overviewDraw;
 
@@ -415,14 +446,17 @@ async function startPoll(){ if(pollStarted) return; pollStarted=true;
     if(liveOn && lastReq){ try{ const res=await api('/query', lastReq); if(!res.error){
       let nodes=res.nodes;
       if(lastReq.op==='overview'){ overviewSamples=new Map(res.nodes.map(n=>[n.id,n.sample])); nodes=res.nodes.map(n=>({id:n.id,depth:0,name:`${n.name} ×${n.count}`,count:n.count})); }
-      loadGraph(nodes, res.edges, true); toast('live · updated'); } }catch(x){} }
+      loadGraph(nodes, res.edges, true); toast(t('tLive')); } }catch(x){} }
   }
 }
-function setLivePill(){ const b=$('livetog'); if(!b) return; b.classList.toggle('active', liveOn); b.title = liveOn ? 'live updates on (click to pause)' : 'paused (click to resume)'; }
+function setLivePill(){ const b=$('livetog'); if(!b) return; b.classList.toggle('active', liveOn); b.title = liveOn ? t('liveOn') : t('livePaused'); }
 $('livetog').onclick=()=>{ liveOn=!liveOn; setLivePill(); if(liveOn && lastReq){ (async()=>{ try{ const res=await api('/query',lastReq); if(!res.error) loadGraph(res.nodes,res.edges,true); }catch(x){} })(); } };
 
-function legend(){ const nm=['focus','1-hop','2-hop','3-hop','4-hop','deep']; $('legend').innerHTML=nm.map((n,i)=>`<span><i class="swatch" style="background:${hex(DEPTH[i])}"></i>${n}</span>`).join(''); }
-async function stats(){ try{ const s=await api('/stats'); $('statpills').innerHTML=`<span class="pill"><span class="dot"></span>live</span><span class="pill"><b>${s.schema.nodes}</b> nodes</span><span class="pill"><b>${s.embeddings.count}</b> vec</span><span class="pill">head <b>${s.facts.durable_head}</b></span>`; }catch{ $('statpills').innerHTML='<span class="pill">offline</span>'; } }
+function legend(){ const nm=[t('lgFocus'), '1-'+t('hop'), '2-'+t('hop'), '3-'+t('hop'), '4-'+t('hop'), t('lgDeep')];
+  $('legend').innerHTML=nm.map((n,i)=>`<span><i class="swatch" style="background:${hex(DEPTH[i])}"></i>${n}</span>`).join(''); }
+let _stats=null;
+function renderStats(){ if(!_stats){ return; } const s=_stats; $('statpills').innerHTML=`<span class="pill"><span class="dot"></span>${t('live')}</span><span class="pill"><b>${s.schema.nodes}</b> ${t('nodes')}</span><span class="pill"><b>${s.embeddings.count}</b> ${t('vec')}</span><span class="pill">${t('head')} <b>${s.facts.durable_head}</b></span>`; }
+async function stats(){ try{ _stats=await api('/stats'); renderStats(); }catch{ $('statpills').innerHTML=`<span class="pill">${t('offline')}</span>`; } }
 
 // ---------- access roles (view-as label presets; console-side, localStorage) ----------
 const DEFAULT_ROLES = [{name:'admin', labels:null}, {name:'analyst', labels:[0,1]}, {name:'hr', labels:[0,1,3]}];
@@ -431,7 +465,7 @@ const saveRoles = ()=> localStorage.setItem('stroma_roles', JSON.stringify(roles
 const maskOf = role => role&&role.labels ? role.labels.reduce((m,l)=>m|(1<<l),0) : null;
 const activeRole = ()=> roles.find(r=>r.name===$('role').value) || roles[0];
 const parseLabels = s => { const a=s.split(',').map(x=>x.trim()).filter(Boolean).map(Number).filter(n=>Number.isInteger(n)&&n>=0&&n<31); return a.length?[...new Set(a)].sort((x,y)=>x-y):null; };
-function updateRolePill(){ const r=activeRole(); const m=maskOf(r); $('rolePill').innerHTML=`view as <b>${r?r.name:'—'}</b>${m===null?'':` · labels ${r.labels.join(',')}`}`; }
+function updateRolePill(){ const r=activeRole(); const m=maskOf(r); $('rolePill').innerHTML=`${t('viewAsPill')} <b>${r?r.name:'—'}</b>${m===null?'':` · ${t('detLabel')} ${r.labels.join(',')}`}`; }
 function renderRoles(){
   const cur=$('role').value || (roles[0]&&roles[0].name);
   $('role').innerHTML = roles.map(r=>`<option${r.name===cur?' selected':''}>${r.name}</option>`).join('');
@@ -454,10 +488,13 @@ $('theme').onclick=()=>applyTheme(document.documentElement.dataset.theme==='ligh
 applyTheme(localStorage.getItem('stroma_theme')||'dark');
 
 // ---------- session ----------
-async function me(){ try{ const r=await fetch('/me'); if(r.ok){ const j=await r.json(); $('userName').textContent=j.user; $('userPill').style.display=''; } }catch{} }
+let curUser=null;
+function renderUser(){ if(!curUser){ return; } $('userPill').innerHTML=`${t('signedIn')} <b>${curUser}</b>`; $('userPill').style.display=''; }
+async function me(){ try{ const r=await fetch('/me'); if(r.ok){ curUser=(await r.json()).user; renderUser(); } }catch{} }
+$('lang').onchange=e=>applyLang(e.target.value);
 $('logout').onclick=async()=>{ try{ await fetch('/logout',{method:'POST'}); }catch(x){} location.href='/login'; };
 
-resize(); initGL(); legend(); stats(); renderRoles(); me(); loop();
+resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); stats(); me(); loop();
 </script>
 </body>
 </html>
