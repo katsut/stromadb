@@ -192,9 +192,11 @@ fn graph_all_nodes_and_authz() {
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"name\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\"}}\n",
         "{\"node\":{\"id\":1,\"type\":\"Person\",\"label\":0}}\n",
         "{\"node\":{\"id\":2,\"type\":\"Person\",\"label\":0}}\n",
         "{\"node\":{\"id\":3,\"type\":\"Person\",\"label\":3}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"name\",\"object\":{\"text\":\"Root\"}}}\n",
         "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
         "{\"fact\":{\"subject\":2,\"predicate\":\"knows\",\"object\":{\"node\":3}}}\n",
     ))
@@ -211,11 +213,18 @@ fn graph_all_nodes_and_authz() {
         v
     };
 
-    // no authz: every node, every edge
+    // no authz: every node, every edge; node 1 carries its display name
     let r = db.query(&json!({"op":"graph"})).unwrap();
     assert_eq!(ids(&r), vec![1, 2, 3]);
     assert_eq!(r["edges"].as_array().unwrap().len(), 2);
     assert_eq!(r["truncated"], json!(false));
+    let n1 = r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == 1)
+        .unwrap();
+    assert_eq!(n1["name"], json!("Root"));
 
     // authz: node 3 (label 3) hidden, and edges touching it dropped
     let r = db.query(&json!({"op":"graph","allowed_labels":1})).unwrap();

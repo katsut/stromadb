@@ -417,7 +417,7 @@ impl Db {
         }
         let nodes: Vec<Value> = depth
             .iter()
-            .map(|(&id, &d)| json!({ "id": id, "depth": d }))
+            .map(|(&id, &d)| json!({ "id": id, "depth": d, "name": self.display_name(snap, id) }))
             .collect();
         let edges: Vec<Value> = edges
             .iter()
@@ -500,10 +500,26 @@ impl Db {
         }
         let nodes: Vec<Value> = keep
             .iter()
-            .map(|&id| json!({ "id": id, "depth": 0 }))
+            .map(|&id| json!({ "id": id, "depth": 0, "name": self.display_name(snap, id) }))
             .collect();
         let edges: Vec<Value> = edges.iter().map(|(a, b)| json!([a, b])).collect();
         Ok(json!({ "nodes": nodes, "edges": edges, "truncated": truncated }))
+    }
+
+    /// A node's display name — the value of its first `name`/`title`/`display_name`/`full_name`
+    /// text predicate, if any. Used to label nodes in graph/neighbourhood results.
+    fn display_name(&self, snap: &Snapshot, id: u64) -> Option<String> {
+        const NAME_PREDS: [&str; 4] = ["name", "title", "display_name", "full_name"];
+        snap.one
+            .range((id, u32::MIN)..=(id, u32::MAX))
+            .find_map(|(&(_, p), v)| match v {
+                Some(ObjKey::Text(s))
+                    if self.cat.name(p).is_some_and(|n| NAME_PREDS.contains(&n)) =>
+                {
+                    Some(s.clone())
+                }
+                _ => None,
+            })
     }
 
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,
