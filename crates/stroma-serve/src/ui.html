@@ -118,7 +118,7 @@
       <button class="primary" id="go">Draw neighbourhood</button>
       <button class="ghost" id="all">Show all nodes</button>
       <div class="legend" id="legend"></div>
-      <div class="tip">Drag to pan · scroll to zoom · <b>click a node</b> to re-centre the view on it.</div>
+      <div class="tip">Drag the background to pan · scroll to zoom · <b>drag a node</b> to move it · <b>click a node</b> for details.</div>
     </section>
 
     <section class="q" style="margin-top:14px">
@@ -158,16 +158,17 @@ let px, py, vx, vy;          // Float32Array positions/velocities
 let ePairs = [];             // [i,j] index pairs
 const cam = { x:0, y:0, z:1 };
 let W=0, H=0; const dpr = Math.min(devicePixelRatio||1, 2);
-let dragging=false, moved=false, lastX=0, lastY=0;
+let dragging=false, moved=false, lastX=0, lastY=0, dragIdx=-1, pinned=new Set();
 
 function loadGraph(nodes, edges) {
+  dragIdx = -1; pinned.clear();
   N = nodes.length; ids = new Array(N); idx = new Map(); depth = new Array(N);
   px = new Float32Array(N); py = new Float32Array(N); vx = new Float32Array(N); vy = new Float32Array(N);
   nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth;
     const a = (i*2.399963), r = 30 + Math.sqrt(i)*22; px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; });
   ePairs = []; for (const [a,b] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined) ePairs.push(i,j); }
   $('note').style.display = N ? 'none' : '';
-  settle = 260; buildBuffers();
+  settle = 260; autoFit = true; buildBuffers();
 }
 
 // ---------- WebGL2 ----------
@@ -233,7 +234,7 @@ function buildBuffers() {
 let posBuf, edgeBuf;
 
 // ---------- layout: grid-accelerated repulsion + spring ----------
-let settle=0;
+let settle=0, autoFit=false;
 function step() {
   if(!N) return;
   const REP=2600, SPRING=0.02, LEN=64, CENTER=0.9, DAMP=0.84, CELL=90;
@@ -244,7 +245,7 @@ function step() {
       for(const j of b){ if(j===i)continue; let dx=px[i]-px[j], dy=py[i]-py[j]; let d2=dx*dx+dy*dy+0.01; if(d2>CELL*CELL*4)continue; const f=REP/d2; fx+=dx*f; fy+=dy*f; } }
     vx[i]=(vx[i]+fx*0.0006)*DAMP; vy[i]=(vy[i]+fy*0.0006)*DAMP; }
   for(let e=0;e<ePairs.length;e+=2){ const i=ePairs[e], j=ePairs[e+1]; let dx=px[j]-px[i], dy=py[j]-py[i]; const d=Math.hypot(dx,dy)||1; const f=(d-LEN)*SPRING; dx/=d; dy/=d; vx[i]+=dx*f; vy[i]+=dy*f; vx[j]-=dx*f; vy[j]-=dy*f; }
-  for(let i=0;i<N;i++){ px[i]+=vx[i]; py[i]+=vy[i]; }
+  for(let i=0;i<N;i++){ if(i===dragIdx||pinned.has(i)){ vx[i]=0; vy[i]=0; continue; } px[i]+=vx[i]; py[i]+=vy[i]; }
 }
 
 function draw() {
@@ -269,16 +270,22 @@ function draw() {
 
 function resize(){ W=cv.clientWidth; H=cv.clientHeight; cv.width=W*dpr; cv.height=H*dpr; }
 addEventListener('resize', resize);
-function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(settle%20===0||settle===0) fit(); } if(gl&&N) draw(); requestAnimationFrame(loop); }
+function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(autoFit && (settle%20===0||settle===0)) fit(); if(settle===0) autoFit=false; } if(gl&&N) draw(); requestAnimationFrame(loop); }
 
 function fit(){ if(!N)return; let a=1e9,b=1e9,c=-1e9,d=-1e9; for(let i=0;i<N;i++){ a=Math.min(a,px[i]);b=Math.min(b,py[i]);c=Math.max(c,px[i]);d=Math.max(d,py[i]); }
   const gw=c-a+120, gh=d-b+120; cam.z=Math.min(W/gw,H/gh,2.4); cam.x=-(a+c)/2; cam.y=-(b+d)/2; }
 
 // ---------- interaction ----------
 const world = (mx,my)=>[ (mx-W/2)/cam.z - cam.x, (my-H/2)/cam.z - cam.y ];
-cv.addEventListener('mousedown',e=>{ dragging=true; moved=false; lastX=e.clientX; lastY=e.clientY; cv.classList.add('drag'); });
-addEventListener('mousemove',e=>{ if(!dragging)return; const dx=e.clientX-lastX, dy=e.clientY-lastY; if(Math.abs(dx)+Math.abs(dy)>3)moved=true; cam.x+=dx/cam.z; cam.y+=dy/cam.z; lastX=e.clientX; lastY=e.clientY; });
-addEventListener('mouseup',e=>{ if(dragging&&!moved) pick(e); dragging=false; cv.classList.remove('drag'); });
+cv.addEventListener('mousedown',e=>{ moved=false; lastX=e.clientX; lastY=e.clientY;
+  const i=nodeAt(e); if(i>=0){ dragIdx=i; } else { dragging=true; } cv.classList.add('drag'); });
+addEventListener('mousemove',e=>{
+  const dx=e.clientX-lastX, dy=e.clientY-lastY; if(Math.abs(dx)+Math.abs(dy)>3)moved=true;
+  if(dragIdx>=0){ const rc=cv.getBoundingClientRect(); const [wx,wy]=world(e.clientX-rc.left, e.clientY-rc.top); px[dragIdx]=wx; py[dragIdx]=wy; vx[dragIdx]=0; vy[dragIdx]=0; lastX=e.clientX; lastY=e.clientY; return; }
+  if(!dragging)return; cam.x+=dx/cam.z; cam.y+=dy/cam.z; lastX=e.clientX; lastY=e.clientY; });
+addEventListener('mouseup',e=>{
+  if(dragIdx>=0){ if(moved) pinned.add(dragIdx); else showDetail(ids[dragIdx], depth[dragIdx]); dragIdx=-1; cv.classList.remove('drag'); return; }
+  if(dragging&&!moved) pick(e); dragging=false; cv.classList.remove('drag'); });
 cv.addEventListener('wheel',e=>{ e.preventDefault(); const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left,my=e.clientY-rc.top; const [wx,wy]=world(mx,my); cam.z=Math.max(0.05,Math.min(cam.z*Math.exp(-e.deltaY*0.0016),8)); const [nx,ny]=world(mx,my); cam.x+=nx-wx; cam.y+=ny-wy; },{passive:false});
 $('zin').onclick=()=>cam.z=Math.min(cam.z*1.3,8); $('zout').onclick=()=>cam.z=Math.max(cam.z/1.3,0.05); $('fit').onclick=fit;
 
@@ -305,9 +312,10 @@ async function showDetail(id, dep){
       + `<div class="ins-props">${rows||'<span class="ins-load">no stored properties.</span>'}</div>`
       + `<div class="ins-act"><span onclick="recenter(${id})">re-centre here ›</span></div>`;
   }catch(x){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">${esc(x)}</div>`; } }
-function pick(e){ const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left, my=e.clientY-rc.top; const [wx,wy]=world(mx,my);
+function nodeAt(e){ const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left, my=e.clientY-rc.top; const [wx,wy]=world(mx,my);
   let best=-1, bd=1e9; for(let i=0;i<N;i++){ const dx=px[i]-wx, dy=py[i]-wy; const d=dx*dx+dy*dy; if(d<bd){bd=d;best=i;} }
-  if(best>=0 && bd < (18/cam.z)**2) showDetail(ids[best], depth[best]); }
+  return (best>=0 && bd < (18/cam.z)**2) ? best : -1; }
+function pick(e){ const i=nodeAt(e); if(i>=0) showDetail(ids[i], depth[i]); }
 
 // ---------- drill-down history ----------
 let history=[];
