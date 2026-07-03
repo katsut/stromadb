@@ -36,11 +36,18 @@ fn opt(args: &[String], name: &str, env: &str, default: &str) -> String {
         .unwrap_or_else(|| default.into())
 }
 
+const UI_HTML: &str = include_str!("ui.html");
+
 fn json_response(status: u16, body: &Value) -> Response<std::io::Cursor<Vec<u8>>> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     Response::from_string(body.to_string())
         .with_status_code(status)
         .with_header(ct)
+}
+
+fn html_response() -> Response<std::io::Cursor<Vec<u8>>> {
+    let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
+    Response::from_string(UI_HTML).with_header(ct)
 }
 
 fn read_body(req: &mut Request) -> String {
@@ -130,8 +137,13 @@ fn main() {
         let (db, server) = (db.clone(), server.clone());
         handles.push(std::thread::spawn(move || {
             while let Ok(mut req) = server.recv() {
-                let (status, body) = handle(&db, &mut req);
-                let _ = req.respond(json_response(status, &body));
+                let path = req.url().split('?').next().unwrap_or("").to_string();
+                if *req.method() == Method::Get && (path == "/" || path == "/ui") {
+                    let _ = req.respond(html_response());
+                } else {
+                    let (status, body) = handle(&db, &mut req);
+                    let _ = req.respond(json_response(status, &body));
+                }
             }
         }));
     }

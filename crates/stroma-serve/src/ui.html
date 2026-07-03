@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StromaDB</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef; --mut:#8b93a7; --accent:#5aa9ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  header { display:flex; align-items:baseline; gap:16px; padding:12px 20px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
+  header .stats { color:var(--mut); font-size:12px; }
+  main { max-width:960px; margin:0 auto; padding:20px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
+  label { display:block; color:var(--mut); font-size:12px; margin:8px 0 3px; }
+  input, select, textarea { width:100%; background:#0d0f14; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  textarea { min-height:56px; resize:vertical; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .row > div { flex:1; min-width:130px; }
+  button { background:var(--accent); color:#04122b; border:0; border-radius:6px; padding:9px 16px; font:inherit; font-weight:600; cursor:pointer; margin-top:12px; }
+  button.ghost { background:#222836; color:var(--fg); font-weight:400; padding:3px 9px; margin:2px; }
+  .hidden { display:none; }
+  pre { background:#0d0f14; border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; font-size:12px; max-height:40vh; }
+  .chips { margin-top:8px; }
+  .err { color:#ff7b72; }
+  a { color:var(--accent); }
+  .hint { color:var(--mut); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>StromaDB</h1>
+  <span class="stats" id="stats">…</span>
+</header>
+<main>
+  <div class="panel">
+    <label>operation</label>
+    <select id="op">
+      <option value="point">point — value of (subject, predicate)</option>
+      <option value="expand">expand — neighbors of a subject</option>
+      <option value="search">search — type-aware hybrid (vector)</option>
+      <option value="retrieve_context">retrieve_context — assembled, dated context</option>
+    </select>
+
+    <div id="f_point_expand">
+      <div class="row">
+        <div><label>subject (node id)</label><input id="subject" type="number" value="1"></div>
+        <div><label>predicate</label><input id="predicate" placeholder="works-on"></div>
+      </div>
+    </div>
+
+    <div id="f_search" class="hidden">
+      <div class="row">
+        <div><label>type</label><input id="type" placeholder="Person"></div>
+        <div><label>k</label><input id="k" type="number" value="10"></div>
+      </div>
+      <label>vector (JSON array)</label>
+      <textarea id="vector">[1, 0, 0, 0]</textarea>
+      <div class="row">
+        <div><label>allowed_labels (bitmask, optional)</label><input id="allowed_labels" type="number" placeholder="all"></div>
+        <div><label>expand predicate (optional)</label><input id="expand"></div>
+      </div>
+      <div id="ctx_fields" class="hidden">
+        <div class="row">
+          <div><label>content predicate</label><input id="content" placeholder="body"></div>
+          <div><label>date predicate (optional)</label><input id="date" placeholder="created_at"></div>
+          <div><label>as_of (epoch s, optional)</label><input id="as_of" type="number"></div>
+        </div>
+      </div>
+    </div>
+
+    <button id="run">Run</button>
+    <span class="hint" id="running"></span>
+  </div>
+
+  <div class="panel" id="result_panel" style="display:none">
+    <div id="rendered"></div>
+    <details><summary class="hint">raw JSON</summary><pre id="raw"></pre></details>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const api = (path, body) => fetch(path, body ? {method:'POST', body:JSON.stringify(body)} : {}).then(r => r.json());
+
+function refreshFields() {
+  const op = $('op').value;
+  const pe = (op === 'point' || op === 'expand');
+  $('f_point_expand').classList.toggle('hidden', !pe);
+  $('f_search').classList.toggle('hidden', pe);
+  $('ctx_fields').classList.toggle('hidden', op !== 'retrieve_context');
+}
+$('op').onchange = refreshFields;
+
+function buildReq() {
+  const op = $('op').value;
+  if (op === 'point' || op === 'expand')
+    return { op, subject: Number($('subject').value), predicate: $('predicate').value };
+  const req = { op, type: $('type').value, k: Number($('k').value || 10), vector: JSON.parse($('vector').value) };
+  if ($('allowed_labels').value !== '') req.allowed_labels = Number($('allowed_labels').value);
+  if ($('expand').value) req.expand = $('expand').value;
+  if (op === 'retrieve_context') {
+    req.content = $('content').value;
+    if ($('date').value) req.date = $('date').value;
+    if ($('as_of').value !== '') req.as_of = Number($('as_of').value);
+  }
+  return req;
+}
+
+function chip(subject, predicate) {
+  const b = document.createElement('button');
+  b.className = 'ghost';
+  b.textContent = 'node ' + subject;
+  b.onclick = () => { $('op').value = 'expand'; refreshFields(); $('subject').value = subject; $('predicate').value = predicate; run(); };
+  return b;
+}
+
+function render(op, req, res) {
+  const r = $('rendered');
+  r.innerHTML = '';
+  $('raw').textContent = JSON.stringify(res, null, 2);
+  $('result_panel').style.display = 'block';
+  if (res.error) { r.innerHTML = '<span class="err">error: ' + res.error + '</span>'; return; }
+  if (op === 'expand' && res.nodes) {
+    r.innerHTML = '<b>' + res.nodes.length + ' neighbor(s)</b> — click to expand further:';
+    const box = document.createElement('div'); box.className = 'chips';
+    res.nodes.forEach(n => box.appendChild(chip(n, req.predicate)));
+    r.appendChild(box);
+  } else if (op === 'point') {
+    r.innerHTML = '<b>value:</b> <code>' + JSON.stringify(res.one ?? res.many) + '</code>';
+  } else if (op === 'retrieve_context') {
+    r.innerHTML = '<b>assembled context</b> (' + res.hits.length + ' excerpts, as_of ' + res.as_of + '):';
+    const pre = document.createElement('pre'); pre.textContent = res.context; r.appendChild(pre);
+  } else if (res.ids) {
+    r.innerHTML = '<b>' + res.ids.length + ' hit(s)</b> — score-ordered:';
+    const box = document.createElement('div'); box.className = 'chips';
+    res.ids.forEach((n, i) => { const c = chip(n, req.expand || ''); c.textContent = 'node ' + n + ' · ' + (res.scores[i]?.toFixed(3) ?? ''); box.appendChild(c); });
+    r.appendChild(box);
+  }
+}
+
+async function run() {
+  const running = $('running'); running.textContent = ' running…';
+  try {
+    const req = buildReq();
+    const res = await api('/query', req);
+    render(req.op, req, res);
+  } catch (e) {
+    $('result_panel').style.display = 'block';
+    $('rendered').innerHTML = '<span class="err">' + e + '</span>';
+  } finally { running.textContent = ''; }
+}
+$('run').onclick = run;
+
+async function loadStats() {
+  try {
+    const s = await api('/stats');
+    $('stats').textContent = `${s.schema.defs} defs · ${s.schema.nodes} nodes · ${s.embeddings.count} embeddings (${s.embeddings.dim}d) · head ${s.facts.durable_head}`;
+  } catch { $('stats').textContent = 'stats unavailable'; }
+}
+
+refreshFields();
+loadStats();
+</script>
+</body>
+</html>
