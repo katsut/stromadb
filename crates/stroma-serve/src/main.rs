@@ -84,9 +84,12 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = opt(&args, "--db", "STROMA_DB", ".");
     let addr = opt(&args, "--addr", "STROMA_ADDR", "127.0.0.1:7687");
+    let n_max: usize = opt(&args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
+        .parse()
+        .unwrap_or(stroma_db::DEFAULT_N_MAX);
 
     // open_or_init: a fresh directory (e.g. an empty Docker volume) is created on first run.
-    let mut db = match Db::open_or_init(std::path::Path::new(&dir)) {
+    let mut db = match Db::open_or_init_with(std::path::Path::new(&dir), n_max) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("error: {e}");

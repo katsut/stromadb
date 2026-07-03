@@ -115,8 +115,8 @@ curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"work
 curl -s localhost:7687/stats
 ```
 
-Config precedence: `--db` / `--addr` flags override `$STROMA_DB` / `$STROMA_ADDR` override the
-defaults (`.` and `127.0.0.1:7687` — port 7687 is the graph-database convention). See `.env.example`.
+Settings come from flags or environment variables (flag > env > default) — see
+**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** and `.env.example`.
 
 Reads are authz-scoped (`allowed_labels` is the caller's ABAC bitmask) and stamped with an `as_of`
 version vector. v1 handles requests sequentially (single-threaded engine, pre-1.0); concurrent reads

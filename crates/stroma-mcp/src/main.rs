@@ -158,7 +158,10 @@ fn opt(args: &[String], name: &str, env: &str, default: &str) -> String {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = opt(&args, "--db", "STROMA_DB", ".");
-    let mut db = match Db::open(std::path::Path::new(&dir)) {
+    let n_max: usize = opt(&args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
+        .parse()
+        .unwrap_or(stroma_db::DEFAULT_N_MAX);
+    let mut db = match Db::open_with(std::path::Path::new(&dir), n_max) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("error: {e}");

@@ -59,21 +59,28 @@ impl Db {
         if dir.join("wal.log").exists() {
             return Err("database already exists".into());
         }
-        Engine::open(dir.join("wal.log"), N_MAX).map_err(|e| format!("init: {e}"))?;
+        Engine::open(dir.join("wal.log"), DEFAULT_N_MAX).map_err(|e| format!("init: {e}"))?;
         fs::write(dir.join("meta.json"), "{}\n").map_err(|e| format!("meta.json: {e}"))?;
         Ok(())
     }
 
     /// Open an existing database: recover the WAL, replay the catalog, load embeddings, build the
-    /// vector index.
+    /// vector index. Uses [`DEFAULT_N_MAX`] for the backlog bound.
     pub fn open(dir: &Path) -> DbResult<Db> {
+        Self::open_with(dir, DEFAULT_N_MAX)
+    }
+
+    /// Like [`Db::open`] with an explicit un-merged backlog bound (`n_max`): the read-merge tail
+    /// length allowed before writes hit backpressure — larger = more RAM headroom, smaller = earlier
+    /// backpressure. Not persisted; it is a per-process property of the in-memory changelog.
+    pub fn open_with(dir: &Path, n_max: usize) -> DbResult<Db> {
         if !dir.join("wal.log").exists() {
             return Err(format!(
                 "{} is not a stroma database (run init first)",
                 dir.display()
             ));
         }
-        let eng = Engine::open(dir.join("wal.log"), N_MAX).map_err(|e| format!("open wal: {e}"))?;
+        let eng = Engine::open(dir.join("wal.log"), n_max).map_err(|e| format!("open wal: {e}"))?;
         let mut cat = Catalog::new();
         let mut cardinality = HashMap::new();
         for line in read_lines(&dir.join("schema.jsonl")) {
@@ -111,10 +118,15 @@ impl Db {
     /// Open the database, first creating an empty one if the directory has no WAL yet — the
     /// container-friendly entrypoint (a fresh volume just works).
     pub fn open_or_init(dir: &Path) -> DbResult<Db> {
+        Self::open_or_init_with(dir, DEFAULT_N_MAX)
+    }
+
+    /// [`Db::open_or_init`] with an explicit backlog bound (see [`Db::open_with`]).
+    pub fn open_or_init_with(dir: &Path, n_max: usize) -> DbResult<Db> {
         if !dir.join("wal.log").exists() {
             Self::init(dir)?;
         }
-        Self::open(dir)
+        Self::open_with(dir, n_max)
     }
 
     fn append_line(&self, file: &str, line: &str) -> DbResult<()> {
@@ -413,7 +425,8 @@ impl Db {
     }
 }
 
-const N_MAX: usize = 8_000_000;
+/// Default un-merged backlog bound — the read-merge tail length before backpressure.
+pub const DEFAULT_N_MAX: usize = 8_000_000;
 
 fn pick_m(dim: usize) -> usize {
     for m in (1..=96.min(dim)).rev() {
