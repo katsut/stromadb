@@ -1,5 +1,5 @@
 # --- build ---
-FROM rust:1.87-slim AS build
+FROM rust:1.88-slim AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release --bin stroma-serve --bin stroma --bin stroma-mcp
