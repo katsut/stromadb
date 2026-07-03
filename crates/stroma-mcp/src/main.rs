@@ -145,17 +145,19 @@ fn handle(db: &mut Db, msg: &Value) -> Option<Value> {
     Some(resp)
 }
 
-fn flag(args: &[String], name: &str, default: &str) -> String {
+/// Resolve a setting: `--flag <v>` overrides `$ENV` overrides `default`.
+fn opt(args: &[String], name: &str, env: &str, default: &str) -> String {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
+        .or_else(|| std::env::var(env).ok())
         .unwrap_or_else(|| default.into())
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = flag(&args, "--db", ".");
+    let dir = opt(&args, "--db", "STROMA_DB", ".");
     let mut db = match Db::open(std::path::Path::new(&dir)) {
         Ok(db) => db,
         Err(e) => {

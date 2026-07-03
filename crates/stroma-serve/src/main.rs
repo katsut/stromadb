@@ -11,7 +11,8 @@
 //! v1 is **single-threaded**: one writer, requests handled sequentially (documented — the engine is
 //! single-threaded pre-1.0; the Arc-shared snapshot makes concurrent reads a later, additive step).
 //!
-//! Usage: stroma-serve --db <dir> [--addr 127.0.0.1:7700]
+//! Config: `--db <dir>` / `$STROMA_DB` (default `.`), `--addr <host:port>` / `$STROMA_ADDR`
+//! (default `127.0.0.1:7687`). A flag overrides the env var overrides the default.
 
 use std::process::exit;
 
@@ -19,11 +20,13 @@ use serde_json::{Value, json};
 use stroma_db::Db;
 use tiny_http::{Header, Method, Request, Response, Server};
 
-fn flag(args: &[String], name: &str, default: &str) -> String {
+/// Resolve a setting: `--flag <v>` overrides `$ENV` overrides `default`.
+fn opt(args: &[String], name: &str, env: &str, default: &str) -> String {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
+        .or_else(|| std::env::var(env).ok())
         .unwrap_or_else(|| default.into())
 }
 
@@ -79,10 +82,11 @@ fn handle(db: &mut Db, req: &mut Request) -> (u16, Value) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = flag(&args, "--db", ".");
-    let addr = flag(&args, "--addr", "127.0.0.1:7700");
+    let dir = opt(&args, "--db", "STROMA_DB", ".");
+    let addr = opt(&args, "--addr", "STROMA_ADDR", "127.0.0.1:7687");
 
-    let mut db = match Db::open(std::path::Path::new(&dir)) {
+    // open_or_init: a fresh directory (e.g. an empty Docker volume) is created on first run.
+    let mut db = match Db::open_or_init(std::path::Path::new(&dir)) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("error: {e}");

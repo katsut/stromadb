@@ -1,0 +1,15 @@
+services:
+  stroma:
+    build: .
+    image: stromadb
+    ports:
+      - "7687:7687"        # StromaDB HTTP surface (7687 = the graph-database port convention)
+    volumes:
+      - stroma-data:/data  # a fresh volume is initialized on first run
+    environment:
+      STROMA_DB: /data
+      STROMA_ADDR: 0.0.0.0:7687
+    restart: unless-stopped
+
+volumes:
+  stroma-data:

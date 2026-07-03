@@ -84,20 +84,39 @@ stroma stats --db ./mydb
 The database directory holds only the authoritative inputs (changelog WAL, schema/node
 assignments, received embeddings); derived stores (the vector index) rebuild on open.
 
+## Quickstart (Docker)
+
+Run the HTTP surface with no local Rust toolchain — a fresh data volume is initialized on first run:
+
+```bash
+docker compose up            # builds the image, serves on localhost:7687 (persisted in a volume)
+# or without compose:
+docker build -t stromadb .
+docker run -p 7687:7687 -v stroma-data:/data stromadb
+
+curl -s localhost:7687/health
+curl -s -X POST localhost:7687/ingest -d '{"type_def":{"name":"Person"}}'
+```
+
+The image ships `stroma-serve` (entrypoint), plus the `stroma` CLI and `stroma-mcp` binaries.
+
 ## Serve (HTTP)
 
 `stroma-serve` exposes the same database over HTTP so an agent or service can query and ingest it
 without embedding the engine — the intended surface for an LLM caller.
 
 ```bash
-stroma-serve --db ./mydb --addr 127.0.0.1:7700   # single-threaded, one writer
+stroma-serve --db ./mydb --addr 127.0.0.1:7687   # single-threaded, one writer
 
-curl -s localhost:7700/health
-curl -s -X POST localhost:7700/query  -d '{"op":"expand","subject":1,"predicate":"works-on"}'
-curl -s -X POST localhost:7700/query  -d '{"op":"search","type":"Person","vector":[...],"k":10,"allowed_labels":7}'
-curl -s -X POST localhost:7700/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2}}}'
-curl -s localhost:7700/stats
+curl -s localhost:7687/health
+curl -s -X POST localhost:7687/query  -d '{"op":"expand","subject":1,"predicate":"works-on"}'
+curl -s -X POST localhost:7687/query  -d '{"op":"search","type":"Person","vector":[...],"k":10,"allowed_labels":7}'
+curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2}}}'
+curl -s localhost:7687/stats
 ```
+
+Config precedence: `--db` / `--addr` flags override `$STROMA_DB` / `$STROMA_ADDR` override the
+defaults (`.` and `127.0.0.1:7687` — port 7687 is the graph-database convention). See `.env.example`.
 
 Reads are authz-scoped (`allowed_labels` is the caller's ABAC bitmask) and stamped with an `as_of`
 version vector. v1 handles requests sequentially (single-threaded engine, pre-1.0); concurrent reads

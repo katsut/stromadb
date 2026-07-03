@@ -1,0 +1,19 @@
+# --- build ---
+FROM rust:1.87-slim AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --bin stroma-serve --bin stroma --bin stroma-mcp
+
+# --- runtime ---
+FROM debian:bookworm-slim
+RUN useradd -u 10001 -m stroma && mkdir -p /data && chown stroma /data
+COPY --from=build /src/target/release/stroma-serve /usr/local/bin/
+COPY --from=build /src/target/release/stroma       /usr/local/bin/
+COPY --from=build /src/target/release/stroma-mcp    /usr/local/bin/
+USER stroma
+# A fresh /data volume is initialized on first run (stroma-serve calls open_or_init).
+ENV STROMA_DB=/data \
+    STROMA_ADDR=0.0.0.0:7687
+VOLUME /data
+EXPOSE 7687
+ENTRYPOINT ["stroma-serve"]

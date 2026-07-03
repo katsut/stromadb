@@ -108,6 +108,15 @@ impl Db {
         Ok(db)
     }
 
+    /// Open the database, first creating an empty one if the directory has no WAL yet — the
+    /// container-friendly entrypoint (a fresh volume just works).
+    pub fn open_or_init(dir: &Path) -> DbResult<Db> {
+        if !dir.join("wal.log").exists() {
+            Self::init(dir)?;
+        }
+        Self::open(dir)
+    }
+
     fn append_line(&self, file: &str, line: &str) -> DbResult<()> {
         let mut f = OpenOptions::new()
             .create(true)
