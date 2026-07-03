@@ -116,6 +116,7 @@
         <div><label>max nodes</label><input id="cap" type="number" value="3000"></div>
       </div>
       <button class="primary" id="go">Draw neighbourhood</button>
+      <button class="ghost" id="all">Show all nodes</button>
       <div class="legend" id="legend"></div>
       <div class="tip">Drag to pan · scroll to zoom · <b>click a node</b> to re-centre the view on it.</div>
     </section>
@@ -323,6 +324,12 @@ async function go(){ const btn=$('go'); btn.disabled=true; $('inspect').classLis
     loadGraph(r.nodes, r.edges); toast(`${r.nodes.length} nodes · ${r.edges.length} edges within ${$('hops').value} hops`); fit();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
+async function drawAll(){ const btn=$('all'); btn.disabled=true; $('inspect').classList.add('hidden'); history=[]; updateBack();
+  try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
+    const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
+    loadGraph(r.nodes, r.edges); toast(`whole graph · ${r.nodes.length} nodes · ${r.edges.length} edges${r.truncated?' (capped)':''}`); fit();
+  }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
+$('all').onclick=drawAll;
 
 function legend(){ const nm=['focus','1-hop','2-hop','3-hop','4-hop','deep']; $('legend').innerHTML=nm.map((n,i)=>`<span><i class="swatch" style="background:${hex(DEPTH[i])}"></i>${n}</span>`).join(''); }
 async function stats(){ try{ const s=await api('/stats'); $('statpills').innerHTML=`<span class="pill"><span class="dot"></span>live</span><span class="pill"><b>${s.schema.nodes}</b> nodes</span><span class="pill"><b>${s.embeddings.count}</b> vec</span><span class="pill">head <b>${s.facts.durable_head}</b></span>`; }catch{ $('statpills').innerHTML='<span class="pill">offline</span>'; } }

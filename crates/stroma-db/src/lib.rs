@@ -356,6 +356,7 @@ impl Db {
             "retrieve_context" => self.retrieve_context(req, &snap),
             "neighborhood" => self.neighborhood(req, &snap),
             "node" => self.node_detail(req, &snap),
+            "graph" => self.graph(req, &snap),
             other => Err(format!("unknown op: {other}")),
         }
     }
@@ -464,6 +465,47 @@ impl Db {
         Ok(
             json!({ "id": subject, "type": ty, "label": self.cat.node_label(subject), "props": props }),
         )
+    }
+
+    /// Whole-graph view: every declared node and its node-valued edges, authz-scoped and capped at
+    /// `max_nodes` (default 3000). Unlike `neighborhood` there is no focal distance — the result is
+    /// the entire visible graph (or a `truncated` prefix when it exceeds the cap). Same
+    /// `{nodes:[{id,depth}], edges:[[a,b]]}` shape so the UI renders it identically.
+    fn graph(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+        let cap = req["max_nodes"].as_u64().unwrap_or(3000) as usize;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let visible = |n: u64| {
+            self.cat
+                .node_label(n)
+                .is_none_or(|l| (labels >> l) & 1 == 1)
+        };
+
+        let all: Vec<u64> = self
+            .cat
+            .node_ids()
+            .into_iter()
+            .filter(|&n| visible(n))
+            .collect();
+        let truncated = all.len() > cap;
+        let keep: BTreeSet<u64> = all.into_iter().take(cap).collect();
+
+        let mut edges: BTreeSet<(u64, u64)> = BTreeSet::new();
+        for &u in &keep {
+            for v in query::neighbors(snap, u) {
+                if keep.contains(&v) {
+                    edges.insert(if u < v { (u, v) } else { (v, u) });
+                }
+            }
+        }
+        let nodes: Vec<Value> = keep
+            .iter()
+            .map(|&id| json!({ "id": id, "depth": 0 }))
+            .collect();
+        let edges: Vec<Value> = edges.iter().map(|(a, b)| json!([a, b])).collect();
+        Ok(json!({ "nodes": nodes, "edges": edges, "truncated": truncated }))
     }
 
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,
