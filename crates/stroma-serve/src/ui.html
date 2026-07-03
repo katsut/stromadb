@@ -51,8 +51,12 @@
   h2.clp { cursor:pointer; display:flex; align-items:center; gap:6px; } h2.clp .caret { transition:transform .15s; } section.q.collapsed h2.clp .caret { transform:rotate(-90deg); }
   .float-panel { position:absolute; top:56px; left:14px; z-index:4; width:298px; max-width:calc(100% - 28px); max-height:calc(100vh - 74px); overflow-y:auto; }
   .q-overlay { position:absolute; top:56px; right:14px; bottom:14px; z-index:6; width:360px; max-width:calc(100% - 28px); display:flex; }
-  .overlay-card { width:100%; overflow-y:auto; }
-  .overlay-card h2 { display:flex; align-items:center; }
+  .tabs { display:flex; align-items:center; gap:4px; margin:-2px -2px 12px; }
+  .tabs-sp { flex:1; }
+  .tab { background:transparent; border:0; border-bottom:2px solid transparent; color:var(--mut); font:600 12.5px var(--sans); letter-spacing:.02em; padding:5px 8px 7px; cursor:pointer; transition:color .12s, border-color .12s; }
+  .tab:hover { color:var(--fg-dim); } .tab.active { color:var(--fg); border-bottom-color:var(--accent); }
+  .caret-btn { background:none; border:0; color:var(--mut); cursor:pointer; font-size:13px; padding:2px 4px; transition:transform .15s, color .12s; } .caret-btn:hover { color:var(--fg); }
+  #askPanel.collapsed .tab-body { display:none; } #askPanel.collapsed .caret-btn { transform:rotate(-90deg); }
   .pop { position:absolute; z-index:7; top:52px; left:14px; width:288px; max-width:calc(100% - 28px); background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r); padding:13px 15px; box-shadow:var(--shadow); }
   .pop-h { font:600 12.5px var(--sans); color:var(--fg); margin-bottom:8px; }
   .scope-chips { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:9px; }
@@ -133,7 +137,6 @@
     <span id="statpills"></span>
     <button class="pill scope-btn" id="scopeBtn" title="visibility scope"><span data-i18n="scope">scope</span>: <b id="scopeSummary">all</b></button>
     <span class="tb-spacer"></span>
-    <button class="tb-btn" id="queryBtn" data-i18n="queryTitle">Query</button>
     <span class="pill" id="userPill" style="display:none">signed in <b id="userName"></b></span>
     <select class="lang" id="lang" title="language"><option value="en">EN</option><option value="ja">日本語</option><option value="zh">中文</option></select>
     <button class="icon-btn" id="theme" data-i18n-title="theme">☾</button>
@@ -147,32 +150,28 @@
     <div id="scopeEffect" class="tip" style="color:var(--accent);margin-bottom:0"></div>
   </div>
 
-  <section class="q float-panel" id="exploreSec">
-    <h2 class="clp" id="exploreH"><span class="caret">▾</span><span data-i18n="explore">Explore</span></h2>
-    <div class="row">
-      <div><label data-i18n="focusNode">focus node</label><input id="focus" type="number" list="nodeList" value="1"></div>
-      <div><label data-i18n="predicate">predicate (blank = all)</label><input id="pred" list="predList" data-i18n-ph="allEdges" placeholder="all edges"></div>
+  <section class="q float-panel" id="askPanel">
+    <div class="tabs">
+      <button class="tab active" id="tabExplore" data-tab="explore" data-i18n="explore">Explore</button>
+      <button class="tab" id="tabQuery" data-tab="query" data-i18n="queryTitle">Query</button>
+      <span class="tabs-sp"></span>
+      <button class="caret-btn" id="askCollapse" title="collapse">▾</button>
     </div>
-    <div class="lbl-row"><label data-i18n="distance">distance (hops)</label><b id="hopsv">2</b></div>
-    <input id="hops" type="range" min="1" max="5" value="2">
-    <div class="row">
-      <div><label data-i18n="maxNodes">max nodes</label><input id="cap" type="number" value="3000"></div>
+    <div class="tab-body" id="paneExplore">
+      <div class="row">
+        <div><label data-i18n="focusNode">focus node</label><input id="focus" type="number" list="nodeList" value="1"></div>
+        <div><label data-i18n="predicate">predicate (blank = all)</label><input id="pred" list="predList" data-i18n-ph="allEdges" placeholder="all edges"></div>
+      </div>
+      <div class="lbl-row"><label data-i18n="distance">distance (hops)</label><b id="hopsv">2</b></div>
+      <input id="hops" type="range" min="1" max="5" value="2">
+      <div class="row">
+        <div><label data-i18n="maxNodes">max nodes</label><input id="cap" type="number" value="3000"></div>
+      </div>
+      <button class="primary" id="go" data-i18n="draw">Draw neighbourhood</button>
+      <div class="row"><button class="ghost" id="all" data-i18n="showAll">Show all nodes</button><button class="ghost" id="map" data-i18n="overviewMap">Overview map</button></div>
+      <div class="legend" id="legend"></div>
     </div>
-    <button class="primary" id="go" data-i18n="draw">Draw neighbourhood</button>
-    <div class="row"><button class="ghost" id="all" data-i18n="showAll">Show all nodes</button><button class="ghost" id="map" data-i18n="overviewMap">Overview map</button></div>
-    <div class="legend" id="legend"></div>
-  </section>
-
-  <span class="renderer-tag" id="rtag"></span>
-  <div class="hud"><button id="back" data-i18n-title="back" title="back to previous focus" disabled>←</button><button id="labtog" class="active" data-i18n-title="labels" title="toggle labels">A</button><button id="zin" data-i18n-title="zoomIn" title="zoom in">+</button><button id="zout" data-i18n-title="zoomOut" title="zoom out">−</button><button id="fit" data-i18n-title="fit" title="fit">⊡</button><button id="help" data-i18n-title="help" title="controls">?</button></div>
-  <div class="help-pop hidden" id="helpPop" data-i18n="tipMain">Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.</div>
-  <div class="stage-note" id="note" data-i18n="note">Draw a neighbourhood to explore the graph.</div>
-  <div class="inspect hidden" id="inspect"></div>
-  <div class="toast hidden" id="toast"></div>
-
-  <div class="q-overlay hidden" id="queryOverlay">
-    <section class="q overlay-card">
-      <h2><span data-i18n="queryTitle">Query</span> <span class="ins-x" id="queryClose">✕</span></h2>
+    <div class="tab-body hidden" id="paneQuery">
       <label data-i18n="queryOp">operation</label>
       <select id="qop">
         <option value="point">point — value of (subject, predicate)</option>
@@ -187,8 +186,16 @@
       </div>
       <button class="primary" id="qrun" data-i18n="run">Run</button>
       <div id="qresult"></div>
-    </section>
-  </div>
+    </div>
+  </section>
+
+  <span class="renderer-tag" id="rtag"></span>
+  <div class="hud"><button id="back" data-i18n-title="back" title="back to previous focus" disabled>←</button><button id="labtog" class="active" data-i18n-title="labels" title="toggle labels">A</button><button id="zin" data-i18n-title="zoomIn" title="zoom in">+</button><button id="zout" data-i18n-title="zoomOut" title="zoom out">−</button><button id="fit" data-i18n-title="fit" title="fit">⊡</button><button id="help" data-i18n-title="help" title="controls">?</button></div>
+  <div class="help-pop hidden" id="helpPop" data-i18n="tipMain">Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.</div>
+  <div class="stage-note" id="note" data-i18n="note">Draw a neighbourhood to explore the graph.</div>
+  <div class="inspect hidden" id="inspect"></div>
+  <div class="toast hidden" id="toast"></div>
+
 </div>
 <datalist id="predList"></datalist>
 <datalist id="nodeList"></datalist>
@@ -523,13 +530,15 @@ async function startPoll(){ if(pollStarted) return; pollStarted=true;
 }
 function setLivePill(){ const b=$('livePill'); if(!b) return; b.classList.toggle('on', liveOn); b.title = liveOn ? t('liveOn') : t('livePaused'); b.innerHTML = `<span class="dot"></span>${liveOn ? t('live') : t('paused')}`; }
 $('livePill').onclick=()=>{ liveOn=!liveOn; setLivePill(); if(liveOn && lastReq){ (async()=>{ try{ const res=await api('/query',lastReq); if(!res.error) loadGraph(res.nodes,res.edges,true); }catch(x){} })(); } };
-$('exploreH').onclick=()=>$('exploreSec').classList.toggle('collapsed');
+// Explore | Query are peers — two tabs of one "ask the graph" panel
+function setTab(name){ const q=name==='query';
+  $('tabExplore').classList.toggle('active', !q); $('tabQuery').classList.toggle('active', q);
+  $('paneExplore').classList.toggle('hidden', q); $('paneQuery').classList.toggle('hidden', !q);
+  $('askPanel').classList.remove('collapsed'); }
+$('tabExplore').onclick=()=>setTab('explore'); $('tabQuery').onclick=()=>setTab('query');
+$('askCollapse').onclick=()=>$('askPanel').classList.toggle('collapsed');
 // re-run whatever view is currently shown (used when the visibility scope changes)
 function rerun(){ if(overviewMode) overviewDraw(); else if($('focus').value.trim()!=='') go(); else drawAll(); }
-
-// ---------- guided query panel — summoned as an overlay ----------
-$('queryBtn').onclick=()=>{ $('queryOverlay').classList.remove('hidden'); };
-$('queryClose').onclick=()=>{ $('queryOverlay').classList.add('hidden'); };
 function qopFields(){ const op=$('qop').value; $('qpredWrap').style.display = (op==='point'||op==='expand') ? '' : 'none'; $('qkWrap').style.display = op==='similar' ? '' : 'none'; }
 $('qop').onchange=qopFields;
 function qNodeIds(r){ const s=new Set();
