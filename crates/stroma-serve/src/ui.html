@@ -119,7 +119,7 @@
         <div><label>max nodes</label><input id="cap" type="number" value="3000"></div>
       </div>
       <button class="primary" id="go">Draw neighbourhood</button>
-      <button class="ghost" id="all">Show all nodes</button>
+      <div class="row"><button class="ghost" id="all">Show all nodes</button><button class="ghost" id="map">Overview map</button></div>
       <div class="legend" id="legend"></div>
       <div class="tip">Drag the background to pan · scroll to zoom · <b>drag a node</b> to move it · <b>click</b> for details · <b>double-click</b> to focus.</div>
     </section>
@@ -159,8 +159,11 @@ let ids = [];                // index -> node id
 let idx = new Map();         // node id -> index
 let depth = [];              // index -> hop depth
 let names = [];              // index -> display name (may be null)
+let counts = [];             // index -> aggregate member count (overview only; null otherwise)
 let hasFocus = false;        // neighbourhood (show hop distance) vs whole-graph
 let labelsOn = true;         // on-graph label visibility (HUD toggle)
+let overviewMode = false;    // type-aggregate map: clicking a super-node drills to its sample
+let overviewSamples = new Map(); // super-node id -> a real member node id to drill into
 const lcv = $('labels'), lctx = lcv.getContext('2d');  // 2D overlay for node labels
 let px, py, vx, vy;          // Float32Array positions/velocities
 let ePairs = [];             // [i,j] index pairs
@@ -178,9 +181,9 @@ function loadGraph(nodes, edges, live) {
   const pinnedIds = live ? [...pinned].map(i=>ids[i]) : [];
   if (live) for (let i=0;i<N;i++) prev.set(ids[i], [px[i],py[i],vx[i],vy[i]]);
   dragIdx = -1; if (!live) pinned.clear();
-  N = nodes.length; ids = new Array(N); idx = new Map(); depth = new Array(N); names = new Array(N);
+  N = nodes.length; ids = new Array(N); idx = new Map(); depth = new Array(N); names = new Array(N); counts = new Array(N);
   px = new Float32Array(N); py = new Float32Array(N); vx = new Float32Array(N); vy = new Float32Array(N);
-  nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth; names[i]=nd.name||null;
+  nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth; names[i]=nd.name||null; counts[i]=(nd.count!=null?nd.count:null);
     const p = prev && prev.get(nd.id);
     if (p) { px[i]=p[0]; py[i]=p[1]; vx[i]=p[2]; vy[i]=p[3]; }
     else { const a=i*2.399963, r = nd.depth>0 ? nd.depth*82 + (i%5)*7 : (N>1 ? 24+Math.sqrt(i)*20 : 0);
@@ -236,7 +239,8 @@ function initGL() {
 function buildBuffers() {
   if(!gl) return;
   const col=new Float32Array(N*3), sz=new Float32Array(N);
-  for(let i=0;i<N;i++){ const c=DEPTH[Math.min(depth[i],DEPTH.length-1)]; col[i*3]=c[0]; col[i*3+1]=c[1]; col[i*3+2]=c[2]; sz[i]=13; }
+  for(let i=0;i<N;i++){ const c=DEPTH[Math.min(depth[i],DEPTH.length-1)]; col[i*3]=c[0]; col[i*3+1]=c[1]; col[i*3+2]=c[2];
+    sz[i] = counts[i]!=null ? Math.max(14, Math.min(46, 13+Math.log2(counts[i]+1)*5)) : 13; }   // overview: size by member count
   gl.bindVertexArray(vaoN);
   gl.bindBuffer(gl.ARRAY_BUFFER,bufPos); gl.bufferData(gl.ARRAY_BUFFER,px.byteLength+py.byteLength,gl.DYNAMIC_DRAW);
   let lp=gl.getAttribLocation(progN,'a_pos'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp,2,gl.FLOAT,false,0,0); // interleaved below
@@ -361,7 +365,9 @@ async function showDetail(id, dep){
 function nodeAt(e){ const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left, my=e.clientY-rc.top; const [wx,wy]=world(mx,my);
   let best=-1, bd=1e9; for(let i=0;i<N;i++){ const dx=px[i]-wx, dy=py[i]-wy; const d=dx*dx+dy*dy; if(d<bd){bd=d;best=i;} }
   return (best>=0 && bd < (18/cam.z)**2) ? best : -1; }
-function pick(e){ const i=nodeAt(e); if(i>=0) showDetail(ids[i], depth[i]); }
+function pick(e){ const i=nodeAt(e); if(i<0) return;
+  if(overviewMode){ const s=overviewSamples.get(ids[i]); if(s!==undefined) recenter(s); return; }  // drill from a cluster into its region
+  showDetail(ids[i], depth[i]); }
 cv.addEventListener('dblclick', e=>{ const i=nodeAt(e); if(i>=0) recenter(ids[i]); });
 
 // ---------- drill-down history ----------
@@ -373,19 +379,29 @@ $('back').onclick=()=>{ if(!history.length) return; $('focus').value=history.pop
 // ---------- data ----------
 function toast(m,err){ const t=$('toast'); t.textContent=m; t.className='toast'+(err?' err':''); t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),2800); }
 async function go(){ if($('focus').value.trim()===''){ toast('enter a focus node, or use “Show all nodes”',true); return; }
-  const btn=$('go'); btn.disabled=true; hasFocus=true; $('inspect').classList.add('hidden');
+  const btn=$('go'); btn.disabled=true; hasFocus=true; overviewMode=false; $('inspect').classList.add('hidden');
   try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
     if($('pred').value) req.predicate=$('pred').value; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     lastReq=req; loadGraph(r.nodes, r.edges); toast(`${r.nodes.length} nodes · ${r.edges.length} edges within ${$('hops').value} hops`); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
-async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
+async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; overviewMode=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
   try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     lastReq=req; loadGraph(r.nodes, r.edges); toast(`whole graph · ${r.nodes.length} nodes · ${r.edges.length} edges${r.truncated?' (capped)':''}`); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('all').onclick=drawAll;
+async function overviewDraw(){ const btn=$('map'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
+  try{ const req={ op:'overview' }; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
+    const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
+    overviewSamples = new Map(r.nodes.map(n=>[n.id, n.sample]));
+    // show "Type ×count" on the map by folding the count into the label
+    const nodes = r.nodes.map(n=>({ id:n.id, depth:0, name:`${n.name} ×${n.count}`, count:n.count }));
+    lastReq=req; loadGraph(nodes, r.edges); overviewMode=true;
+    toast(`overview · ${r.nodes.length} types`); fit(); startPoll();
+  }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
+$('map').onclick=overviewDraw;
 
 // ---------- live updates: long-poll /events, re-query the current slice on change ----------
 async function startPoll(){ if(pollStarted) return; pollStarted=true;
@@ -396,7 +412,10 @@ async function startPoll(){ if(pollStarted) return; pollStarted=true;
     catch(x){ await new Promise(z=>setTimeout(z,2000)); continue; }
     if(head===liveHead) continue;      // timeout tick, no change
     liveHead=head; setLivePill(); stats();   // refresh header counters too
-    if(liveOn && lastReq){ try{ const res=await api('/query', lastReq); if(!res.error){ loadGraph(res.nodes, res.edges, true); toast('live · updated'); } }catch(x){} }
+    if(liveOn && lastReq){ try{ const res=await api('/query', lastReq); if(!res.error){
+      let nodes=res.nodes;
+      if(lastReq.op==='overview'){ overviewSamples=new Map(res.nodes.map(n=>[n.id,n.sample])); nodes=res.nodes.map(n=>({id:n.id,depth:0,name:`${n.name} ×${n.count}`,count:n.count})); }
+      loadGraph(nodes, res.edges, true); toast('live · updated'); } }catch(x){} }
   }
 }
 function setLivePill(){ const b=$('livetog'); if(!b) return; b.classList.toggle('active', liveOn); b.title = liveOn ? 'live updates on (click to pause)' : 'paused (click to resume)'; }
