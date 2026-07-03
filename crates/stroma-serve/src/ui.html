@@ -75,7 +75,9 @@
   .row { display:flex; gap:10px; } .row > * { flex:1; min-width:0; }
   button.primary { width:100%; margin-top:16px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); color:var(--accent-ink); border:0; border-radius:var(--r-sm); padding:11px; font:640 14px var(--sans); cursor:pointer; transition:filter .15s, transform .05s; box-shadow:inset 0 1px 0 rgba(255,255,255,.3), 0 6px 16px -8px color-mix(in oklab, var(--accent) 60%, transparent); }
   button.primary:hover { filter:brightness(1.06); } button.primary:active { transform:translateY(1px); } button.primary:disabled { opacity:.6; cursor:progress; }
-  .legend { margin-top:14px; display:flex; flex-wrap:wrap; gap:8px 14px; } .legend span { font-size:11.5px; color:var(--fg-dim); display:flex; align-items:center; gap:6px; } .swatch { width:9px; height:9px; border-radius:50%; }
+  .legend { position:absolute; left:50%; bottom:12px; transform:translateX(-50%); z-index:2; display:flex; flex-wrap:wrap; justify-content:center; gap:6px 13px;
+    background:linear-gradient(180deg, rgba(9,12,19,.66), rgba(9,12,19,.5)); backdrop-filter:blur(8px); border:1px solid var(--line); border-radius:100px; padding:6px 14px; box-shadow:var(--shadow); }
+  .legend span { font-size:11px; color:var(--fg-dim); display:flex; align-items:center; gap:6px; } .swatch { width:9px; height:9px; border-radius:50%; }
   .tip { color:var(--mut); font-size:11.5px; margin-top:12px; line-height:1.45; }
   canvas#cv { display:block; cursor:grab; } canvas#cv.drag { cursor:grabbing; }
   #labels { pointer-events:none; }
@@ -160,7 +162,7 @@
     <div class="tab-body" id="paneExplore">
       <div class="row">
         <div><label data-i18n="focusNode">focus node</label><input id="focus" type="number" list="nodeList" value="1"></div>
-        <div><label data-i18n="predicate">predicate (blank = all)</label><input id="pred" list="predList" data-i18n-ph="allEdges" placeholder="all edges"></div>
+        <div><label data-i18n="predicate">predicate (blank = all)</label><select id="pred"></select></div>
       </div>
       <div class="lbl-row"><label data-i18n="distance">distance (hops)</label><b id="hopsv">2</b></div>
       <input id="hops" type="range" min="1" max="5" value="2">
@@ -169,7 +171,6 @@
       </div>
       <button class="primary" id="go" data-i18n="draw">Draw neighbourhood</button>
       <div class="row"><button class="ghost" id="all" data-i18n="showAll">Show all nodes</button><button class="ghost" id="map" data-i18n="overviewMap">Overview map</button></div>
-      <div class="legend" id="legend"></div>
     </div>
     <div class="tab-body hidden" id="paneQuery">
       <label data-i18n="queryOp">operation</label>
@@ -181,7 +182,7 @@
       </select>
       <div class="row">
         <div><label data-i18n="querySubject">subject id</label><input id="qsubject" type="number" list="nodeList" value="1"></div>
-        <div id="qpredWrap"><label data-i18n="predicate">predicate</label><input id="qpred" list="predList" placeholder="knows"></div>
+        <div id="qpredWrap"><label data-i18n="predicate">predicate</label><select id="qpred"></select></div>
         <div id="qkWrap" style="display:none"><label>k</label><input id="qk" type="number" value="10"></div>
       </div>
       <button class="primary" id="qrun" data-i18n="run">Run</button>
@@ -190,6 +191,7 @@
   </section>
 
   <span class="renderer-tag" id="rtag"></span>
+  <div class="legend" id="legend"></div>
   <div class="hud"><button id="back" data-i18n-title="back" title="back to previous focus" disabled>←</button><button id="labtog" class="active" data-i18n-title="labels" title="toggle labels">A</button><button id="zin" data-i18n-title="zoomIn" title="zoom in">+</button><button id="zout" data-i18n-title="zoomOut" title="zoom out">−</button><button id="fit" data-i18n-title="fit" title="fit">⊡</button><button id="help" data-i18n-title="help" title="controls">?</button></div>
   <div class="help-pop hidden" id="helpPop" data-i18n="tipMain">Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.</div>
   <div class="stage-note" id="note" data-i18n="note">Draw a neighbourhood to explore the graph.</div>
@@ -197,7 +199,6 @@
   <div class="toast hidden" id="toast"></div>
 
 </div>
-<datalist id="predList"></datalist>
 <datalist id="nodeList"></datalist>
 
 <script>
@@ -231,7 +232,7 @@ function applyLang(l){ lang = I18N[l] ? l : 'en'; localStorage.setItem('stroma_l
   document.querySelectorAll('[data-i18n]').forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll('[data-i18n-ph]').forEach(e=>e.placeholder=t(e.dataset.i18nPh));
   document.querySelectorAll('[data-i18n-title]').forEach(e=>e.title=t(e.dataset.i18nTitle));
-  legend(); renderUser(); renderStats(); setLivePill(); if(typeof _schema!=='undefined'&&_schema) renderScope(); }
+  legend(); renderUser(); renderStats(); setLivePill(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); } }
 const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
 const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
@@ -272,7 +273,7 @@ function loadGraph(nodes, edges, live) {
       px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; } });
   ePairs = []; eW = []; for (const [a,b,w] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined){ ePairs.push(i,j); eW.push(w||1); } }
   if (live) pinned = new Set(pinnedIds.map(id=>idx.get(id)).filter(x=>x!==undefined));
-  $('note').style.display = N ? 'none' : '';
+  $('note').style.display = N ? 'none' : ''; $('legend').style.display = N ? '' : 'none';
   updateNodeCandidates();
   settle = live ? 80 : 200; autoFit = !live; buildBuffers();
 }
@@ -581,9 +582,12 @@ async function stats(){ try{ _stats=await api('/stats'); renderStats(); }catch{ 
 // ---------- schema discoverability: predicate list + labels in use ----------
 let _schema=null;
 async function loadSchema(){ try{ _schema=await api('/query',{op:'schema'}); if(_schema.error){ _schema=null; return; }
-  $('predList').innerHTML=(_schema.predicates||[]).map(p=>`<option value="${esc(p.name)}">`).join('');
-  renderScope();
+  fillPredSelects(); renderScope();
   }catch(x){} }
+function fillPredSelects(){ const opts=(_schema&&_schema.predicates||[]).map(p=>`<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+  const cur=$('pred').value, curq=$('qpred').value;
+  $('pred').innerHTML=`<option value="">${t('allEdges')}</option>`+opts; $('pred').value=cur;
+  $('qpred').innerHTML=`<option value="">—</option>`+opts; $('qpred').value=curq; }
 
 // ---------- visibility scope: toggle which sensitivity labels are visible (post-authz) ----------
 // `hidden` = Set of label numbers turned OFF. Empty = everything visible (mask null = no restriction).
