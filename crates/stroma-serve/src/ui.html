@@ -5,163 +5,362 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>StromaDB</title>
 <style>
-  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --fg:#e6e9ef; --mut:#8b93a7; --accent:#5aa9ff; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
-  header { display:flex; align-items:baseline; gap:16px; padding:12px 20px; border-bottom:1px solid var(--line); }
-  header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
-  header .stats { color:var(--mut); font-size:12px; }
-  main { max-width:960px; margin:0 auto; padding:20px; }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; }
-  label { display:block; color:var(--mut); font-size:12px; margin:8px 0 3px; }
-  input, select, textarea { width:100%; background:#0d0f14; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
-  textarea { min-height:56px; resize:vertical; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-  .row { display:flex; gap:12px; flex-wrap:wrap; }
-  .row > div { flex:1; min-width:130px; }
-  button { background:var(--accent); color:#04122b; border:0; border-radius:6px; padding:9px 16px; font:inherit; font-weight:600; cursor:pointer; margin-top:12px; }
-  button.ghost { background:#222836; color:var(--fg); font-weight:400; padding:3px 9px; margin:2px; }
-  .hidden { display:none; }
-  pre { background:#0d0f14; border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; font-size:12px; max-height:40vh; }
-  .chips { margin-top:8px; }
-  .err { color:#ff7b72; }
-  a { color:var(--accent); }
-  .hint { color:var(--mut); font-size:12px; }
+  :root {
+    --bg:#0b0e14; --bg-2:#0f131b; --panel:#131824; --panel-2:#171d2b;
+    --line:#222a3a; --line-2:#2c3648; --fg:#e8ecf4; --fg-dim:#aeb7c9; --mut:#6b7488;
+    --accent:#37d6a8; --accent-2:#2bb98f; --accent-ink:#04140f;
+    --r:10px; --r-sm:7px; --shadow:0 1px 0 rgba(255,255,255,.03), 0 12px 32px -12px rgba(0,0,0,.6);
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace; --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body { margin:0; color:var(--fg); font:14px/1.55 var(--sans); -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(1.5px 1.5px at 24px 32px, rgba(255,255,255,.55), transparent 100%) 0 0/170px 190px,
+      radial-gradient(1.2px 1.2px at 90px 120px, rgba(190,214,255,.5), transparent 100%) 0 0/230px 250px,
+      radial-gradient(1px 1px at 150px 60px, rgba(255,255,255,.34), transparent 100%) 0 0/300px 320px,
+      radial-gradient(1px 1px at 40px 200px, rgba(180,170,255,.32), transparent 100%) 0 0/370px 340px,
+      radial-gradient(1400px 720px at 82% -12%, #13293c 0%, transparent 60%),
+      radial-gradient(1000px 560px at -12% 112%, #1b1533 0%, transparent 58%),
+      var(--bg); }
+  ::selection { background:color-mix(in oklab, var(--accent) 40%, transparent); }
+  .app { display:grid; grid-template-columns:340px 1fr; grid-template-rows:auto 1fr; height:100vh; }
+  header { grid-column:1 / -1; display:flex; align-items:center; gap:14px; padding:12px 18px; border-bottom:1px solid var(--line); background:rgba(10,13,20,.6); backdrop-filter:blur(8px); }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:640; letter-spacing:.2px; }
+  .brand .name { font-size:16px; } .brand .name b { color:var(--accent); font-weight:640; }
+  .pills { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
+  .pill { font:500 11.5px/1 var(--mono); color:var(--fg-dim); background:var(--panel); border:1px solid var(--line); border-radius:100px; padding:6px 10px; }
+  .pill b { color:var(--fg); } .dot { width:7px; height:7px; border-radius:50%; background:var(--accent); box-shadow:0 0 8px var(--accent); display:inline-block; margin-right:6px; vertical-align:middle; }
+  aside { border-right:1px solid var(--line); background:var(--bg-2); overflow-y:auto; padding:18px; }
+  section.q { background:var(--panel); border:1px solid var(--line); border-radius:var(--r); padding:16px; box-shadow:var(--shadow); }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:var(--mut); margin:0 0 12px; font-weight:600; }
+  label { display:block; color:var(--fg-dim); font-size:12px; margin:12px 0 5px; }
+  .lbl-row { display:flex; justify-content:space-between; align-items:baseline; } .lbl-row b { color:var(--accent); font:600 12px var(--mono); }
+  input, select { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line-2); border-radius:var(--r-sm); padding:9px 11px; font:inherit; transition:border-color .15s, box-shadow .15s; }
+  input:focus, select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent); }
+  input::placeholder { color:var(--mut); }
+  input[type=range] { padding:0; accent-color:var(--accent); }
+  select { appearance:none; background-image:linear-gradient(45deg,transparent 50%,var(--mut) 50%),linear-gradient(135deg,var(--mut) 50%,transparent 50%); background-position:calc(100% - 16px) 55%, calc(100% - 11px) 55%; background-size:5px 5px,5px 5px; background-repeat:no-repeat; }
+  .row { display:flex; gap:10px; } .row > * { flex:1; min-width:0; }
+  button.primary { width:100%; margin-top:16px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); color:var(--accent-ink); border:0; border-radius:var(--r-sm); padding:11px; font:640 14px var(--sans); cursor:pointer; transition:filter .15s, transform .05s; }
+  button.primary:hover { filter:brightness(1.06); } button.primary:active { transform:translateY(1px); } button.primary:disabled { opacity:.6; cursor:progress; }
+  .legend { margin-top:14px; display:flex; flex-wrap:wrap; gap:8px 14px; } .legend span { font-size:11.5px; color:var(--fg-dim); display:flex; align-items:center; gap:6px; } .swatch { width:9px; height:9px; border-radius:50%; }
+  .tip { color:var(--mut); font-size:11.5px; margin-top:12px; line-height:1.45; }
+  main { position:relative; overflow:hidden; }
+  canvas { display:block; width:100%; height:100%; cursor:grab; } canvas.drag { cursor:grabbing; }
+  .renderer-tag { position:absolute; left:16px; top:14px; font:500 11px var(--mono); color:var(--mut); } .renderer-tag b { color:var(--accent); }
+  .hud { position:absolute; right:14px; top:14px; display:flex; gap:6px; }
+  .hud button { background:var(--panel); border:1px solid var(--line-2); color:var(--fg-dim); border-radius:var(--r-sm); width:32px; height:32px; font-size:15px; cursor:pointer; } .hud button:hover { color:var(--fg); border-color:var(--accent); }
+  .stage-note { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); text-align:center; color:var(--mut); font-size:13px; pointer-events:none; max-width:340px; }
+  .toast { position:absolute; left:16px; bottom:16px; background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r-sm); padding:8px 12px; font:12px var(--mono); color:var(--fg-dim); box-shadow:var(--shadow); }
+  .toast.err { color:#ff7a90; border-color:color-mix(in oklab,#ff7a90 40%,var(--line-2)); }
+  .hud button:disabled { opacity:.38; cursor:default; } .hud button:disabled:hover { color:var(--fg-dim); border-color:var(--line-2); }
+  .inspect { position:absolute; right:14px; bottom:14px; width:296px; max-width:calc(100% - 28px); background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r); padding:12px 14px; font:12px var(--mono); color:var(--fg-dim); box-shadow:var(--shadow); }
+  .inspect b { color:var(--fg); }
+  .ins-h { color:var(--fg); font-size:12.5px; } .ins-h b { color:var(--accent); } .ins-name { color:var(--fg); font-weight:640; }
+  .ins-x { float:right; cursor:pointer; color:var(--mut); margin-left:8px; } .ins-x:hover { color:#ff7a90; }
+  .ins-meta { color:var(--mut); font-size:11px; margin:5px 0 9px; }
+  .ins-props { display:flex; flex-direction:column; gap:5px; max-height:216px; overflow:auto; }
+  .ins-r { display:flex; gap:10px; align-items:baseline; } .ins-k { color:var(--fg-dim); min-width:74px; flex:0 0 auto; } .ins-v { color:var(--fg); word-break:break-word; }
+  .ins-node { color:var(--accent); cursor:pointer; } .ins-node:hover { text-decoration:underline; }
+  .ins-act { margin-top:9px; border-top:1px solid var(--line); padding-top:8px; } .ins-act span { color:var(--accent); cursor:pointer; } .ins-act span:hover { text-decoration:underline; }
+  .ins-load { color:var(--mut); }
+  html[data-theme="light"] {
+    --bg:#f4f6fa; --bg-2:#eceff5; --panel:#ffffff; --panel-2:#f5f8fc;
+    --line:#e1e6ef; --line-2:#ced6e2; --fg:#1b2233; --fg-dim:#4c5769; --mut:#8b94a6;
+    --accent:#12b488; --accent-2:#0f9e78; --accent-ink:#ffffff;
+    --shadow:0 1px 0 rgba(0,0,0,.02), 0 14px 30px -16px rgba(20,30,50,.28);
+  }
+  html[data-theme="light"] body { background:radial-gradient(1100px 560px at 82% -12%, #d9f2ea 0%, transparent 60%), radial-gradient(820px 460px at -8% 112%, #e6e2f3 0%, transparent 55%), var(--bg); }
+  html[data-theme="light"] header { background:rgba(255,255,255,.7); }
+  .icon-btn { background:var(--panel); border:1px solid var(--line-2); color:var(--fg-dim); border-radius:var(--r-sm); width:34px; height:34px; font-size:15px; cursor:pointer; transition:color .15s, border-color .15s; }
+  .icon-btn:hover { color:var(--fg); border-color:var(--accent); }
+  h2 .h2-note { text-transform:none; letter-spacing:0; color:var(--accent); font:600 10.5px var(--mono); margin-left:8px; }
+  button.ghost { width:100%; margin-top:10px; background:transparent; color:var(--fg-dim); border:1px dashed var(--line-2); border-radius:var(--r-sm); padding:9px; font:600 12.5px var(--sans); cursor:pointer; transition:color .15s, border-color .15s; }
+  button.ghost:hover { color:var(--accent); border-color:var(--accent); }
+  .role-row { display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--line); border-radius:var(--r-sm); margin-bottom:7px; background:var(--bg); cursor:pointer; transition:border-color .15s; }
+  .role-row:hover { border-color:var(--accent); } .role-row.active { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in oklab, var(--accent) 22%, transparent); }
+  .role-row .rn { font:600 12.5px var(--sans); color:var(--fg); } .role-row .rl { font:11px var(--mono); color:var(--mut); margin-left:auto; }
+  .role-row .rx { color:var(--mut); cursor:pointer; font-size:14px; line-height:1; padding:0 2px; } .role-row .rx:hover { color:#ff7a90; }
+  .pill.role { color:var(--fg-dim); } .pill.role b { color:var(--accent); }
+  @media (max-width:820px){ .app{ grid-template-columns:1fr; grid-template-rows:auto auto 1fr; } aside{ border-right:0; border-bottom:1px solid var(--line);} }
 </style>
 </head>
 <body>
-<header>
-  <h1>StromaDB</h1>
-  <span class="stats" id="stats">…</span>
-</header>
-<main>
-  <div class="panel">
-    <label>operation</label>
-    <select id="op">
-      <option value="point">point — value of (subject, predicate)</option>
-      <option value="expand">expand — neighbors of a subject</option>
-      <option value="search">search — type-aware hybrid (vector)</option>
-      <option value="retrieve_context">retrieve_context — assembled, dated context</option>
-    </select>
-
-    <div id="f_point_expand">
-      <div class="row">
-        <div><label>subject (node id)</label><input id="subject" type="number" value="1"></div>
-        <div><label>predicate</label><input id="predicate" placeholder="works-on"></div>
-      </div>
+<div class="app">
+  <header>
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="5" r="2.4" fill="#37d6a8"/><circle cx="5" cy="17" r="2.4" fill="#5aa9ff"/><circle cx="19" cy="16" r="2.4" fill="#b78cff"/><circle cx="12" cy="12" r="1.6" fill="#e8ecf4"/><path d="M12 5.2 12 10.6M11 11 6 15.4M13 11 18 14.6" stroke="#3a475e" stroke-width="1.3"/></svg>
+      <span class="name">Stroma<b>DB</b></span>
     </div>
-
-    <div id="f_search" class="hidden">
-      <div class="row">
-        <div><label>type</label><input id="type" placeholder="Person"></div>
-        <div><label>k</label><input id="k" type="number" value="10"></div>
-      </div>
-      <label>vector (JSON array)</label>
-      <textarea id="vector">[1, 0, 0, 0]</textarea>
-      <div class="row">
-        <div><label>allowed_labels (bitmask, optional)</label><input id="allowed_labels" type="number" placeholder="all"></div>
-        <div><label>expand predicate (optional)</label><input id="expand"></div>
-      </div>
-      <div id="ctx_fields" class="hidden">
-        <div class="row">
-          <div><label>content predicate</label><input id="content" placeholder="body"></div>
-          <div><label>date predicate (optional)</label><input id="date" placeholder="created_at"></div>
-          <div><label>as_of (epoch s, optional)</label><input id="as_of" type="number"></div>
-        </div>
-      </div>
+    <div class="pills">
+      <span id="statpills"><span class="pill"><span class="dot"></span>connecting…</span></span>
+      <span class="pill role" id="rolePill">view as <b>—</b></span>
+      <span class="pill" id="userPill" style="display:none">signed in <b id="userName"></b></span>
     </div>
+    <button class="icon-btn" id="theme" title="Toggle light / dark">☾</button>
+    <button class="icon-btn" id="logout" title="Sign out">⏻</button>
+  </header>
 
-    <button id="run">Run</button>
-    <span class="hint" id="running"></span>
-  </div>
+  <aside>
+    <section class="q">
+      <h2>Explore</h2>
+      <div class="row">
+        <div><label>focus node</label><input id="focus" type="number" value="1"></div>
+        <div><label>predicate (blank = all)</label><input id="pred" placeholder="all edges"></div>
+      </div>
+      <div class="lbl-row"><label>distance (hops)</label><b id="hopsv">2</b></div>
+      <input id="hops" type="range" min="1" max="5" value="2">
+      <div class="row">
+        <div><label>view as</label><select id="role"></select></div>
+        <div><label>max nodes</label><input id="cap" type="number" value="3000"></div>
+      </div>
+      <button class="primary" id="go">Draw neighbourhood</button>
+      <div class="legend" id="legend"></div>
+      <div class="tip">Drag to pan · scroll to zoom · <b>click a node</b> to re-centre the view on it.</div>
+    </section>
 
-  <div class="panel" id="result_panel" style="display:none">
-    <div id="rendered"></div>
-    <details><summary class="hint">raw JSON</summary><pre id="raw"></pre></details>
-  </div>
-</main>
+    <section class="q" style="margin-top:14px">
+      <h2>Access roles <span class="h2-note">view-as</span></h2>
+      <div id="roleList"></div>
+      <div class="row">
+        <div><label>name</label><input id="rName" placeholder="e.g. analyst"></div>
+        <div><label>labels (blank = all)</label><input id="rLabels" placeholder="0,1,3"></div>
+      </div>
+      <button class="ghost" id="rAdd">+ save role</button>
+      <div class="tip">A role is a preset of visible <b>authz labels</b>. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.</div>
+    </section>
+  </aside>
+
+  <main>
+    <canvas id="cv"></canvas>
+    <div class="renderer-tag" id="rtag"></div>
+    <div class="hud"><button id="back" title="back to previous focus" disabled>←</button><button id="zin" title="zoom in">+</button><button id="zout" title="zoom out">−</button><button id="fit" title="fit">⊡</button></div>
+    <div class="stage-note" id="note">Draw a neighbourhood to explore the graph.</div>
+    <div class="inspect hidden" id="inspect"></div>
+    <div class="toast hidden" id="toast"></div>
+  </main>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
-const api = (path, body) => fetch(path, body ? {method:'POST', body:JSON.stringify(body)} : {}).then(r => r.json());
+const api = (p,b) => fetch(p, b?{method:'POST',body:JSON.stringify(b)}:{}).then(r=>r.json());
+const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
+const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
-function refreshFields() {
-  const op = $('op').value;
-  const pe = (op === 'point' || op === 'expand');
-  $('f_point_expand').classList.toggle('hidden', !pe);
-  $('f_search').classList.toggle('hidden', pe);
-  $('ctx_fields').classList.toggle('hidden', op !== 'retrieve_context');
-}
-$('op').onchange = refreshFields;
+// ---------- graph model ----------
+let N = 0;                    // node count
+let ids = [];                // index -> node id
+let idx = new Map();         // node id -> index
+let depth = [];              // index -> hop depth
+let px, py, vx, vy;          // Float32Array positions/velocities
+let ePairs = [];             // [i,j] index pairs
+const cam = { x:0, y:0, z:1 };
+let W=0, H=0; const dpr = Math.min(devicePixelRatio||1, 2);
+let dragging=false, moved=false, lastX=0, lastY=0;
 
-function buildReq() {
-  const op = $('op').value;
-  if (op === 'point' || op === 'expand')
-    return { op, subject: Number($('subject').value), predicate: $('predicate').value };
-  const req = { op, type: $('type').value, k: Number($('k').value || 10), vector: JSON.parse($('vector').value) };
-  if ($('allowed_labels').value !== '') req.allowed_labels = Number($('allowed_labels').value);
-  if ($('expand').value) req.expand = $('expand').value;
-  if (op === 'retrieve_context') {
-    req.content = $('content').value;
-    if ($('date').value) req.date = $('date').value;
-    if ($('as_of').value !== '') req.as_of = Number($('as_of').value);
-  }
-  return req;
-}
-
-function chip(subject, predicate) {
-  const b = document.createElement('button');
-  b.className = 'ghost';
-  b.textContent = 'node ' + subject;
-  b.onclick = () => { $('op').value = 'expand'; refreshFields(); $('subject').value = subject; $('predicate').value = predicate; run(); };
-  return b;
+function loadGraph(nodes, edges) {
+  N = nodes.length; ids = new Array(N); idx = new Map(); depth = new Array(N);
+  px = new Float32Array(N); py = new Float32Array(N); vx = new Float32Array(N); vy = new Float32Array(N);
+  nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth;
+    const a = (i*2.399963), r = 30 + Math.sqrt(i)*22; px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; });
+  ePairs = []; for (const [a,b] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined) ePairs.push(i,j); }
+  $('note').style.display = N ? 'none' : '';
+  settle = 260; buildBuffers();
 }
 
-function render(op, req, res) {
-  const r = $('rendered');
-  r.innerHTML = '';
-  $('raw').textContent = JSON.stringify(res, null, 2);
-  $('result_panel').style.display = 'block';
-  if (res.error) { r.innerHTML = '<span class="err">error: ' + res.error + '</span>'; return; }
-  if (op === 'expand' && res.nodes) {
-    r.innerHTML = '<b>' + res.nodes.length + ' neighbor(s)</b> — click to expand further:';
-    const box = document.createElement('div'); box.className = 'chips';
-    res.nodes.forEach(n => box.appendChild(chip(n, req.predicate)));
-    r.appendChild(box);
-  } else if (op === 'point') {
-    r.innerHTML = '<b>value:</b> <code>' + JSON.stringify(res.one ?? res.many) + '</code>';
-  } else if (op === 'retrieve_context') {
-    r.innerHTML = '<b>assembled context</b> (' + res.hits.length + ' excerpts, as_of ' + res.as_of + '):';
-    const pre = document.createElement('pre'); pre.textContent = res.context; r.appendChild(pre);
-  } else if (res.ids) {
-    r.innerHTML = '<b>' + res.ids.length + ' hit(s)</b> — score-ordered:';
-    const box = document.createElement('div'); box.className = 'chips';
-    res.ids.forEach((n, i) => { const c = chip(n, req.expand || ''); c.textContent = 'node ' + n + ' · ' + (res.scores[i]?.toFixed(3) ?? ''); box.appendChild(c); });
-    r.appendChild(box);
-  }
+// ---------- WebGL2 ----------
+const cv = $('cv'); let gl = cv.getContext('webgl2', { antialias:true, alpha:true });
+let progN, progE, vaoN, vaoE, bufPos, bufCol, bufSize, bufEdge, uCamN, uCamE, uResN, uResE, uEdgeE, uGlowN, edgeCount=0;
+let edgeRGBA=[.5,.6,1.,.42]; let additive=true;
+function sh(type, src){ const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s); if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
+function prog(vs, fs){ const p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,vs)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p); return p; }
+
+function initGL() {
+  if (!gl) { $('rtag').innerHTML='renderer <b style="color:#ff7a90">none (no WebGL2)</b>'; return false; }
+  const camXform = `vec2 sxy=(a_pos+u_cam.xy)*u_cam.z+u_res*.5; vec2 clip=sxy/u_res*2.0-1.0; clip.y=-clip.y;`;
+  progN = prog(
+    `#version 300 es
+     in vec2 a_pos; in vec3 a_col; in float a_size; uniform vec3 u_cam; uniform vec2 u_res; out vec3 v_col;
+     void main(){ ${camXform} gl_Position=vec4(clip,0.,1.); gl_PointSize=max(a_size*u_cam.z, 3.0); v_col=a_col; }`,
+    `#version 300 es
+     precision mediump float; in vec3 v_col; uniform float u_glow; out vec4 o;
+     void main(){
+       vec2 d=gl_PointCoord-vec2(.5); float r=length(d); if(r>.5) discard;
+       float cr=.34; float t=clamp(r/cr,0.,1.); float sphere=sqrt(max(0.,1.-t*t));
+       vec3 body=v_col*(0.42+0.58*sphere);                                  // shaded metal sphere
+       float spec=smoothstep(.24,0.,distance(gl_PointCoord,vec2(.37,.32))); // off-centre highlight
+       body+=spec*(0.55+0.4*u_glow);                                        // metallic sheen
+       float disc=smoothstep(cr+.03,cr-.02,r);                              // crisp orb
+       float halo=smoothstep(.5,cr,r)*u_glow*.6;                            // cosmic outer glow
+       o=vec4(body, max(disc, halo)); }`);
+  progE = prog(
+    `#version 300 es
+     in vec2 a_pos; uniform vec3 u_cam; uniform vec2 u_res;
+     void main(){ ${camXform} gl_Position=vec4(clip,0.,1.); }`,
+    `#version 300 es
+     precision mediump float; uniform vec4 u_edge; out vec4 o; void main(){ o=u_edge; }`);
+  uCamN=gl.getUniformLocation(progN,'u_cam'); uResN=gl.getUniformLocation(progN,'u_res');
+  uCamE=gl.getUniformLocation(progE,'u_cam'); uResE=gl.getUniformLocation(progE,'u_res'); uEdgeE=gl.getUniformLocation(progE,'u_edge');
+  uGlowN=gl.getUniformLocation(progN,'u_glow');
+  bufPos=gl.createBuffer(); bufCol=gl.createBuffer(); bufSize=gl.createBuffer(); bufEdge=gl.createBuffer();
+  vaoN=gl.createVertexArray(); vaoE=gl.createVertexArray();
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  $('rtag').innerHTML='renderer <b>WebGL2</b>';
+  return true;
 }
 
-async function run() {
-  const running = $('running'); running.textContent = ' running…';
-  try {
-    const req = buildReq();
-    const res = await api('/query', req);
-    render(req.op, req, res);
-  } catch (e) {
-    $('result_panel').style.display = 'block';
-    $('rendered').innerHTML = '<span class="err">' + e + '</span>';
-  } finally { running.textContent = ''; }
+function buildBuffers() {
+  if(!gl) return;
+  const col=new Float32Array(N*3), sz=new Float32Array(N);
+  for(let i=0;i<N;i++){ const c=DEPTH[Math.min(depth[i],DEPTH.length-1)]; col[i*3]=c[0]; col[i*3+1]=c[1]; col[i*3+2]=c[2]; sz[i]=13; }
+  gl.bindVertexArray(vaoN);
+  gl.bindBuffer(gl.ARRAY_BUFFER,bufPos); gl.bufferData(gl.ARRAY_BUFFER,px.byteLength+py.byteLength,gl.DYNAMIC_DRAW);
+  let lp=gl.getAttribLocation(progN,'a_pos'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp,2,gl.FLOAT,false,0,0); // interleaved below
+  gl.bindBuffer(gl.ARRAY_BUFFER,bufCol); gl.bufferData(gl.ARRAY_BUFFER,col,gl.STATIC_DRAW);
+  let lc=gl.getAttribLocation(progN,'a_col'); gl.enableVertexAttribArray(lc); gl.vertexAttribPointer(lc,3,gl.FLOAT,false,0,0);
+  gl.bindBuffer(gl.ARRAY_BUFFER,bufSize); gl.bufferData(gl.ARRAY_BUFFER,sz,gl.STATIC_DRAW);
+  let ls=gl.getAttribLocation(progN,'a_size'); gl.enableVertexAttribArray(ls); gl.vertexAttribPointer(ls,1,gl.FLOAT,false,0,0);
+  // node positions are interleaved xy; rebuild each frame into bufPos
+  gl.bindVertexArray(vaoE);
+  gl.bindBuffer(gl.ARRAY_BUFFER,bufEdge); edgeCount=ePairs.length;
+  gl.bufferData(gl.ARRAY_BUFFER, edgeCount*2*4, gl.DYNAMIC_DRAW);
+  let le=gl.getAttribLocation(progE,'a_pos'); gl.enableVertexAttribArray(le); gl.vertexAttribPointer(le,2,gl.FLOAT,false,0,0);
+  gl.bindVertexArray(null);
+  posBuf=new Float32Array(N*2); edgeBuf=new Float32Array(edgeCount*2);
 }
-$('run').onclick = run;
+let posBuf, edgeBuf;
 
-async function loadStats() {
-  try {
-    const s = await api('/stats');
-    $('stats').textContent = `${s.schema.defs} defs · ${s.schema.nodes} nodes · ${s.embeddings.count} embeddings (${s.embeddings.dim}d) · head ${s.facts.durable_head}`;
-  } catch { $('stats').textContent = 'stats unavailable'; }
+// ---------- layout: grid-accelerated repulsion + spring ----------
+let settle=0;
+function step() {
+  if(!N) return;
+  const REP=2600, SPRING=0.02, LEN=64, CENTER=0.9, DAMP=0.84, CELL=90;
+  const grid=new Map(); const key=(cx,cy)=>cx*99991+cy;
+  for(let i=0;i<N;i++){ const cx=Math.floor(px[i]/CELL), cy=Math.floor(py[i]/CELL); const k=key(cx,cy); (grid.get(k)||grid.set(k,[]).get(k)).push(i); }
+  for(let i=0;i<N;i++){ let fx=-px[i]*CENTER*0.006, fy=-py[i]*CENTER*0.006; const cx=Math.floor(px[i]/CELL), cy=Math.floor(py[i]/CELL);
+    for(let gx=-1;gx<=1;gx++)for(let gy=-1;gy<=1;gy++){ const b=grid.get(key(cx+gx,cy+gy)); if(!b)continue;
+      for(const j of b){ if(j===i)continue; let dx=px[i]-px[j], dy=py[i]-py[j]; let d2=dx*dx+dy*dy+0.01; if(d2>CELL*CELL*4)continue; const f=REP/d2; fx+=dx*f; fy+=dy*f; } }
+    vx[i]=(vx[i]+fx*0.0006)*DAMP; vy[i]=(vy[i]+fy*0.0006)*DAMP; }
+  for(let e=0;e<ePairs.length;e+=2){ const i=ePairs[e], j=ePairs[e+1]; let dx=px[j]-px[i], dy=py[j]-py[i]; const d=Math.hypot(dx,dy)||1; const f=(d-LEN)*SPRING; dx/=d; dy/=d; vx[i]+=dx*f; vy[i]+=dy*f; vx[j]-=dx*f; vy[j]-=dy*f; }
+  for(let i=0;i<N;i++){ px[i]+=vx[i]; py[i]+=vy[i]; }
 }
 
-refreshFields();
-loadStats();
+function draw() {
+  const w=cv.width, h=cv.height; if(cv.width!==W*dpr){ } gl.viewport(0,0,w,h); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+  if(!N) return;
+  const res=[w,h], camv=[cam.x,cam.y,cam.z*dpr];
+  gl.blendFunc(gl.SRC_ALPHA, additive?gl.ONE:gl.ONE_MINUS_SRC_ALPHA);
+  // edges
+  for(let e=0,o=0;e<ePairs.length;e+=2){ const i=ePairs[e], j=ePairs[e+1]; edgeBuf[o++]=px[i]; edgeBuf[o++]=py[i]; edgeBuf[o++]=px[j]; edgeBuf[o++]=py[j]; }
+  gl.useProgram(progE); gl.uniform3fv(uCamE,camv); gl.uniform2fv(uResE,res); gl.uniform4fv(uEdgeE,edgeRGBA);
+  gl.bindVertexArray(vaoE); gl.bindBuffer(gl.ARRAY_BUFFER,bufEdge); gl.bufferData(gl.ARRAY_BUFFER,edgeBuf,gl.DYNAMIC_DRAW);
+  const le=gl.getAttribLocation(progE,'a_pos'); gl.enableVertexAttribArray(le); gl.vertexAttribPointer(le,2,gl.FLOAT,false,0,0);
+  gl.drawArrays(gl.LINES,0,edgeCount);
+  // nodes
+  for(let i=0;i<N;i++){ posBuf[i*2]=px[i]; posBuf[i*2+1]=py[i]; }
+  gl.useProgram(progN); gl.uniform3fv(uCamN,camv); gl.uniform2fv(uResN,res); gl.uniform1f(uGlowN, additive?1.:0.);
+  gl.bindVertexArray(vaoN); gl.bindBuffer(gl.ARRAY_BUFFER,bufPos); gl.bufferData(gl.ARRAY_BUFFER,posBuf,gl.DYNAMIC_DRAW);
+  const lp=gl.getAttribLocation(progN,'a_pos'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp,2,gl.FLOAT,false,0,0);
+  gl.drawArrays(gl.POINTS,0,N);
+  gl.bindVertexArray(null);
+}
+
+function resize(){ W=cv.clientWidth; H=cv.clientHeight; cv.width=W*dpr; cv.height=H*dpr; }
+addEventListener('resize', resize);
+function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(settle%20===0||settle===0) fit(); } if(gl&&N) draw(); requestAnimationFrame(loop); }
+
+function fit(){ if(!N)return; let a=1e9,b=1e9,c=-1e9,d=-1e9; for(let i=0;i<N;i++){ a=Math.min(a,px[i]);b=Math.min(b,py[i]);c=Math.max(c,px[i]);d=Math.max(d,py[i]); }
+  const gw=c-a+120, gh=d-b+120; cam.z=Math.min(W/gw,H/gh,2.4); cam.x=-(a+c)/2; cam.y=-(b+d)/2; }
+
+// ---------- interaction ----------
+const world = (mx,my)=>[ (mx-W/2)/cam.z - cam.x, (my-H/2)/cam.z - cam.y ];
+cv.addEventListener('mousedown',e=>{ dragging=true; moved=false; lastX=e.clientX; lastY=e.clientY; cv.classList.add('drag'); });
+addEventListener('mousemove',e=>{ if(!dragging)return; const dx=e.clientX-lastX, dy=e.clientY-lastY; if(Math.abs(dx)+Math.abs(dy)>3)moved=true; cam.x+=dx/cam.z; cam.y+=dy/cam.z; lastX=e.clientX; lastY=e.clientY; });
+addEventListener('mouseup',e=>{ if(dragging&&!moved) pick(e); dragging=false; cv.classList.remove('drag'); });
+cv.addEventListener('wheel',e=>{ e.preventDefault(); const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left,my=e.clientY-rc.top; const [wx,wy]=world(mx,my); cam.z=Math.max(0.05,Math.min(cam.z*Math.exp(-e.deltaY*0.0016),8)); const [nx,ny]=world(mx,my); cam.x+=nx-wx; cam.y+=ny-wy; },{passive:false});
+$('zin').onclick=()=>cam.z=Math.min(cam.z*1.3,8); $('zout').onclick=()=>cam.z=Math.max(cam.z/1.3,0.05); $('fit').onclick=fit;
+
+const esc = s => (''+s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function fmtVal(o){ if(o==null) return '∅';
+  if(o.node!==undefined) return `<span class="ins-node" onclick="recenter(${o.node})">→ node ${o.node}</span>`;
+  if(o.text!==undefined) return esc(o.text); if(o.int!==undefined) return o.int; if(o.float!==undefined) return o.float; if(o.bool!==undefined) return ''+o.bool; return esc(JSON.stringify(o)); }
+window.hideDetail = ()=> $('inspect').classList.add('hidden');
+const NAME_PREDS = ['name','title','label','display_name','full_name'];
+function displayName(props){ for(const k of NAME_PREDS){ const p=props.find(x=>x.predicate===k && x.card==='one' && x.value && x.value.text!==undefined); if(p) return p.value.text; } return null; }
+const insHead = (id, dep, nm) => `<div class="ins-h"><span class="ins-x" onclick="hideDetail()">✕</span>node <b>${id}</b>${nm?` · <span class="ins-name">${esc(nm)}</span>`:''}${dep!=null?` · ${dep} hop${dep===1?'':'s'}`:''}</div>`;
+async function showDetail(id, dep){
+  const ins=$('inspect'); ins.classList.remove('hidden');
+  ins.innerHTML = insHead(id, dep, null)+`<div class="ins-load">loading…</div>`;
+  const mask=maskOf(activeRole()); const req={op:'node', subject:id}; if(mask!==null) req.allowed_labels=mask;
+  try{ const r=await api('/query', req);
+    if(r.error){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">${esc(r.error)}</div>`; return; }
+    if(r.denied){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">restricted under role “${esc(activeRole().name)}”.</div>`; return; }
+    const nm=displayName(r.props||[]);
+    const rows=(r.props||[]).map(p=>{ const v = p.card==='one'?fmtVal(p.value):(p.values.length?p.values.map(fmtVal).join(', '):'∅');
+      return `<div class="ins-r"><span class="ins-k">${esc(p.predicate)}</span><span class="ins-v">${v}</span></div>`; }).join('');
+    ins.innerHTML = insHead(id, dep, nm)
+      + `<div class="ins-meta">${r.type?`type <b>${esc(r.type)}</b>`:'untyped'}${r.label!=null?` · label ${r.label}`:''}</div>`
+      + `<div class="ins-props">${rows||'<span class="ins-load">no stored properties.</span>'}</div>`
+      + `<div class="ins-act"><span onclick="recenter(${id})">re-centre here ›</span></div>`;
+  }catch(x){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">${esc(x)}</div>`; } }
+function pick(e){ const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left, my=e.clientY-rc.top; const [wx,wy]=world(mx,my);
+  let best=-1, bd=1e9; for(let i=0;i<N;i++){ const dx=px[i]-wx, dy=py[i]-wy; const d=dx*dx+dy*dy; if(d<bd){bd=d;best=i;} }
+  if(best>=0 && bd < (18/cam.z)**2) showDetail(ids[best], depth[best]); }
+
+// ---------- drill-down history ----------
+let history=[];
+function updateBack(){ $('back').disabled = history.length===0; $('back').title = history.length ? `back to node ${history[history.length-1]}` : 'back to previous focus'; }
+window.recenter = id => { const cur=+$('focus').value; if(cur!==id){ history.push(cur); updateBack(); } $('focus').value=id; go(); };
+$('back').onclick=()=>{ if(!history.length) return; $('focus').value=history.pop(); updateBack(); go(); };
+
+// ---------- data ----------
+function toast(m,err){ const t=$('toast'); t.textContent=m; t.className='toast'+(err?' err':''); t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),2800); }
+async function go(){ const btn=$('go'); btn.disabled=true; $('inspect').classList.add('hidden');
+  try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
+    if($('pred').value) req.predicate=$('pred').value; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
+    const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
+    loadGraph(r.nodes, r.edges); toast(`${r.nodes.length} nodes · ${r.edges.length} edges within ${$('hops').value} hops`); fit();
+  }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
+$('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
+
+function legend(){ const nm=['focus','1-hop','2-hop','3-hop','4-hop','deep']; $('legend').innerHTML=nm.map((n,i)=>`<span><i class="swatch" style="background:${hex(DEPTH[i])}"></i>${n}</span>`).join(''); }
+async function stats(){ try{ const s=await api('/stats'); $('statpills').innerHTML=`<span class="pill"><span class="dot"></span>live</span><span class="pill"><b>${s.schema.nodes}</b> nodes</span><span class="pill"><b>${s.embeddings.count}</b> vec</span><span class="pill">head <b>${s.facts.durable_head}</b></span>`; }catch{ $('statpills').innerHTML='<span class="pill">offline</span>'; } }
+
+// ---------- access roles (view-as label presets; console-side, localStorage) ----------
+const DEFAULT_ROLES = [{name:'admin', labels:null}, {name:'analyst', labels:[0,1]}, {name:'hr', labels:[0,1,3]}];
+let roles = (()=>{ try{ const r=JSON.parse(localStorage.getItem('stroma_roles')); return Array.isArray(r)&&r.length?r:DEFAULT_ROLES; }catch{ return DEFAULT_ROLES; } })();
+const saveRoles = ()=> localStorage.setItem('stroma_roles', JSON.stringify(roles));
+const maskOf = role => role&&role.labels ? role.labels.reduce((m,l)=>m|(1<<l),0) : null;
+const activeRole = ()=> roles.find(r=>r.name===$('role').value) || roles[0];
+const parseLabels = s => { const a=s.split(',').map(x=>x.trim()).filter(Boolean).map(Number).filter(n=>Number.isInteger(n)&&n>=0&&n<31); return a.length?[...new Set(a)].sort((x,y)=>x-y):null; };
+function updateRolePill(){ const r=activeRole(); const m=maskOf(r); $('rolePill').innerHTML=`view as <b>${r?r.name:'—'}</b>${m===null?'':` · labels ${r.labels.join(',')}`}`; }
+function renderRoles(){
+  const cur=$('role').value || (roles[0]&&roles[0].name);
+  $('role').innerHTML = roles.map(r=>`<option${r.name===cur?' selected':''}>${r.name}</option>`).join('');
+  $('roleList').innerHTML = roles.map(r=>`<div class="role-row${r.name===cur?' active':''}" data-n="${r.name}"><span class="rn">${r.name}</span><span class="rl">${r.labels?r.labels.join(','):'all'}</span><span class="rx" data-del="${r.name}" title="delete">✕</span></div>`).join('');
+  updateRolePill();
+}
+$('rAdd').onclick=()=>{ const name=$('rName').value.trim(); if(!name){ $('rName').focus(); return; } const labels=parseLabels($('rLabels').value);
+  const i=roles.findIndex(r=>r.name===name); if(i>=0) roles[i]={name,labels}; else roles.push({name,labels});
+  saveRoles(); $('rName').value=''; $('rLabels').value=''; $('role').value=name; renderRoles(); go(); };
+$('roleList').onclick=e=>{ const del=e.target.dataset.del; if(del){ e.stopPropagation(); if(roles.length<=1) return; roles=roles.filter(r=>r.name!==del); saveRoles(); if($('role').value===del)$('role').value=roles[0].name; renderRoles(); go(); return; }
+  const row=e.target.closest('.role-row'); if(row){ const r=roles.find(x=>x.name===row.dataset.n); $('rName').value=r.name; $('rLabels').value=r.labels?r.labels.join(','):''; $('role').value=r.name; renderRoles(); go(); } };
+$('role').onchange=()=>{ renderRoles(); go(); };
+
+// ---------- theme ----------
+function applyTheme(t){ document.documentElement.dataset.theme=t; localStorage.setItem('stroma_theme',t);
+  additive = t!=='light';                                            // dark = additive glow (cosmic)
+  edgeRGBA = t==='light' ? [.28,.36,.52,.75] : [.5,.62,1.,.5];       // light: solid line · dark: luminous filament
+  $('theme').textContent = t==='light' ? '☀' : '☾'; }
+$('theme').onclick=()=>applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light');
+applyTheme(localStorage.getItem('stroma_theme')||'dark');
+
+// ---------- session ----------
+async function me(){ try{ const r=await fetch('/me'); if(r.ok){ const j=await r.json(); $('userName').textContent=j.user; $('userPill').style.display=''; } }catch{} }
+$('logout').onclick=async()=>{ try{ await fetch('/logout',{method:'POST'}); }catch(x){} location.href='/login'; };
+
+resize(); initGL(); legend(); stats(); renderRoles(); me(); loop();
 </script>
 </body>
 </html>

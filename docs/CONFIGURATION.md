@@ -14,8 +14,22 @@ the OS directly; the only knob that bounds resident memory is `STROMA_MAX_UNMERG
 | `STROMA_DB` | `--db <dir>` | `.` | cli, serve, mcp | Database directory. `stroma-serve`/`stroma-mcp` create it on first run if it is empty. |
 | `STROMA_ADDR` | `--addr <host:port>` | `127.0.0.1:7687` | serve | HTTP bind address. Use `0.0.0.0:7687` to accept connections from outside the host (e.g. in Docker). Port `7687` is the graph-database convention. |
 | `STROMA_MAX_UNMERGED` | `--max-unmerged <n>` | `8000000` | serve, mcp | Upper bound on the un-merged read-merge tail (appended-but-not-materialized writes). This is the backpressure threshold and the main resident-memory knob: **larger** = more RAM headroom before backpressure; **smaller** = backpressure sooner, less memory. Not persisted — it is a per-process property. |
+| `STROMA_ADMIN_USER` | `--admin-user <name>` | `admin` | serve | Console login username. |
+| `STROMA_ADMIN_PASSWORD` | `--admin-password <pw>` | `password` | serve | Console login password. **Change this before exposing the server** — while the default is in use, `stroma-serve` prints a startup warning. |
 
 `RUST_BACKTRACE=1` is honored by the Rust runtime for panic diagnostics.
+
+## Console authentication
+
+The `stroma-serve` HTTP surface is gated by a session login. On success the server sets an
+`HttpOnly`, `SameSite=Strict` session cookie (12-hour expiry; sessions are in-memory and clear on
+restart). Every endpoint requires a valid session **except** `GET /health` (for container probes)
+and the login page / `POST /login`. Unauthenticated API calls receive `401`; unauthenticated page
+loads are served the login page. `POST /logout` ends the session.
+
+Credentials come from the settings above (default `admin` / `password`). There is no cookie
+`Secure` flag yet, so put the server behind TLS (or keep it on localhost) if the network is
+untrusted. The MCP stdio surface is local and is not affected by this login.
 
 ## Using a `.env` file
 

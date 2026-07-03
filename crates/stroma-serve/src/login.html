@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StromaDB — sign in</title>
+<style>
+  :root {
+    --bg:#0b0e14; --panel:#131824; --line:#222a3a; --line-2:#2c3648; --fg:#e8ecf4; --fg-dim:#aeb7c9; --mut:#6b7488;
+    --accent:#37d6a8; --accent-2:#2bb98f; --accent-ink:#04140f; --r:12px; --r-sm:8px;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace; --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; }
+  body { margin:0; display:grid; place-items:center; color:var(--fg); font:14px/1.55 var(--sans); -webkit-font-smoothing:antialiased;
+    background:
+      radial-gradient(1.5px 1.5px at 24px 32px, rgba(255,255,255,.5), transparent 100%) 0 0/170px 190px,
+      radial-gradient(1.2px 1.2px at 90px 120px, rgba(190,214,255,.45), transparent 100%) 0 0/230px 250px,
+      radial-gradient(1400px 720px at 82% -12%, #13293c 0%, transparent 60%),
+      radial-gradient(1000px 560px at -12% 112%, #1b1533 0%, transparent 58%),
+      var(--bg); }
+  .card { width:340px; max-width:calc(100% - 32px); background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+    padding:26px 24px; box-shadow:0 1px 0 rgba(255,255,255,.03), 0 24px 60px -20px rgba(0,0,0,.7); }
+  .brand { display:flex; align-items:center; gap:10px; font-weight:640; letter-spacing:.2px; margin-bottom:4px; }
+  .brand .name { font-size:17px; } .brand .name b { color:var(--accent); font-weight:640; }
+  .sub { color:var(--mut); font-size:12px; margin:0 0 20px; }
+  label { display:block; color:var(--fg-dim); font-size:12px; margin:14px 0 5px; }
+  input { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line-2); border-radius:var(--r-sm); padding:10px 12px; font:inherit; transition:border-color .15s, box-shadow .15s; }
+  input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 22%, transparent); }
+  button { width:100%; margin-top:20px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); color:var(--accent-ink); border:0; border-radius:var(--r-sm); padding:11px; font:640 14px var(--sans); cursor:pointer; transition:filter .15s, transform .05s; }
+  button:hover { filter:brightness(1.06); } button:active { transform:translateY(1px); } button:disabled { opacity:.6; cursor:progress; }
+  .err { color:#ff7a90; font:12px var(--mono); margin-top:14px; min-height:16px; }
+</style>
+</head>
+<body>
+  <form class="card" id="f">
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="5" r="2.4" fill="#37d6a8"/><circle cx="5" cy="17" r="2.4" fill="#5aa9ff"/><circle cx="19" cy="16" r="2.4" fill="#b78cff"/><circle cx="12" cy="12" r="1.6" fill="#e8ecf4"/><path d="M12 5.2 12 10.6M11 11 6 15.4M13 11 18 14.6" stroke="#3a475e" stroke-width="1.3"/></svg>
+      <span class="name">Stroma<b>DB</b></span>
+    </div>
+    <p class="sub">Sign in to the console.</p>
+    <label for="u">Username</label>
+    <input id="u" name="u" autocomplete="username" autofocus>
+    <label for="p">Password</label>
+    <input id="p" name="p" type="password" autocomplete="current-password">
+    <button id="go" type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+<script>
+  const $ = id => document.getElementById(id);
+  $('f').addEventListener('submit', async e => {
+    e.preventDefault();
+    $('go').disabled = true; $('err').textContent = '';
+    try {
+      const r = await fetch('/login', { method:'POST', body: JSON.stringify({ user: $('u').value, password: $('p').value }) });
+      if (r.ok) { location.href = '/'; return; }
+      const j = await r.json().catch(() => ({}));
+      $('err').textContent = j.error || 'sign-in failed';
+    } catch (x) { $('err').textContent = '' + x; }
+    finally { $('go').disabled = false; }
+  });
+</script>
+</body>
+</html>

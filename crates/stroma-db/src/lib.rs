@@ -13,7 +13,7 @@
 //! Record formats (JSONL) — ingest: type_def / pred_def / node / fact / retract; embed: {node,vector}.
 //! Query request (JSON): {"op":"point"|"expand"|"search", ...} — see [`Db::query`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -354,8 +354,116 @@ impl Db {
                 )
             }
             "retrieve_context" => self.retrieve_context(req, &snap),
+            "neighborhood" => self.neighborhood(req, &snap),
+            "node" => self.node_detail(req, &snap),
             other => Err(format!("unknown op: {other}")),
         }
+    }
+
+    /// Distance-bounded subgraph around a focal node: BFS out to `hops` (default 2), following a
+    /// given `predicate` or *all* node-valued edges (ontology view), authz-scoped, capped at
+    /// `max_nodes` (default 3000). Returns `{nodes:[{id,depth}], edges:[[a,b]]}` — the primitive the
+    /// UI's "distance from a node" filter renders.
+    fn neighborhood(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+        let focus = req["subject"].as_u64().ok_or("subject required")?;
+        let hops = req["hops"].as_u64().unwrap_or(2) as usize;
+        let cap = req["max_nodes"].as_u64().unwrap_or(3000) as usize;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let pred = match req["predicate"].as_str() {
+            Some(p) => Some(
+                self.cat
+                    .field_id(p)
+                    .ok_or(format!("unknown predicate: {p}"))?,
+            ),
+            None => None,
+        };
+        let visible = |n: u64| {
+            self.cat
+                .node_label(n)
+                .is_none_or(|l| (labels >> l) & 1 == 1)
+        };
+
+        let mut depth: HashMap<u64, usize> = HashMap::new();
+        let mut edges: BTreeSet<(u64, u64)> = BTreeSet::new();
+        if !visible(focus) {
+            return Ok(json!({ "nodes": [], "edges": [] }));
+        }
+        depth.insert(focus, 0);
+        let mut frontier = vec![focus];
+        for d in 0..hops {
+            if frontier.is_empty() || depth.len() >= cap {
+                break;
+            }
+            let mut next = Vec::new();
+            for &u in &frontier {
+                let ns = match pred {
+                    Some(p) => query::expand(snap, u, p),
+                    None => query::neighbors(snap, u),
+                };
+                for v in ns {
+                    if !visible(v) {
+                        continue;
+                    }
+                    edges.insert(if u < v { (u, v) } else { (v, u) });
+                    if !depth.contains_key(&v) && depth.len() < cap {
+                        depth.insert(v, d + 1);
+                        next.push(v);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        let nodes: Vec<Value> = depth
+            .iter()
+            .map(|(&id, &d)| json!({ "id": id, "depth": d }))
+            .collect();
+        let edges: Vec<Value> = edges
+            .iter()
+            .filter(|(a, b)| depth.contains_key(a) && depth.contains_key(b))
+            .map(|(a, b)| json!([a, b]))
+            .collect();
+        Ok(json!({ "nodes": nodes, "edges": edges, "focus": focus }))
+    }
+
+    /// Full detail of a single node: its type, label, and every stored `(predicate, value)`
+    /// assertion (One current value + Many present set), predicate names resolved via the catalog.
+    /// Post-authz: if `allowed_labels` is given and the node's label is not permitted, returns
+    /// `{id, denied:true}` rather than leaking its properties. Powers the UI's node-inspect panel.
+    fn node_detail(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+        let subject = req["subject"].as_u64().ok_or("subject required")?;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let visible = self
+            .cat
+            .node_label(subject)
+            .is_none_or(|l| (labels >> l) & 1 == 1);
+        if !visible {
+            return Ok(json!({ "id": subject, "denied": true }));
+        }
+        let (ones, manys) = query::describe(snap, subject);
+        let mut props = Vec::with_capacity(ones.len() + manys.len());
+        for (p, ok) in ones {
+            let name = self.cat.name(p).unwrap_or("?");
+            props.push(json!({ "predicate": name, "card": "one", "value": fmt_obj(ok) }));
+        }
+        for (p, set) in manys {
+            let name = self.cat.name(p).unwrap_or("?");
+            let vals: Vec<Value> = set.into_iter().map(fmt_obj).collect();
+            props.push(json!({ "predicate": name, "card": "many", "values": vals }));
+        }
+        let ty = self
+            .cat
+            .node_type(subject)
+            .and_then(|t| self.cat.name(t))
+            .map(|s| s.to_string());
+        Ok(
+            json!({ "id": subject, "type": ty, "label": self.cat.node_label(subject), "props": props }),
+        )
     }
 
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,

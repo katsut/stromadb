@@ -2,11 +2,19 @@
 //! client) can query and ingest over the network instead of embedding the engine.
 //!
 //! Endpoints (JSON):
-//!   GET  /health          → {"status":"ok"}
+//!   GET  /health          → {"status":"ok"}          (public — container probes)
+//!   GET  /login           → login page               (public)
+//!   POST /login  {user,password} → session cookie     (public)
+//!   POST /logout          → clears the session
+//!   GET  /me              → {"user": name}
 //!   GET  /stats           → engine/schema/embedding/storage counters
-//!   POST /query   {op,...} → point / expand / search (see stroma_db::Db::query)
+//!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stroma_db::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
+//!
+//! Auth: every endpoint except `/health` and the login page/POST requires a valid session cookie
+//! (issued by `POST /login`, in-memory, 12h). Credentials are `--admin-user`/`$STROMA_ADMIN_USER`
+//! (default `admin`) and `--admin-password`/`$STROMA_ADMIN_PASSWORD` (default `password`, warned).
 //!
 //! Concurrency: a worker pool shares the database behind an `RwLock` — reads (`/query`, `/stats`,
 //! `/health`) run concurrently; writes (`/ingest`, `/embed`) take the write lock and are exclusive
@@ -17,14 +25,81 @@
 //! (default `127.0.0.1:7687`), `--max-unmerged` / `$STROMA_MAX_UNMERGED`. A flag overrides the env
 //! var overrides the default.
 
+use std::collections::HashMap;
+use std::io::Read;
 use std::process::exit;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::{Value, json};
 use stroma_db::Db;
 use tiny_http::{Header, Method, Request, Response, Server};
 
 type SharedDb = Arc<RwLock<Db>>;
+
+/// Console credentials (flag/env, default `admin`/`password`).
+struct Auth {
+    user: String,
+    pass: String,
+}
+
+/// Active session tokens → unix-seconds expiry (in-memory; cleared on restart).
+type Sessions = Arc<Mutex<HashMap<String, u64>>>;
+const SESSION_TTL_SECS: u64 = 12 * 3600;
+
+const LOGIN_HTML: &str = include_str!("login.html");
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 24 random bytes from the OS CSPRNG, hex-encoded — the session token.
+fn new_token() -> String {
+    let mut buf = [0u8; 24];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut buf);
+    }
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Length-checked constant-time string equality (avoids per-byte early-exit timing leaks).
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+fn header_value<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
+    req.headers()
+        .iter()
+        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str())
+}
+
+fn cookie_token(req: &Request) -> Option<String> {
+    header_value(req, "cookie")?
+        .split(';')
+        .map(str::trim)
+        .find_map(|kv| kv.strip_prefix("stroma_session="))
+        .map(str::to_string)
+}
+
+/// True iff the request carries a live (unexpired) session cookie. Expired tokens are purged.
+fn authed(sessions: &Sessions, req: &Request) -> bool {
+    let Some(tok) = cookie_token(req) else {
+        return false;
+    };
+    let mut s = sessions.lock().unwrap_or_else(|e| e.into_inner());
+    match s.get(&tok).copied() {
+        Some(exp) if exp > now_secs() => true,
+        Some(_) => {
+            s.remove(&tok);
+            false
+        }
+        None => false,
+    }
+}
 
 /// Resolve a setting: `--flag <v>` overrides `$ENV` overrides `default`.
 fn opt(args: &[String], name: &str, env: &str, default: &str) -> String {
@@ -48,6 +123,24 @@ fn json_response(status: u16, body: &Value) -> Response<std::io::Cursor<Vec<u8>>
 fn html_response() -> Response<std::io::Cursor<Vec<u8>>> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
     Response::from_string(UI_HTML).with_header(ct)
+}
+
+fn login_response() -> Response<std::io::Cursor<Vec<u8>>> {
+    let ct = Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
+    Response::from_string(LOGIN_HTML).with_header(ct)
+}
+
+fn json_cookie_response(
+    status: u16,
+    body: &Value,
+    set_cookie: &str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    let sc = Header::from_bytes(&b"Set-Cookie"[..], set_cookie.as_bytes()).unwrap();
+    Response::from_string(body.to_string())
+        .with_status_code(status)
+        .with_header(ct)
+        .with_header(sc)
 }
 
 fn read_body(req: &mut Request) -> String {
@@ -110,6 +203,16 @@ fn main() {
     let n_max: usize = opt(&args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
         .parse()
         .unwrap_or(stroma_db::DEFAULT_N_MAX);
+    let auth = Arc::new(Auth {
+        user: opt(&args, "--admin-user", "STROMA_ADMIN_USER", "admin"),
+        pass: opt(
+            &args,
+            "--admin-password",
+            "STROMA_ADMIN_PASSWORD",
+            "password",
+        ),
+    });
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
     // open_or_init: a fresh directory (e.g. an empty Docker volume) is created on first run.
     let db: SharedDb = match Db::open_or_init_with(std::path::Path::new(&dir), n_max) {
@@ -131,14 +234,71 @@ fn main() {
         .unwrap_or(4)
         .clamp(2, 32);
     eprintln!("stroma-serve: http://{addr}  (db: {dir}, {workers} workers)");
+    if auth.pass == "password" {
+        eprintln!(
+            "WARNING: default console password in use — set --admin-password / $STROMA_ADMIN_PASSWORD before exposing this server."
+        );
+    }
 
     let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
-        let (db, server) = (db.clone(), server.clone());
+        let (db, server, auth, sessions) =
+            (db.clone(), server.clone(), auth.clone(), sessions.clone());
         handles.push(std::thread::spawn(move || {
             while let Ok(mut req) = server.recv() {
+                let method = req.method().clone();
                 let path = req.url().split('?').next().unwrap_or("").to_string();
-                if *req.method() == Method::Get && (path == "/" || path == "/ui") {
+
+                // public: container health probe, login page, login attempt
+                if method == Method::Get && path == "/health" {
+                    let _ = req.respond(json_response(200, &json!({ "status": "ok" })));
+                    continue;
+                }
+                if method == Method::Get && path == "/login" {
+                    let _ = req.respond(login_response());
+                    continue;
+                }
+                if method == Method::Post && path == "/login" {
+                    let body = read_body(&mut req);
+                    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    let ok = ct_eq(v["user"].as_str().unwrap_or(""), &auth.user)
+                        && ct_eq(v["password"].as_str().unwrap_or(""), &auth.pass);
+                    if ok {
+                        let tok = new_token();
+                        sessions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(tok.clone(), now_secs() + SESSION_TTL_SECS);
+                        let cookie = format!(
+                            "stroma_session={tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_TTL_SECS}"
+                        );
+                        let _ = req.respond(json_cookie_response(200, &json!({ "ok": true }), &cookie));
+                    } else {
+                        let _ =
+                            req.respond(json_response(401, &json!({ "error": "invalid credentials" })));
+                    }
+                    continue;
+                }
+
+                // everything else needs a live session
+                if !authed(&sessions, &req) {
+                    if method == Method::Get && (path == "/" || path == "/ui") {
+                        let _ = req.respond(login_response()); // browser → login page
+                    } else {
+                        let _ = req.respond(json_response(401, &json!({ "error": "unauthorized" })));
+                    }
+                    continue;
+                }
+
+                if method == Method::Post && path == "/logout" {
+                    if let Some(tok) = cookie_token(&req) {
+                        sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&tok);
+                    }
+                    let clear = "stroma_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
+                    let _ = req.respond(json_cookie_response(200, &json!({ "ok": true }), clear));
+                } else if method == Method::Get && path == "/me" {
+                    let _ = req.respond(json_response(200, &json!({ "user": auth.user })));
+                } else if method == Method::Get && (path == "/" || path == "/ui") {
                     let _ = req.respond(html_response());
                 } else {
                     let (status, body) = handle(&db, &mut req);
