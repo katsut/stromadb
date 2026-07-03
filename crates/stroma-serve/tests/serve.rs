@@ -28,8 +28,9 @@ fn http(
         body.len()
     );
     stream.write_all(req.as_bytes()).unwrap();
-    let mut resp = String::new();
-    stream.read_to_string(&mut resp).unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let resp = String::from_utf8_lossy(&raw).into_owned();
     let status: u16 = resp
         .split_whitespace()
         .nth(1)
