@@ -48,11 +48,17 @@
   #qresult { margin-top:10px; } #qresult pre { background:var(--bg); border:1px solid var(--line); border-radius:var(--r-sm); padding:9px 11px; font:11.5px var(--mono); color:var(--fg-dim); max-height:180px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; }
   #qresult .qchips { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; } #qresult .qchip { cursor:pointer; font:11px var(--mono); color:var(--accent); border:1px solid color-mix(in oklab,var(--accent) 40%,var(--line)); border-radius:100px; padding:3px 9px; } #qresult .qchip:hover { background:color-mix(in oklab,var(--accent) 14%,transparent); }
   #qresult .qerr { color:#ff7a90; font:12px var(--mono); }
+  #qresult .qsum { font:13px/1.5 var(--sans); color:var(--fg-dim); } #qresult .qsum b { color:var(--fg); font-weight:600; }
+  #qresult .qraw { margin-top:9px; } #qresult .qraw summary { cursor:pointer; font:11px var(--mono); color:var(--mut); list-style:revert; } #qresult .qraw summary:hover { color:var(--fg-dim); } #qresult .qraw pre { margin-top:6px; }
   h2.clp { cursor:pointer; display:flex; align-items:center; gap:6px; } h2.clp .caret { transition:transform .15s; } section.q.collapsed h2.clp .caret { transform:rotate(-90deg); }
   .float-panel { position:absolute; top:56px; left:14px; z-index:4; width:298px; max-width:calc(100% - 28px); max-height:calc(100vh - 74px); overflow-y:auto; }
   .q-overlay { position:absolute; top:56px; right:14px; bottom:14px; z-index:6; width:360px; max-width:calc(100% - 28px); display:flex; }
-  .overlay-card { width:100%; overflow-y:auto; }
-  .overlay-card h2 { display:flex; align-items:center; }
+  .tabs { display:flex; align-items:center; gap:4px; margin:-2px -2px 12px; }
+  .tabs-sp { flex:1; }
+  .tab { background:transparent; border:0; border-bottom:2px solid transparent; color:var(--mut); font:600 12.5px var(--sans); letter-spacing:.02em; padding:5px 8px 7px; cursor:pointer; transition:color .12s, border-color .12s; }
+  .tab:hover { color:var(--fg-dim); } .tab.active { color:var(--fg); border-bottom-color:var(--accent); }
+  .caret-btn { background:none; border:0; color:var(--mut); cursor:pointer; font-size:13px; padding:2px 4px; transition:transform .15s, color .12s; } .caret-btn:hover { color:var(--fg); }
+  #askPanel.collapsed .tab-body { display:none; } #askPanel.collapsed .caret-btn { transform:rotate(-90deg); }
   .pop { position:absolute; z-index:7; top:52px; left:14px; width:288px; max-width:calc(100% - 28px); background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r); padding:13px 15px; box-shadow:var(--shadow); }
   .pop-h { font:600 12.5px var(--sans); color:var(--fg); margin-bottom:8px; }
   .scope-chips { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:9px; }
@@ -71,7 +77,9 @@
   .row { display:flex; gap:10px; } .row > * { flex:1; min-width:0; }
   button.primary { width:100%; margin-top:16px; background:linear-gradient(180deg,var(--accent),var(--accent-2)); color:var(--accent-ink); border:0; border-radius:var(--r-sm); padding:11px; font:640 14px var(--sans); cursor:pointer; transition:filter .15s, transform .05s; box-shadow:inset 0 1px 0 rgba(255,255,255,.3), 0 6px 16px -8px color-mix(in oklab, var(--accent) 60%, transparent); }
   button.primary:hover { filter:brightness(1.06); } button.primary:active { transform:translateY(1px); } button.primary:disabled { opacity:.6; cursor:progress; }
-  .legend { margin-top:14px; display:flex; flex-wrap:wrap; gap:8px 14px; } .legend span { font-size:11.5px; color:var(--fg-dim); display:flex; align-items:center; gap:6px; } .swatch { width:9px; height:9px; border-radius:50%; }
+  .legend { position:absolute; left:50%; bottom:12px; transform:translateX(-50%); z-index:2; display:flex; flex-wrap:wrap; justify-content:center; gap:6px 13px;
+    background:linear-gradient(180deg, rgba(9,12,19,.66), rgba(9,12,19,.5)); backdrop-filter:blur(8px); border:1px solid var(--line); border-radius:100px; padding:6px 14px; box-shadow:var(--shadow); }
+  .legend span { font-size:11px; color:var(--fg-dim); display:flex; align-items:center; gap:6px; } .swatch { width:9px; height:9px; border-radius:50%; }
   .tip { color:var(--mut); font-size:11.5px; margin-top:12px; line-height:1.45; }
   canvas#cv { display:block; cursor:grab; } canvas#cv.drag { cursor:grabbing; }
   #labels { pointer-events:none; }
@@ -133,7 +141,6 @@
     <span id="statpills"></span>
     <button class="pill scope-btn" id="scopeBtn" title="visibility scope"><span data-i18n="scope">scope</span>: <b id="scopeSummary">all</b></button>
     <span class="tb-spacer"></span>
-    <button class="tb-btn" id="queryBtn" data-i18n="queryTitle">Query</button>
     <span class="pill" id="userPill" style="display:none">signed in <b id="userName"></b></span>
     <select class="lang" id="lang" title="language"><option value="en">EN</option><option value="ja">日本語</option><option value="zh">中文</option></select>
     <button class="icon-btn" id="theme" data-i18n-title="theme">☾</button>
@@ -147,50 +154,53 @@
     <div id="scopeEffect" class="tip" style="color:var(--accent);margin-bottom:0"></div>
   </div>
 
-  <section class="q float-panel" id="exploreSec">
-    <h2 class="clp" id="exploreH"><span class="caret">▾</span><span data-i18n="explore">Explore</span></h2>
-    <div class="row">
-      <div><label data-i18n="focusNode">focus node</label><input id="focus" type="number" list="nodeList" value="1"></div>
-      <div><label data-i18n="predicate">predicate (blank = all)</label><input id="pred" list="predList" data-i18n-ph="allEdges" placeholder="all edges"></div>
+  <section class="q float-panel" id="askPanel">
+    <div class="tabs">
+      <button class="tab active" id="tabExplore" data-tab="explore" data-i18n="explore">Explore</button>
+      <button class="tab" id="tabQuery" data-tab="query" data-i18n="queryTitle">Query</button>
+      <span class="tabs-sp"></span>
+      <button class="caret-btn" id="askCollapse" title="collapse">▾</button>
     </div>
-    <div class="lbl-row"><label data-i18n="distance">distance (hops)</label><b id="hopsv">2</b></div>
-    <input id="hops" type="range" min="1" max="5" value="2">
-    <div class="row">
-      <div><label data-i18n="maxNodes">max nodes</label><input id="cap" type="number" value="3000"></div>
+    <div class="tab-body" id="paneExplore">
+      <div class="row">
+        <div><label data-i18n="focusNode">focus node</label><input id="focus" type="number" list="nodeList" value="1"></div>
+        <div><label data-i18n="predicate">predicate (blank = all)</label><select id="pred"></select></div>
+      </div>
+      <div class="lbl-row"><label data-i18n="distance">distance (hops)</label><b id="hopsv">2</b></div>
+      <input id="hops" type="range" min="1" max="5" value="2">
+      <div class="row">
+        <div><label data-i18n="maxNodes">max nodes</label><input id="cap" type="number" value="3000"></div>
+      </div>
+      <button class="primary" id="go" data-i18n="draw">Draw neighbourhood</button>
+      <div class="row"><button class="ghost" id="all" data-i18n="showAll">Show all nodes</button><button class="ghost" id="map" data-i18n="overviewMap">Overview map</button></div>
     </div>
-    <button class="primary" id="go" data-i18n="draw">Draw neighbourhood</button>
-    <div class="row"><button class="ghost" id="all" data-i18n="showAll">Show all nodes</button><button class="ghost" id="map" data-i18n="overviewMap">Overview map</button></div>
-    <div class="legend" id="legend"></div>
+    <div class="tab-body hidden" id="paneQuery">
+      <label data-i18n="queryOp">what do you want to find?</label>
+      <select id="qop">
+        <option value="point" data-i18n="qopPoint">a property value</option>
+        <option value="expand" data-i18n="qopExpand">linked neighbours</option>
+        <option value="node" data-i18n="qopNode">everything about a node</option>
+        <option value="similar" data-i18n="qopSimilar">similar nodes (by vector)</option>
+      </select>
+      <div class="row">
+        <div><label data-i18n="queryNode">node</label><input id="qsubject" type="number" list="nodeList" value="1"></div>
+        <div id="qpredWrap"><label data-i18n="predicate">predicate</label><select id="qpred"></select></div>
+        <div id="qkWrap" style="display:none"><label data-i18n="queryK">results</label><input id="qk" type="number" value="10"></div>
+      </div>
+      <button class="primary" id="qrun" data-i18n="run">Run</button>
+      <div id="qresult"></div>
+    </div>
   </section>
 
   <span class="renderer-tag" id="rtag"></span>
+  <div class="legend" id="legend"></div>
   <div class="hud"><button id="back" data-i18n-title="back" title="back to previous focus" disabled>←</button><button id="labtog" class="active" data-i18n-title="labels" title="toggle labels">A</button><button id="zin" data-i18n-title="zoomIn" title="zoom in">+</button><button id="zout" data-i18n-title="zoomOut" title="zoom out">−</button><button id="fit" data-i18n-title="fit" title="fit">⊡</button><button id="help" data-i18n-title="help" title="controls">?</button></div>
   <div class="help-pop hidden" id="helpPop" data-i18n="tipMain">Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.</div>
   <div class="stage-note" id="note" data-i18n="note">Draw a neighbourhood to explore the graph.</div>
   <div class="inspect hidden" id="inspect"></div>
   <div class="toast hidden" id="toast"></div>
 
-  <div class="q-overlay hidden" id="queryOverlay">
-    <section class="q overlay-card">
-      <h2><span data-i18n="queryTitle">Query</span> <span class="ins-x" id="queryClose">✕</span></h2>
-      <label data-i18n="queryOp">operation</label>
-      <select id="qop">
-        <option value="point">point — value of (subject, predicate)</option>
-        <option value="expand">expand — neighbours via a predicate</option>
-        <option value="node">node — everything about a node</option>
-        <option value="similar">similar — nodes with a close vector</option>
-      </select>
-      <div class="row">
-        <div><label data-i18n="querySubject">subject id</label><input id="qsubject" type="number" list="nodeList" value="1"></div>
-        <div id="qpredWrap"><label data-i18n="predicate">predicate</label><input id="qpred" list="predList" placeholder="knows"></div>
-        <div id="qkWrap" style="display:none"><label>k</label><input id="qk" type="number" value="10"></div>
-      </div>
-      <button class="primary" id="qrun" data-i18n="run">Run</button>
-      <div id="qresult"></div>
-    </section>
-  </div>
 </div>
-<datalist id="predList"></datalist>
 <datalist id="nodeList"></datalist>
 
 <script>
@@ -199,19 +209,19 @@ const api = (p,b) => fetch(p, b?{method:'POST',body:JSON.stringify(b)}:{}).then(
 
 // ---------- i18n (EN / JA / ZH) ----------
 const I18N = {
-  en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.", queryTitle:"Query", queryOp:"operation", querySubject:"subject id", run:"Run", rolesIntro:"Each node has a sensitivity label. A role is a set of labels you're allowed to see; switch “view as” to explore the graph as someone with that access — nodes outside the role vanish. (Exploration aid, not authentication.)", labelsInUse:"labels in this data", noLabels:"no sensitivity labels in this data — every node is public.", roleSees:"“{role}” sees {n} of {m} nodes", scope:"scope", scopeTitle:"Visibility scope", scopeIntro:"Each node has a sensitivity label. Toggle which labels are visible — hidden ones (and edges to them) drop from every view. Exploration aid, not authentication.", scopeAll:"all", scopeNone:"none", scopeSees:"showing {n} of {m} nodes", restrictedScope:"hidden under the current scope.", embedding:"embedding", noVector:"this node has no embedding to search by.",
+  en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.", queryTitle:"Query", queryOp:"what do you want to find?", queryNode:"node", queryK:"results", qopPoint:"a property value", qopExpand:"linked neighbours", qopNode:"everything about a node", qopSimilar:"similar nodes (by vector)", run:"Run", rolesIntro:"Each node has a sensitivity label. A role is a set of labels you're allowed to see; switch “view as” to explore the graph as someone with that access — nodes outside the role vanish. (Exploration aid, not authentication.)", labelsInUse:"labels in this data", noLabels:"no sensitivity labels in this data — every node is public.", roleSees:"“{role}” sees {n} of {m} nodes", scope:"scope", scopeTitle:"Visibility scope", scopeIntro:"Each node has a sensitivity label. Toggle which labels are visible — hidden ones (and edges to them) drop from every view. Exploration aid, not authentication.", scopeAll:"all", scopeNone:"none", scopeSees:"showing {n} of {m} nodes", restrictedScope:"hidden under the current scope.", embedding:"embedding", noVector:"this node has no embedding to search by.", noValue:"no value — this node has nothing for that property.", valuesW:"values", nLinked:"{n} linked node(s) — click to open", noLinked:"no linked nodes for that predicate.", nodeSummary:"a {type} with {n} propertie(s)", nSimilar:"{n} similar node(s) — click to open", noSimilar:"no similar nodes found.", rawJson:"raw JSON",
        theme:"Toggle light / dark", signOut:"Sign out", collapseSidebar:"collapse sidebar", expandSidebar:"expand sidebar", back:"back to previous focus", liveOn:"live updates on (click to pause)", livePaused:"paused (click to resume)", labels:"toggle labels", zoomIn:"zoom in", zoomOut:"zoom out", fit:"fit", help:"controls", allEdges:"all edges", egAnalyst:"e.g. analyst",
        connecting:"connecting…", live:"LIVE", paused:"paused", offline:"offline", nodes:"nodes", vec:"vec", head:"head", signedIn:"signed in", viewAsPill:"view as",
        lgFocus:"focus", lgDeep:"deep", hop:"hop",
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”" },
-  ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。", queryTitle:"クエリ", queryOp:"操作", querySubject:"主語 id", run:"実行", rolesIntro:"各ノードには機密度ラベルが付きます。ロールは「見てよいラベルの集合」。「表示ロール」を切り替えると、その権限を持つ人の視点でグラフを探索でき、ロール外のノードは消えます。（探索補助であり認証ではありません）", labelsInUse:"このデータのラベル", noLabels:"このデータに機密度ラベルはありません — 全ノードが公開です。", roleSees:"「{role}」は {m} 中 {n} ノードを閲覧可", scope:"表示範囲", scopeTitle:"表示範囲（可視ラベル）", scopeIntro:"各ノードには機密度ラベルが付きます。表示するラベルをトグルで切替 — 隠したラベル（とそこへの辺）は全ビューから消えます。探索補助であり認証ではありません。", scopeAll:"全て", scopeNone:"なし", scopeSees:"{m} 中 {n} ノードを表示", restrictedScope:"現在の表示範囲では非表示。", embedding:"埋め込み", noVector:"このノードには検索に使う埋め込みがありません。",
+  ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。", queryTitle:"クエリ", queryOp:"何を調べる？", queryNode:"ノード", queryK:"件数", qopPoint:"プロパティの値", qopExpand:"つながっている隣接ノード", qopNode:"ノードの全情報", qopSimilar:"似ているノード（ベクトル）", run:"実行", rolesIntro:"各ノードには機密度ラベルが付きます。ロールは「見てよいラベルの集合」。「表示ロール」を切り替えると、その権限を持つ人の視点でグラフを探索でき、ロール外のノードは消えます。（探索補助であり認証ではありません）", labelsInUse:"このデータのラベル", noLabels:"このデータに機密度ラベルはありません — 全ノードが公開です。", roleSees:"「{role}」は {m} 中 {n} ノードを閲覧可", scope:"表示範囲", scopeTitle:"表示範囲（可視ラベル）", scopeIntro:"各ノードには機密度ラベルが付きます。表示するラベルをトグルで切替 — 隠したラベル（とそこへの辺）は全ビューから消えます。探索補助であり認証ではありません。", scopeAll:"全て", scopeNone:"なし", scopeSees:"{m} 中 {n} ノードを表示", restrictedScope:"現在の表示範囲では非表示。", embedding:"埋め込み", noVector:"このノードには検索に使う埋め込みがありません。", noValue:"値なし — このノードにそのプロパティはありません。", valuesW:"件の値", nLinked:"{n} 個の隣接ノード — クリックで開く", noLinked:"その述語での隣接ノードはありません。", nodeSummary:"{type}（プロパティ {n} 件）", nSimilar:"似ているノード {n} 件 — クリックで開く", noSimilar:"似ているノードは見つかりませんでした。", rawJson:"生 JSON",
        theme:"ライト/ダーク切替", signOut:"サインアウト", collapseSidebar:"サイドバーを閉じる", expandSidebar:"サイドバーを開く", back:"前の焦点に戻る", liveOn:"ライブ更新中（クリックで一時停止）", livePaused:"一時停止中（クリックで再開）", labels:"ラベル表示切替", zoomIn:"拡大", zoomOut:"縮小", fit:"全体表示", help:"操作説明", allEdges:"全ての辺", egAnalyst:"例: analyst",
        connecting:"接続中…", live:"ライブ", paused:"一時停止", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
        lgFocus:"焦点", lgDeep:"遠方", hop:"ホップ",
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用" },
-  zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。", queryTitle:"查询", queryOp:"操作", querySubject:"主语 id", run:"运行", rolesIntro:"每个节点带有敏感度标签。角色是你被允许看到的标签集合；切换“查看身份”即可以该权限者的视角浏览图，角色之外的节点会隐藏。（探索辅助，非身份验证）", labelsInUse:"本数据中的标签", noLabels:"本数据没有敏感度标签 — 所有节点均公开。", roleSees:"“{role}”可见 {m} 中的 {n} 个节点", scope:"可见范围", scopeTitle:"可见范围（标签）", scopeIntro:"每个节点带有敏感度标签。切换要显示的标签 — 隐藏的标签（及其边）会从所有视图中移除。探索辅助，非身份验证。", scopeAll:"全部", scopeNone:"无", scopeSees:"显示 {m} 中的 {n} 个节点", restrictedScope:"在当前可见范围下已隐藏。", embedding:"嵌入向量", noVector:"该节点没有可用于搜索的嵌入向量。",
+  zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。", queryTitle:"查询", queryOp:"想查找什么？", queryNode:"节点", queryK:"结果数", qopPoint:"属性值", qopExpand:"相连的邻居", qopNode:"节点的全部信息", qopSimilar:"相似节点（向量）", run:"运行", rolesIntro:"每个节点带有敏感度标签。角色是你被允许看到的标签集合；切换“查看身份”即可以该权限者的视角浏览图，角色之外的节点会隐藏。（探索辅助，非身份验证）", labelsInUse:"本数据中的标签", noLabels:"本数据没有敏感度标签 — 所有节点均公开。", roleSees:"“{role}”可见 {m} 中的 {n} 个节点", scope:"可见范围", scopeTitle:"可见范围（标签）", scopeIntro:"每个节点带有敏感度标签。切换要显示的标签 — 隐藏的标签（及其边）会从所有视图中移除。探索辅助，非身份验证。", scopeAll:"全部", scopeNone:"无", scopeSees:"显示 {m} 中的 {n} 个节点", restrictedScope:"在当前可见范围下已隐藏。", embedding:"嵌入向量", noVector:"该节点没有可用于搜索的嵌入向量。", noValue:"无值 — 该节点没有该属性。", valuesW:"个值", nLinked:"{n} 个相连节点 — 点击打开", noLinked:"该谓词下没有相连节点。", nodeSummary:"一个 {type}，含 {n} 个属性", nSimilar:"{n} 个相似节点 — 点击打开", noSimilar:"未找到相似节点。", rawJson:"原始 JSON",
        theme:"切换明暗", signOut:"退出登录", collapseSidebar:"收起侧边栏", expandSidebar:"展开侧边栏", back:"返回上一焦点", liveOn:"实时更新中（点击暂停）", livePaused:"已暂停（点击恢复）", labels:"切换标签", zoomIn:"放大", zoomOut:"缩小", fit:"适配", help:"操作说明", allEdges:"所有边", egAnalyst:"例: analyst",
        connecting:"连接中…", live:"实时", paused:"暂停", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
        lgFocus:"焦点", lgDeep:"更远", hop:"跳",
@@ -224,7 +234,7 @@ function applyLang(l){ lang = I18N[l] ? l : 'en'; localStorage.setItem('stroma_l
   document.querySelectorAll('[data-i18n]').forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll('[data-i18n-ph]').forEach(e=>e.placeholder=t(e.dataset.i18nPh));
   document.querySelectorAll('[data-i18n-title]').forEach(e=>e.title=t(e.dataset.i18nTitle));
-  legend(); renderUser(); renderStats(); setLivePill(); if(typeof _schema!=='undefined'&&_schema) renderScope(); }
+  legend(); renderUser(); renderStats(); setLivePill(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); } }
 const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
 const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
@@ -265,7 +275,7 @@ function loadGraph(nodes, edges, live) {
       px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; } });
   ePairs = []; eW = []; for (const [a,b,w] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined){ ePairs.push(i,j); eW.push(w||1); } }
   if (live) pinned = new Set(pinnedIds.map(id=>idx.get(id)).filter(x=>x!==undefined));
-  $('note').style.display = N ? 'none' : '';
+  $('note').style.display = N ? 'none' : ''; $('legend').style.display = N ? '' : 'none';
   updateNodeCandidates();
   settle = live ? 80 : 200; autoFit = !live; buildBuffers();
 }
@@ -474,28 +484,34 @@ function pick(e){ const i=nodeAt(e); if(i<0) return;
 cv.addEventListener('dblclick', e=>{ const i=nodeAt(e); if(i>=0) recenter(ids[i]); });
 
 // ---------- drill-down history ----------
-let history=[];
-function updateBack(){ $('back').disabled = history.length===0; $('back').title = history.length ? `back to node ${history[history.length-1]}` : 'back to previous focus'; }
-window.recenter = id => { const cur=+$('focus').value; if(cur!==id){ history.push(cur); updateBack(); } $('focus').value=id; go(); };
-$('back').onclick=()=>{ if(!history.length) return; $('focus').value=history.pop(); updateBack(); go(); };
+// view history: each entry reproduces a whole view (kind + the controls that made it),
+// so Back returns to the previous view — a drill-down, a Show-all, an Overview, a predicate/hops change.
+let viewStack=[], curView=null, restoring=false;
+function snap(kind){ return { kind, focus:$('focus').value, pred:$('pred').value, hops:$('hops').value, cap:$('cap').value }; }
+function pushView(next){ if(!restoring && curView && JSON.stringify(curView)!==JSON.stringify(next)){ viewStack.push(curView); } curView=next; updateBack(); }
+function updateBack(){ $('back').disabled = viewStack.length===0; }
+function applyView(v){ restoring=true; $('focus').value=v.focus; $('pred').value=v.pred; $('hops').value=v.hops; $('hopsv').textContent=v.hops; $('cap').value=v.cap; curView=v;
+  if(v.kind==='ov') overviewDraw(); else if(v.kind==='all') drawAll(); else go(); restoring=false; updateBack(); }
+window.recenter = id => { $('focus').value=id; go(); };
+$('back').onclick=()=>{ if(!viewStack.length) return; applyView(viewStack.pop()); };
 
 // ---------- data ----------
 function toast(m,err){ const t=$('toast'); t.textContent=m; t.className='toast'+(err?' err':''); t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),2800); }
 async function go(){ if($('focus').value.trim()===''){ toast(t('enterFocus'),true); return; }
-  const btn=$('go'); btn.disabled=true; hasFocus=true; overviewMode=false; $('inspect').classList.add('hidden');
+  pushView(snap('nb')); const btn=$('go'); btn.disabled=true; hasFocus=true; overviewMode=false; $('inspect').classList.add('hidden');
   try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
     if($('pred').value) req.predicate=$('pred').value; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     lastReq=req; loadGraph(r.nodes, r.edges); toast(t('tWithin',{n:r.nodes.length,e:r.edges.length,h:$('hops').value})); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
-$('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
-async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; overviewMode=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
+$('go').onclick=()=>go(); $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
+async function drawAll(){ pushView(snap('all')); const btn=$('all'); btn.disabled=true; hasFocus=false; overviewMode=false; $('focus').value=''; $('inspect').classList.add('hidden');
   try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     lastReq=req; loadGraph(r.nodes, r.edges); toast(t('tWhole',{n:r.nodes.length,e:r.edges.length,cap:r.truncated?t('capped'):''})); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('all').onclick=drawAll;
-async function overviewDraw(){ const btn=$('map'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
+async function overviewDraw(){ pushView(snap('ov')); const btn=$('map'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden');
   try{ const req={ op:'overview' }; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     overviewSamples = new Map(r.nodes.map(n=>[n.id, n.sample]));
@@ -523,13 +539,15 @@ async function startPoll(){ if(pollStarted) return; pollStarted=true;
 }
 function setLivePill(){ const b=$('livePill'); if(!b) return; b.classList.toggle('on', liveOn); b.title = liveOn ? t('liveOn') : t('livePaused'); b.innerHTML = `<span class="dot"></span>${liveOn ? t('live') : t('paused')}`; }
 $('livePill').onclick=()=>{ liveOn=!liveOn; setLivePill(); if(liveOn && lastReq){ (async()=>{ try{ const res=await api('/query',lastReq); if(!res.error) loadGraph(res.nodes,res.edges,true); }catch(x){} })(); } };
-$('exploreH').onclick=()=>$('exploreSec').classList.toggle('collapsed');
+// Explore | Query are peers — two tabs of one "ask the graph" panel
+function setTab(name){ const q=name==='query';
+  $('tabExplore').classList.toggle('active', !q); $('tabQuery').classList.toggle('active', q);
+  $('paneExplore').classList.toggle('hidden', q); $('paneQuery').classList.toggle('hidden', !q);
+  $('askPanel').classList.remove('collapsed'); }
+$('tabExplore').onclick=()=>setTab('explore'); $('tabQuery').onclick=()=>setTab('query');
+$('askCollapse').onclick=()=>$('askPanel').classList.toggle('collapsed');
 // re-run whatever view is currently shown (used when the visibility scope changes)
 function rerun(){ if(overviewMode) overviewDraw(); else if($('focus').value.trim()!=='') go(); else drawAll(); }
-
-// ---------- guided query panel — summoned as an overlay ----------
-$('queryBtn').onclick=()=>{ $('queryOverlay').classList.remove('hidden'); };
-$('queryClose').onclick=()=>{ $('queryOverlay').classList.add('hidden'); };
 function qopFields(){ const op=$('qop').value; $('qpredWrap').style.display = (op==='point'||op==='expand') ? '' : 'none'; $('qkWrap').style.display = op==='similar' ? '' : 'none'; }
 $('qop').onchange=qopFields;
 function qNodeIds(r){ const s=new Set();
@@ -559,8 +577,18 @@ async function runQuery(){ const op=$('qop').value; const mask=scopeMask();
     if(r.error){ box.innerHTML=`<div class="qerr">${esc(r.error)}</div>`; return; }
     const ids=qNodeIds(r);
     const chips = ids.length ? `<div class="qchips">${ids.slice(0,40).map(id=>`<span class="qchip" onclick="recenter(${id})">${t('detNode')} ${id}</span>`).join('')}</div>` : '';
-    box.innerHTML=`<pre>${esc(JSON.stringify(r,null,2))}</pre>${chips}`;
+    box.innerHTML=`<div class="qsum">${qSummary(op,r,req)}</div>${chips}<details class="qraw"><summary>${t('rawJson')}</summary><pre>${esc(JSON.stringify(r,null,2))}</pre></details>`;
   }catch(x){ box.innerHTML=`<div class="qerr">${esc(x)}</div>`; } }
+// human-readable one-liner for a query result
+function qSummary(op,r,req){
+  if(op==='point'){ const v=r.one!==undefined?r.one:(r.many!==undefined?null:undefined);
+    if(r.one!==undefined) return r.one===null ? t('noValue') : `<b>${esc(fmtVal(r.one).replace(/<[^>]+>/g,''))}</b>`;
+    if(Array.isArray(r.many)) return r.many.length? `${r.many.length} ${t('valuesW')}` : t('noValue'); }
+  if(op==='expand'){ const n=(r.nodes||[]).length; return n? t('nLinked',{n}) : t('noLinked'); }
+  if(op==='node'){ if(r.denied) return t('restrictedScope'); const np=(r.props||[]).length; return t('nodeSummary',{type:r.type||t('untyped'),n:np}); }
+  if(op==='similar'){ const n=(r.ids||[]).length; return n? t('nSimilar',{n}) : t('noSimilar'); }
+  return '';
+}
 $('qrun').onclick=runQuery;
 
 function legend(){ const nm=[t('lgFocus'), '1-'+t('hop'), '2-'+t('hop'), '3-'+t('hop'), '4-'+t('hop'), t('lgDeep')];
@@ -572,9 +600,12 @@ async function stats(){ try{ _stats=await api('/stats'); renderStats(); }catch{ 
 // ---------- schema discoverability: predicate list + labels in use ----------
 let _schema=null;
 async function loadSchema(){ try{ _schema=await api('/query',{op:'schema'}); if(_schema.error){ _schema=null; return; }
-  $('predList').innerHTML=(_schema.predicates||[]).map(p=>`<option value="${esc(p.name)}">`).join('');
-  renderScope();
+  fillPredSelects(); renderScope();
   }catch(x){} }
+function fillPredSelects(){ const opts=(_schema&&_schema.predicates||[]).map(p=>`<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+  const cur=$('pred').value, curq=$('qpred').value;
+  $('pred').innerHTML=`<option value="">${t('allEdges')}</option>`+opts; $('pred').value=cur;
+  $('qpred').innerHTML=`<option value="">—</option>`+opts; $('qpred').value=curq; }
 
 // ---------- visibility scope: toggle which sensitivity labels are visible (post-authz) ----------
 // `hidden` = Set of label numbers turned OFF. Empty = everything visible (mask null = no restriction).
