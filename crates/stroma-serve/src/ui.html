@@ -168,7 +168,7 @@ function loadGraph(nodes, edges) {
     const a = (i*2.399963), r = 30 + Math.sqrt(i)*22; px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; });
   ePairs = []; for (const [a,b] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined) ePairs.push(i,j); }
   $('note').style.display = N ? 'none' : '';
-  settle = 260; buildBuffers();
+  settle = 260; autoFit = true; buildBuffers();
 }
 
 // ---------- WebGL2 ----------
@@ -234,7 +234,7 @@ function buildBuffers() {
 let posBuf, edgeBuf;
 
 // ---------- layout: grid-accelerated repulsion + spring ----------
-let settle=0;
+let settle=0, autoFit=false;
 function step() {
   if(!N) return;
   const REP=2600, SPRING=0.02, LEN=64, CENTER=0.9, DAMP=0.84, CELL=90;
@@ -270,7 +270,7 @@ function draw() {
 
 function resize(){ W=cv.clientWidth; H=cv.clientHeight; cv.width=W*dpr; cv.height=H*dpr; }
 addEventListener('resize', resize);
-function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(settle%20===0||settle===0) fit(); } if(gl&&N) draw(); requestAnimationFrame(loop); }
+function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(autoFit && (settle%20===0||settle===0)) fit(); if(settle===0) autoFit=false; } if(gl&&N) draw(); requestAnimationFrame(loop); }
 
 function fit(){ if(!N)return; let a=1e9,b=1e9,c=-1e9,d=-1e9; for(let i=0;i<N;i++){ a=Math.min(a,px[i]);b=Math.min(b,py[i]);c=Math.max(c,px[i]);d=Math.max(d,py[i]); }
   const gw=c-a+120, gh=d-b+120; cam.z=Math.min(W/gw,H/gh,2.4); cam.x=-(a+c)/2; cam.y=-(b+d)/2; }
@@ -281,7 +281,7 @@ cv.addEventListener('mousedown',e=>{ moved=false; lastX=e.clientX; lastY=e.clien
   const i=nodeAt(e); if(i>=0){ dragIdx=i; } else { dragging=true; } cv.classList.add('drag'); });
 addEventListener('mousemove',e=>{
   const dx=e.clientX-lastX, dy=e.clientY-lastY; if(Math.abs(dx)+Math.abs(dy)>3)moved=true;
-  if(dragIdx>=0){ const rc=cv.getBoundingClientRect(); const [wx,wy]=world(e.clientX-rc.left, e.clientY-rc.top); px[dragIdx]=wx; py[dragIdx]=wy; vx[dragIdx]=0; vy[dragIdx]=0; settle=Math.max(settle,24); lastX=e.clientX; lastY=e.clientY; return; }
+  if(dragIdx>=0){ const rc=cv.getBoundingClientRect(); const [wx,wy]=world(e.clientX-rc.left, e.clientY-rc.top); px[dragIdx]=wx; py[dragIdx]=wy; vx[dragIdx]=0; vy[dragIdx]=0; lastX=e.clientX; lastY=e.clientY; return; }
   if(!dragging)return; cam.x+=dx/cam.z; cam.y+=dy/cam.z; lastX=e.clientX; lastY=e.clientY; });
 addEventListener('mouseup',e=>{
   if(dragIdx>=0){ if(moved) pinned.add(dragIdx); else showDetail(ids[dragIdx], depth[dragIdx]); dragIdx=-1; cv.classList.remove('drag'); return; }
