@@ -61,7 +61,8 @@
   main { grid-column:2; position:relative; overflow:hidden; }
   canvas#cv { display:block; width:100%; height:100%; cursor:grab; } canvas#cv.drag { cursor:grabbing; }
   #labels { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
-  .renderer-tag { position:absolute; left:16px; top:14px; font:500 11px var(--mono); color:var(--mut); } .renderer-tag b { color:var(--accent); }
+  .stage-tl { position:absolute; left:14px; top:14px; display:flex; align-items:center; gap:10px; z-index:2; }
+  .renderer-tag { font:500 11px var(--mono); color:var(--mut); } .renderer-tag b { color:var(--accent); }
   .hud { position:absolute; right:14px; top:14px; display:flex; gap:6px; }
   .hud button { background:var(--panel); border:1px solid var(--line-2); color:var(--fg-dim); border-radius:var(--r-sm); width:32px; height:32px; font-size:15px; cursor:pointer; } .hud button:hover { color:var(--fg); border-color:var(--accent); }
   .stage-note { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); text-align:center; color:var(--mut); font-size:13px; pointer-events:none; max-width:340px; }
@@ -77,6 +78,7 @@
   .ins-props { display:flex; flex-direction:column; gap:5px; max-height:216px; overflow:auto; }
   .ins-r { display:flex; gap:10px; align-items:baseline; } .ins-k { color:var(--fg-dim); min-width:74px; flex:0 0 auto; } .ins-v { color:var(--fg); word-break:break-word; }
   .ins-node { color:var(--accent); cursor:pointer; } .ins-node:hover { text-decoration:underline; }
+  .ins-vec { margin-top:9px; border-top:1px solid var(--line); padding-top:8px; } .ins-vec .ins-vv { color:var(--fg-dim); font-size:11px; word-break:break-all; }
   .ins-act { margin-top:9px; border-top:1px solid var(--line); padding-top:8px; } .ins-act span { color:var(--accent); cursor:pointer; } .ins-act span:hover { text-decoration:underline; }
   .ins-load { color:var(--mut); }
   html[data-theme="light"] {
@@ -113,7 +115,6 @@
       <span class="name">Stroma<b>DB</b></span>
     </div>
     <div class="pills">
-      <span class="pill live-ind on" id="livePill" title="live"><span class="dot"></span>LIVE</span>
       <span id="statpills"></span>
       <span class="pill role" id="rolePill">view as <b>—</b></span>
       <span class="pill" id="userPill" style="display:none">signed in <b id="userName"></b></span>
@@ -129,7 +130,7 @@
       <h2 class="clp" id="exploreH"><span class="caret">▾</span><span data-i18n="explore">Explore</span></h2>
       <div class="row">
         <div><label data-i18n="focusNode">focus node</label><input id="focus" type="number" value="1"></div>
-        <div><label data-i18n="predicate">predicate (blank = all)</label><input id="pred" data-i18n-ph="allEdges" placeholder="all edges"></div>
+        <div><label data-i18n="predicate">predicate (blank = all)</label><input id="pred" list="predList" data-i18n-ph="allEdges" placeholder="all edges"></div>
       </div>
       <div class="lbl-row"><label data-i18n="distance">distance (hops)</label><b id="hopsv">2</b></div>
       <input id="hops" type="range" min="1" max="5" value="2">
@@ -143,15 +144,17 @@
       <div class="tip" data-i18n="tipMain">Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.</div>
     </section>
 
-    <section class="q" style="margin-top:14px" id="rolesSec">
+    <section class="q collapsed" style="margin-top:14px" id="rolesSec">
       <h2 class="clp" id="rolesH"><span class="caret">▾</span><span data-i18n="accessRoles">Access roles</span> <span class="h2-note" data-i18n="viewAsTag">view-as</span></h2>
+      <div class="tip" data-i18n="rolesIntro" style="margin-top:0">Each node has a sensitivity label. A role is a set of labels you're allowed to see; switch “view as” to explore the graph as someone with that access — nodes outside the role vanish. (Exploration aid, not authentication.)</div>
+      <div class="tip" id="labelsHint"></div>
       <div id="roleList"></div>
+      <div id="roleEffect" class="tip" style="color:var(--accent)"></div>
       <div class="row">
         <div><label data-i18n="roleName">name</label><input id="rName" data-i18n-ph="egAnalyst" placeholder="e.g. analyst"></div>
         <div><label data-i18n="roleLabels">labels (blank = all)</label><input id="rLabels" placeholder="0,1,3"></div>
       </div>
       <button class="ghost" id="rAdd" data-i18n="saveRole">+ save role</button>
-      <div class="tip" data-i18n="tipRoles">A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.</div>
     </section>
 
     <section class="q collapsed" style="margin-top:14px" id="querySec">
@@ -161,10 +164,12 @@
         <option value="point">point — value of (subject, predicate)</option>
         <option value="expand">expand — neighbours via a predicate</option>
         <option value="node">node — everything about a node</option>
+        <option value="similar">similar — nodes with a close vector</option>
       </select>
       <div class="row">
         <div><label data-i18n="querySubject">subject id</label><input id="qsubject" type="number" value="1"></div>
-        <div id="qpredWrap"><label data-i18n="predicate">predicate</label><input id="qpred" placeholder="knows"></div>
+        <div id="qpredWrap"><label data-i18n="predicate">predicate</label><input id="qpred" list="predList" placeholder="knows"></div>
+        <div id="qkWrap" style="display:none"><label>k</label><input id="qk" type="number" value="10"></div>
       </div>
       <button class="ghost" id="qrun" data-i18n="run">Run</button>
       <div id="qresult"></div>
@@ -174,13 +179,17 @@
   <main>
     <canvas id="cv"></canvas>
     <canvas id="labels"></canvas>
-    <div class="renderer-tag" id="rtag"></div>
+    <div class="stage-tl">
+      <span class="pill live-ind on" id="livePill" title="live"><span class="dot"></span>LIVE</span>
+      <span class="renderer-tag" id="rtag"></span>
+    </div>
     <div class="hud"><button id="back" data-i18n-title="back" title="back to previous focus" disabled>←</button><button id="labtog" class="active" data-i18n-title="labels" title="toggle labels">A</button><button id="zin" data-i18n-title="zoomIn" title="zoom in">+</button><button id="zout" data-i18n-title="zoomOut" title="zoom out">−</button><button id="fit" data-i18n-title="fit" title="fit">⊡</button></div>
     <div class="stage-note" id="note" data-i18n="note">Draw a neighbourhood to explore the graph.</div>
     <div class="inspect hidden" id="inspect"></div>
     <div class="toast hidden" id="toast"></div>
   </main>
 </div>
+<datalist id="predList"></datalist>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -188,19 +197,19 @@ const api = (p,b) => fetch(p, b?{method:'POST',body:JSON.stringify(b)}:{}).then(
 
 // ---------- i18n (EN / JA / ZH) ----------
 const I18N = {
-  en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.", queryTitle:"Query", queryOp:"operation", querySubject:"subject id", run:"Run",
+  en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.", queryTitle:"Query", queryOp:"operation", querySubject:"subject id", run:"Run", rolesIntro:"Each node has a sensitivity label. A role is a set of labels you're allowed to see; switch “view as” to explore the graph as someone with that access — nodes outside the role vanish. (Exploration aid, not authentication.)", labelsInUse:"labels in this data", noLabels:"no sensitivity labels in this data — every node is public.", roleSees:"“{role}” sees {n} of {m} nodes", embedding:"embedding", noVector:"this node has no embedding to search by.",
        theme:"Toggle light / dark", signOut:"Sign out", collapseSidebar:"collapse sidebar", expandSidebar:"expand sidebar", back:"back to previous focus", liveOn:"live updates on (click to pause)", livePaused:"paused (click to resume)", labels:"toggle labels", zoomIn:"zoom in", zoomOut:"zoom out", fit:"fit", allEdges:"all edges", egAnalyst:"e.g. analyst",
        connecting:"connecting…", live:"LIVE", paused:"paused", offline:"offline", nodes:"nodes", vec:"vec", head:"head", signedIn:"signed in", viewAsPill:"view as",
        lgFocus:"focus", lgDeep:"deep", hop:"hop",
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”" },
-  ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。", queryTitle:"クエリ", queryOp:"操作", querySubject:"主語 id", run:"実行",
+  ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。", queryTitle:"クエリ", queryOp:"操作", querySubject:"主語 id", run:"実行", rolesIntro:"各ノードには機密度ラベルが付きます。ロールは「見てよいラベルの集合」。「表示ロール」を切り替えると、その権限を持つ人の視点でグラフを探索でき、ロール外のノードは消えます。（探索補助であり認証ではありません）", labelsInUse:"このデータのラベル", noLabels:"このデータに機密度ラベルはありません — 全ノードが公開です。", roleSees:"「{role}」は {m} 中 {n} ノードを閲覧可", embedding:"埋め込み", noVector:"このノードには検索に使う埋め込みがありません。",
        theme:"ライト/ダーク切替", signOut:"サインアウト", collapseSidebar:"サイドバーを閉じる", expandSidebar:"サイドバーを開く", back:"前の焦点に戻る", liveOn:"ライブ更新中（クリックで一時停止）", livePaused:"一時停止中（クリックで再開）", labels:"ラベル表示切替", zoomIn:"拡大", zoomOut:"縮小", fit:"全体表示", allEdges:"全ての辺", egAnalyst:"例: analyst",
        connecting:"接続中…", live:"ライブ", paused:"一時停止", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
        lgFocus:"焦点", lgDeep:"遠方", hop:"ホップ",
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用" },
-  zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。", queryTitle:"查询", queryOp:"操作", querySubject:"主语 id", run:"运行",
+  zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。", queryTitle:"查询", queryOp:"操作", querySubject:"主语 id", run:"运行", rolesIntro:"每个节点带有敏感度标签。角色是你被允许看到的标签集合；切换“查看身份”即可以该权限者的视角浏览图，角色之外的节点会隐藏。（探索辅助，非身份验证）", labelsInUse:"本数据中的标签", noLabels:"本数据没有敏感度标签 — 所有节点均公开。", roleSees:"“{role}”可见 {m} 中的 {n} 个节点", embedding:"嵌入向量", noVector:"该节点没有可用于搜索的嵌入向量。",
        theme:"切换明暗", signOut:"退出登录", collapseSidebar:"收起侧边栏", expandSidebar:"展开侧边栏", back:"返回上一焦点", liveOn:"实时更新中（点击暂停）", livePaused:"已暂停（点击恢复）", labels:"切换标签", zoomIn:"放大", zoomOut:"缩小", fit:"适配", allEdges:"所有边", egAnalyst:"例: analyst",
        connecting:"连接中…", live:"实时", paused:"暂停", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
        lgFocus:"焦点", lgDeep:"更远", hop:"跳",
@@ -213,7 +222,7 @@ function applyLang(l){ lang = I18N[l] ? l : 'en'; localStorage.setItem('stroma_l
   document.querySelectorAll('[data-i18n]').forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll('[data-i18n-ph]').forEach(e=>e.placeholder=t(e.dataset.i18nPh));
   document.querySelectorAll('[data-i18n-title]').forEach(e=>e.title=t(e.dataset.i18nTitle));
-  legend(); renderRoles(); renderUser(); renderStats(); setLivePill(); }
+  legend(); renderRoles(); renderUser(); renderStats(); setLivePill(); if(typeof _schema!=='undefined'&&_schema) renderLabelsHint(); }
 const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
 const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
@@ -411,6 +420,15 @@ window.hideDetail = ()=> $('inspect').classList.add('hidden');
 const NAME_PREDS = ['name','title','label','display_name','full_name'];
 function displayName(props){ for(const k of NAME_PREDS){ const p=props.find(x=>x.predicate===k && x.card==='one' && x.value && x.value.text!==undefined); if(p) return p.value.text; } return null; }
 const insHead = (id, dep, nm) => `<div class="ins-h"><span class="ins-x" onclick="hideDetail()">✕</span>${t('detNode')} <b>${id}</b>${nm?` · <span class="ins-name">${esc(nm)}</span>`:''}${dep!=null?` · ${dep} ${t('hop')}`:''}</div>`;
+// embedding row: dimension + first few values + a mini sparkline bar (a light, non-noisy vector view)
+function vecRow(v, dim){ if(!Array.isArray(v)||!v.length) return '';
+  const head=v.slice(0,4).map(x=>x.toFixed(2)).join(', ')+(v.length>4?', …':'');
+  const mx=Math.max(...v.map(Math.abs))||1, w=Math.max(2,Math.floor(150/v.length));
+  const bars=v.map((x,i)=>`<rect x="${i*w}" y="${12-Math.abs(x)/mx*12}" width="${w-1}" height="${Math.max(1,Math.abs(x)/mx*12)}" fill="${x<0?'#b78cff':'#37d6a8'}" opacity=".85"/>`).join('');
+  return `<div class="ins-vec"><div class="ins-k">${t('embedding')} <span style="color:var(--mut)">${dim}-dim</span></div>`
+    + `<svg width="${v.length*w}" height="12" style="display:block;margin:3px 0 2px">${bars}</svg>`
+    + `<div class="ins-vv">[${esc(head)}]</div></div>`;
+}
 async function showDetail(id, dep){
   const ins=$('inspect'); ins.classList.remove('hidden');
   ins.innerHTML = insHead(id, dep, null)+`<div class="ins-load">loading…</div>`;
@@ -424,6 +442,7 @@ async function showDetail(id, dep){
     ins.innerHTML = insHead(id, dep, nm)
       + `<div class="ins-meta">${r.type?`${t('detType')} <b>${esc(r.type)}</b>`:t('untyped')}${r.label!=null?` · ${t('detLabel')} ${r.label}`:''}</div>`
       + `<div class="ins-props">${rows||`<span class="ins-load">${t('noProps')}</span>`}</div>`
+      + vecRow(r.embedding, r.dim)
       + `<div class="ins-act"><span onclick="recenter(${id})">${t('recentre')}</span></div>`;
   }catch(x){ ins.innerHTML=insHead(id, dep, null)+`<div class="ins-load">${esc(x)}</div>`; } }
 function nodeAt(e){ const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left, my=e.clientY-rc.top; const [wx,wy]=world(mx,my);
@@ -492,17 +511,32 @@ $('sidebarOpen').onclick=()=>setSidebar(false);
 
 // ---------- lightweight guided query panel (point / expand / node) ----------
 $('queryH').onclick=()=>$('querySec').classList.toggle('collapsed');
-$('qop').onchange=()=>{ $('qpredWrap').style.display = $('qop').value==='node' ? 'none' : ''; };
+function qopFields(){ const op=$('qop').value; $('qpredWrap').style.display = (op==='point'||op==='expand') ? '' : 'none'; $('qkWrap').style.display = op==='similar' ? '' : 'none'; }
+$('qop').onchange=qopFields;
 function qNodeIds(r){ const s=new Set();
   if(Array.isArray(r.nodes)) r.nodes.forEach(n=>s.add(typeof n==='object'?n.id:n));
+  if(Array.isArray(r.ids)) r.ids.forEach(id=>s.add(id));
   if(r.one&&r.one.node!=null) s.add(r.one.node);
   if(Array.isArray(r.many)) r.many.forEach(o=>{ if(o&&o.node!=null) s.add(o.node); });
   if(Array.isArray(r.props)) r.props.forEach(p=>{ if(p.value&&p.value.node!=null) s.add(p.value.node); if(Array.isArray(p.values)) p.values.forEach(v=>{ if(v&&v.node!=null) s.add(v.node); }); });
   return [...s]; }
-async function runQuery(){ const op=$('qop').value; const req={ op, subject:+$('qsubject').value };
-  if(op!=='node') req.predicate=$('qpred').value; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
+async function runQuery(){ const op=$('qop').value; const mask=maskOf(activeRole());
   const box=$('qresult'); box.innerHTML=`<div class="qerr" style="color:var(--mut)">${t('loading')}</div>`;
-  try{ const r=await api('/query',req);
+  try{
+    let req;
+    if(op==='similar'){
+      // guided vector search: use the subject node's own embedding as the query vector
+      const subj=+$('qsubject').value; const nreq={op:'node',subject:subj}; if(mask!==null) nreq.allowed_labels=mask;
+      const nd=await api('/query',nreq);
+      if(nd.error){ box.innerHTML=`<div class="qerr">${esc(nd.error)}</div>`; return; }
+      if(!nd.type||!Array.isArray(nd.embedding)){ box.innerHTML=`<div class="qerr">${t('noVector')}</div>`; return; }
+      req={ op:'search', type:nd.type, vector:nd.embedding, k:+$('qk').value||10 }; if(mask!==null) req.allowed_labels=mask;
+    } else {
+      req={ op, subject:+$('qsubject').value };
+      if(op==='point'||op==='expand') req.predicate=$('qpred').value;
+      if(mask!==null) req.allowed_labels=mask;
+    }
+    const r=await api('/query',req);
     if(r.error){ box.innerHTML=`<div class="qerr">${esc(r.error)}</div>`; return; }
     const ids=qNodeIds(r);
     const chips = ids.length ? `<div class="qchips">${ids.slice(0,40).map(id=>`<span class="qchip" onclick="recenter(${id})">${t('detNode')} ${id}</span>`).join('')}</div>` : '';
@@ -516,6 +550,15 @@ let _stats=null;
 function renderStats(){ if(!_stats){ return; } const s=_stats; $('statpills').innerHTML=`<span class="pill"><b>${s.schema.nodes}</b> ${t('nodes')}</span><span class="pill"><b>${s.embeddings.count}</b> ${t('vec')}</span><span class="pill">${t('head')} <b>${s.facts.durable_head}</b></span>`; }
 async function stats(){ try{ _stats=await api('/stats'); renderStats(); }catch{ $('statpills').innerHTML=`<span class="pill">${t('offline')}</span>`; } }
 
+// ---------- schema discoverability: predicate list + labels in use ----------
+let _schema=null;
+async function loadSchema(){ try{ _schema=await api('/query',{op:'schema'}); if(_schema.error){ _schema=null; return; }
+  $('predList').innerHTML=(_schema.predicates||[]).map(p=>`<option value="${esc(p.name)}">`).join('');
+  renderLabelsHint();
+  }catch(x){} }
+function renderLabelsHint(){ const el=$('labelsHint'); if(!el||!_schema) return;
+  const ls=_schema.labels||[]; el.innerHTML = ls.length ? `${t('labelsInUse')}: <b style="color:var(--fg)">${ls.join(', ')}</b>` : t('noLabels'); }
+
 // ---------- access roles (view-as label presets; console-side, localStorage) ----------
 const DEFAULT_ROLES = [{name:'admin', labels:null}, {name:'analyst', labels:[0,1]}, {name:'hr', labels:[0,1,3]}];
 let roles = (()=>{ try{ const r=JSON.parse(localStorage.getItem('stroma_roles')); return Array.isArray(r)&&r.length?r:DEFAULT_ROLES; }catch{ return DEFAULT_ROLES; } })();
@@ -524,11 +567,18 @@ const maskOf = role => role&&role.labels ? role.labels.reduce((m,l)=>m|(1<<l),0)
 const activeRole = ()=> roles.find(r=>r.name===$('role').value) || roles[0];
 const parseLabels = s => { const a=s.split(',').map(x=>x.trim()).filter(Boolean).map(Number).filter(n=>Number.isInteger(n)&&n>=0&&n<31); return a.length?[...new Set(a)].sort((x,y)=>x-y):null; };
 function updateRolePill(){ const r=activeRole(); const m=maskOf(r); $('rolePill').innerHTML=`${t('viewAsPill')} <b>${r?r.name:'—'}</b>${m===null?'':` · ${t('detLabel')} ${r.labels.join(',')}`}`; }
+// how many nodes the active role can see, out of the whole graph — makes "view as" concrete
+async function renderRoleEffect(){ const el=$('roleEffect'); if(!el) return; const r=activeRole();
+  try{ const total=await api('/query',{op:'graph'}); const mask=maskOf(r);
+    const scoped = mask===null ? total : await api('/query',{op:'graph',allowed_labels:mask});
+    if(total.error||scoped.error){ el.textContent=''; return; }
+    el.textContent = t('roleSees',{role:r?r.name:'—', n:scoped.nodes.length, m:total.nodes.length});
+  }catch(x){ el.textContent=''; } }
 function renderRoles(){
   const cur=$('role').value || (roles[0]&&roles[0].name);
   $('role').innerHTML = roles.map(r=>`<option${r.name===cur?' selected':''}>${r.name}</option>`).join('');
   $('roleList').innerHTML = roles.map(r=>`<div class="role-row${r.name===cur?' active':''}" data-n="${r.name}"><span class="rn">${r.name}</span><span class="rl">${r.labels?r.labels.join(','):'all'}</span><span class="rx" data-del="${r.name}" title="delete">✕</span></div>`).join('');
-  updateRolePill();
+  updateRolePill(); renderRoleEffect();
 }
 $('rAdd').onclick=()=>{ const name=$('rName').value.trim(); if(!name){ $('rName').focus(); return; } const labels=parseLabels($('rLabels').value);
   const i=roles.findIndex(r=>r.name===name); if(i>=0) roles[i]={name,labels}; else roles.push({name,labels});
@@ -552,7 +602,7 @@ async function me(){ try{ const r=await fetch('/me'); if(r.ok){ curUser=(await r
 $('lang').onchange=e=>applyLang(e.target.value);
 $('logout').onclick=async()=>{ try{ await fetch('/logout',{method:'POST'}); }catch(x){} location.href='/login'; };
 
-resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); stats(); me(); loop();
+resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); stats(); me(); loadSchema(); qopFields(); loop();
 </script>
 </body>
 </html>

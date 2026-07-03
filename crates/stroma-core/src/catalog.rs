@@ -187,6 +187,19 @@ impl Catalog {
         s.into_iter().collect()
     }
 
+    /// All registered predicate definitions — the vocabulary a client needs to know what is
+    /// queryable. Iteration order is unspecified.
+    pub fn predicates(&self) -> impl Iterator<Item = &PredicateDef> {
+        self.predicates.values()
+    }
+
+    /// The distinct ABAC sensitivity labels actually assigned to nodes, sorted ascending — so a
+    /// client can show which labels exist in the data instead of guessing bitmask values.
+    pub fn labels_in_use(&self) -> Vec<u8> {
+        let s: std::collections::BTreeSet<u8> = self.node_labels.values().copied().collect();
+        s.into_iter().collect()
+    }
+
     /// Assign an ABAC sensitivity label to a node (for authz; unlabeled = public).
     pub fn set_node_label(&mut self, node: crate::fact::NodeId, label: u8) {
         self.node_labels.insert(node, label);

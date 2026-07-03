@@ -177,6 +177,35 @@ fn node_detail_props_and_authz() {
     assert_eq!(r["denied"], json!(true));
     assert!(r.get("props").is_none());
 
+    // node detail carries the stored embedding when present
+    db.embed_str("{\"node\":1,\"vector\":[1,0,0,0]}\n").unwrap();
+    let r = db.query(&json!({"op":"node","subject":1})).unwrap();
+    assert_eq!(r["dim"], json!(4));
+    assert_eq!(r["embedding"], json!([1.0, 0.0, 0.0, 0.0]));
+    // a node without an embedding reports none
+    let r = db.query(&json!({"op":"node","subject":2})).unwrap();
+    assert_eq!(r["embedding"], json!(null));
+
+    // schema op: predicate vocabulary + labels in use
+    let r = db.query(&json!({"op":"schema"})).unwrap();
+    let names: Vec<&str> = r["predicates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"works-on") && names.contains(&"age"));
+    let wo = r["predicates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "works-on")
+        .unwrap();
+    assert_eq!(wo["card"], json!("many"));
+    assert_eq!(wo["range"], json!({ "type": "Project" }));
+    // labels 0 and 3 are assigned in this graph
+    assert_eq!(r["labels"], json!([0, 3]));
+
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
