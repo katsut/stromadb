@@ -76,6 +76,11 @@ fn serve_health_query_ingest() {
     assert_eq!(st, 200, "health: {body}");
     assert!(body.contains("\"ok\""), "health body: {body}");
 
+    // web UI is served at /
+    let (st, body) = http(&addr, "GET", "/", "");
+    assert_eq!(st, 200, "ui: {body}");
+    assert!(body.contains("<title>StromaDB"), "ui body missing title");
+
     let (st, body) = http(
         &addr,
         "POST",

@@ -103,7 +103,8 @@ The image ships `stroma-serve` (entrypoint), plus the `stroma` CLI and `stroma-m
 ## Serve (HTTP)
 
 `stroma-serve` exposes the same database over HTTP so an agent or service can query and ingest it
-without embedding the engine — the intended surface for an LLM caller.
+without embedding the engine — the intended surface for an LLM caller. It also serves a minimal
+dependency-free web console (query builder + click-to-explore) at `http://localhost:7687/`.
 
 ```bash
 stroma-serve --db ./mydb --addr 127.0.0.1:7687   # worker pool: concurrent reads, exclusive writes
