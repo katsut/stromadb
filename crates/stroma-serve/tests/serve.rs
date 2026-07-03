@@ -101,5 +101,25 @@ fn serve_health_query_ingest() {
     );
     assert!(body.contains("[1]"), "post-ingest query: {body}");
 
+    // concurrent reads: many parallel /query requests must all succeed
+    let mut threads = Vec::new();
+    for _ in 0..16 {
+        let a = addr.clone();
+        threads.push(std::thread::spawn(move || {
+            let (st, body) = http(
+                &a,
+                "POST",
+                "/query",
+                "{\"op\":\"expand\",\"subject\":1,\"predicate\":\"knows\"}",
+            );
+            (st, body.contains("[2]"))
+        }));
+    }
+    for t in threads {
+        let (st, ok) = t.join().unwrap();
+        assert_eq!(st, 200);
+        assert!(ok, "concurrent read returned unexpected body");
+    }
+
     let _ = std::fs::remove_dir_all(&base);
 }
