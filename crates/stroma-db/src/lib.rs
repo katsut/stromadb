@@ -419,10 +419,11 @@ impl Db {
             .iter()
             .map(|(&id, &d)| json!({ "id": id, "depth": d, "name": self.display_name(snap, id) }))
             .collect();
+        let strengths = query::edge_strengths(snap, pred);
         let edges: Vec<Value> = edges
             .iter()
             .filter(|(a, b)| depth.contains_key(a) && depth.contains_key(b))
-            .map(|(a, b)| json!([a, b]))
+            .map(|(a, b)| json!([a, b, strengths.get(&(*a, *b)).copied().unwrap_or(1)]))
             .collect();
         Ok(json!({ "nodes": nodes, "edges": edges, "focus": focus }))
     }
@@ -502,7 +503,11 @@ impl Db {
             .iter()
             .map(|&id| json!({ "id": id, "depth": 0, "name": self.display_name(snap, id) }))
             .collect();
-        let edges: Vec<Value> = edges.iter().map(|(a, b)| json!([a, b])).collect();
+        let strengths = query::edge_strengths(snap, None);
+        let edges: Vec<Value> = edges
+            .iter()
+            .map(|(a, b)| json!([a, b, strengths.get(&(*a, *b)).copied().unwrap_or(1)]))
+            .collect();
         Ok(json!({ "nodes": nodes, "edges": edges, "truncated": truncated }))
     }
 

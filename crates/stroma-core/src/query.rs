@@ -134,6 +134,47 @@ pub fn undirected_adjacency(
     adj
 }
 
+/// Structural strength of every node-valued edge: for each undirected node pair, the number of
+/// *distinct predicates* connecting them (both directions) — a lightweight "relationship strength"
+/// derived from the graph, not stored. E.g. a pair linked by both `knows` and `reports-to` scores 2;
+/// a single `knows` scores 1. Optionally restricted to one predicate (then every weight is 1).
+/// O(node-valued edges) — a full scan.
+pub fn edge_strengths(
+    snap: &Snapshot,
+    predicate: Option<FieldId>,
+) -> HashMap<(NodeId, NodeId), u32> {
+    let mut preds: HashMap<(NodeId, NodeId), BTreeSet<FieldId>> = HashMap::new();
+    let note = |a: NodeId,
+                b: NodeId,
+                p: FieldId,
+                preds: &mut HashMap<(NodeId, NodeId), BTreeSet<FieldId>>| {
+        let key = if a < b { (a, b) } else { (b, a) };
+        preds.entry(key).or_default().insert(p);
+    };
+    for (&(s, p), v) in snap.one.iter() {
+        if predicate.is_some_and(|pp| pp != p) {
+            continue;
+        }
+        if let Some(ObjKey::Node(n)) = v {
+            note(s, *n, p, &mut preds);
+        }
+    }
+    for (&(s, p), set) in snap.many.iter() {
+        if predicate.is_some_and(|pp| pp != p) {
+            continue;
+        }
+        for o in set {
+            if let ObjKey::Node(n) = o {
+                note(s, *n, p, &mut preds);
+            }
+        }
+    }
+    preds
+        .into_iter()
+        .map(|(k, s)| (k, s.len() as u32))
+        .collect()
+}
+
 /// 1-hop expand from a set of subjects (multi-source frontier).
 pub fn expand_set(
     snap: &Snapshot,

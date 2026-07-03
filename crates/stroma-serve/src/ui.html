@@ -164,6 +164,7 @@ let labelsOn = true;         // on-graph label visibility (HUD toggle)
 const lcv = $('labels'), lctx = lcv.getContext('2d');  // 2D overlay for node labels
 let px, py, vx, vy;          // Float32Array positions/velocities
 let ePairs = [];             // [i,j] index pairs
+let eW = [];                 // per-edge strength (distinct predicates connecting the pair)
 const cam = { x:0, y:0, z:1 };
 let W=0, H=0; const dpr = Math.min(devicePixelRatio||1, 2);
 let dragging=false, moved=false, lastX=0, lastY=0, dragIdx=-1, pinned=new Set();
@@ -174,14 +175,14 @@ function loadGraph(nodes, edges) {
   px = new Float32Array(N); py = new Float32Array(N); vx = new Float32Array(N); vy = new Float32Array(N);
   nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth; names[i]=nd.name||null;
     const a = (i*2.399963), r = 30 + Math.sqrt(i)*22; px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; });
-  ePairs = []; for (const [a,b] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined) ePairs.push(i,j); }
+  ePairs = []; eW = []; for (const [a,b,w] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined){ ePairs.push(i,j); eW.push(w||1); } }
   $('note').style.display = N ? 'none' : '';
   settle = 260; autoFit = true; buildBuffers();
 }
 
 // ---------- WebGL2 ----------
 const cv = $('cv'); let gl = cv.getContext('webgl2', { antialias:true, alpha:true });
-let progN, progE, vaoN, vaoE, bufPos, bufCol, bufSize, bufEdge, uCamN, uCamE, uResN, uResE, uEdgeE, uGlowN, edgeCount=0;
+let progN, progE, vaoN, vaoE, bufPos, bufCol, bufSize, bufEdge, bufEdgeW, uCamN, uCamE, uResN, uResE, uEdgeE, uGlowN, edgeCount=0;
 let edgeRGBA=[.5,.6,1.,.42]; let additive=true;
 function sh(type, src){ const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s); if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
 function prog(vs, fs){ const p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,vs)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p); return p; }
@@ -206,14 +207,15 @@ function initGL() {
        o=vec4(body, max(disc, halo)); }`);
   progE = prog(
     `#version 300 es
-     in vec2 a_pos; uniform vec3 u_cam; uniform vec2 u_res;
-     void main(){ ${camXform} gl_Position=vec4(clip,0.,1.); }`,
+     in vec2 a_pos; in float a_w; uniform vec3 u_cam; uniform vec2 u_res; out float v_w;
+     void main(){ ${camXform} gl_Position=vec4(clip,0.,1.); v_w=a_w; }`,
     `#version 300 es
-     precision mediump float; uniform vec4 u_edge; out vec4 o; void main(){ o=u_edge; }`);
+     precision mediump float; in float v_w; uniform vec4 u_edge; out vec4 o;
+     void main(){ float k=clamp(0.6+0.34*(v_w-1.0), 0.5, 1.7); o=vec4(u_edge.rgb, u_edge.a*k); }`);
   uCamN=gl.getUniformLocation(progN,'u_cam'); uResN=gl.getUniformLocation(progN,'u_res');
   uCamE=gl.getUniformLocation(progE,'u_cam'); uResE=gl.getUniformLocation(progE,'u_res'); uEdgeE=gl.getUniformLocation(progE,'u_edge');
   uGlowN=gl.getUniformLocation(progN,'u_glow');
-  bufPos=gl.createBuffer(); bufCol=gl.createBuffer(); bufSize=gl.createBuffer(); bufEdge=gl.createBuffer();
+  bufPos=gl.createBuffer(); bufCol=gl.createBuffer(); bufSize=gl.createBuffer(); bufEdge=gl.createBuffer(); bufEdgeW=gl.createBuffer();
   vaoN=gl.createVertexArray(); vaoE=gl.createVertexArray();
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   $('rtag').innerHTML='renderer <b>WebGL2</b>';
@@ -236,6 +238,10 @@ function buildBuffers() {
   gl.bindBuffer(gl.ARRAY_BUFFER,bufEdge); edgeCount=ePairs.length;
   gl.bufferData(gl.ARRAY_BUFFER, edgeCount*2*4, gl.DYNAMIC_DRAW);
   let le=gl.getAttribLocation(progE,'a_pos'); gl.enableVertexAttribArray(le); gl.vertexAttribPointer(le,2,gl.FLOAT,false,0,0);
+  // per-edge strength → per-vertex weight (both endpoints share the edge's weight)
+  const ew=new Float32Array(edgeCount); for(let k=0;k<eW.length;k++){ ew[2*k]=eW[k]; ew[2*k+1]=eW[k]; }
+  gl.bindBuffer(gl.ARRAY_BUFFER,bufEdgeW); gl.bufferData(gl.ARRAY_BUFFER, ew, gl.STATIC_DRAW);
+  let lw=gl.getAttribLocation(progE,'a_w'); gl.enableVertexAttribArray(lw); gl.vertexAttribPointer(lw,1,gl.FLOAT,false,0,0);
   gl.bindVertexArray(null);
   posBuf=new Float32Array(N*2); edgeBuf=new Float32Array(edgeCount*2);
 }

@@ -122,7 +122,7 @@ fn neighborhood_khop_and_authz() {
         .query(&json!({"op":"neighborhood","subject":1,"hops":3,"allowed_labels":1}))
         .unwrap();
     assert_eq!(depths(&r), [(1, 0), (2, 1)].into_iter().collect());
-    assert_eq!(r["edges"], json!([[1, 2]]));
+    assert_eq!(r["edges"], json!([[1, 2, 1]]));
 
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
@@ -193,11 +193,13 @@ fn graph_all_nodes_and_authz() {
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
         "{\"pred_def\":{\"name\":\"name\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\"}}\n",
+        "{\"pred_def\":{\"name\":\"reports-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
         "{\"node\":{\"id\":1,\"type\":\"Person\",\"label\":0}}\n",
         "{\"node\":{\"id\":2,\"type\":\"Person\",\"label\":0}}\n",
         "{\"node\":{\"id\":3,\"type\":\"Person\",\"label\":3}}\n",
         "{\"fact\":{\"subject\":1,\"predicate\":\"name\",\"object\":{\"text\":\"Root\"}}}\n",
         "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"reports-to\",\"object\":{\"node\":2}}}\n",
         "{\"fact\":{\"subject\":2,\"predicate\":\"knows\",\"object\":{\"node\":3}}}\n",
     ))
     .unwrap();
@@ -225,11 +227,19 @@ fn graph_all_nodes_and_authz() {
         .find(|n| n["id"] == 1)
         .unwrap();
     assert_eq!(n1["name"], json!("Root"));
+    // edge strength = distinct predicates connecting the pair: (1,2) via knows+reports-to = 2
+    let e12 = r["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e[0] == 1 && e[1] == 2)
+        .unwrap();
+    assert_eq!(e12[2], json!(2));
 
-    // authz: node 3 (label 3) hidden, and edges touching it dropped
+    // authz: node 3 (label 3) hidden, and edges touching it dropped; (1,2) strength still 2
     let r = db.query(&json!({"op":"graph","allowed_labels":1})).unwrap();
     assert_eq!(ids(&r), vec![1, 2]);
-    assert_eq!(r["edges"], json!([[1, 2]]));
+    assert_eq!(r["edges"], json!([[1, 2, 2]]));
 
     // cap: max_nodes truncates and flags it
     let r = db.query(&json!({"op":"graph","max_nodes":2})).unwrap();
