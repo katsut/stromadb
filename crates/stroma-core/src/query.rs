@@ -76,6 +76,29 @@ pub fn neighbors(snap: &Snapshot, subject: NodeId) -> BTreeSet<NodeId> {
     out
 }
 
+/// All stored assertions on `subject`, across One (current functional value) and Many (present
+/// set), keyed by predicate — the raw material for a node-detail / describe view. O(predicates on
+/// the subject) via range scans over the fold.
+#[allow(clippy::type_complexity)]
+pub fn describe(
+    snap: &Snapshot,
+    subject: NodeId,
+) -> (Vec<(FieldId, ObjKey)>, Vec<(FieldId, Vec<ObjKey>)>) {
+    let mut ones = Vec::new();
+    for (&(_, p), v) in snap.one.range((subject, u32::MIN)..=(subject, u32::MAX)) {
+        if let Some(ok) = v {
+            ones.push((p, ok.clone()));
+        }
+    }
+    let mut manys = Vec::new();
+    for (&(_, p), set) in snap.many.range((subject, u32::MIN)..=(subject, u32::MAX)) {
+        if !set.is_empty() {
+            manys.push((p, set.iter().cloned().collect()));
+        }
+    }
+    (ones, manys)
+}
+
 /// 1-hop expand from a set of subjects (multi-source frontier).
 pub fn expand_set(
     snap: &Snapshot,
