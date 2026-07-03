@@ -178,6 +178,15 @@ impl Catalog {
         self.node_types.get(&node).copied()
     }
 
+    /// All declared node ids (union of typed and labelled nodes), sorted ascending — the source for
+    /// a whole-graph view.
+    pub fn node_ids(&self) -> Vec<crate::fact::NodeId> {
+        let mut s: std::collections::BTreeSet<crate::fact::NodeId> =
+            self.node_types.keys().copied().collect();
+        s.extend(self.node_labels.keys().copied());
+        s.into_iter().collect()
+    }
+
     /// Assign an ABAC sensitivity label to a node (for authz; unlabeled = public).
     pub fn set_node_label(&mut self, node: crate::fact::NodeId, label: u8) {
         self.node_labels.insert(node, label);
