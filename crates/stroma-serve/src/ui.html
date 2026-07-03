@@ -56,6 +56,7 @@
   .toast { position:absolute; left:16px; bottom:16px; background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r-sm); padding:8px 12px; font:12px var(--mono); color:var(--fg-dim); box-shadow:var(--shadow); }
   .toast.err { color:#ff7a90; border-color:color-mix(in oklab,#ff7a90 40%,var(--line-2)); }
   .hud button:disabled { opacity:.38; cursor:default; } .hud button:disabled:hover { color:var(--fg-dim); border-color:var(--line-2); }
+  .hud button.active { color:var(--accent); border-color:var(--accent); }
   .inspect { position:absolute; right:14px; bottom:14px; width:296px; max-width:calc(100% - 28px); background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r); padding:12px 14px; font:12px var(--mono); color:var(--fg-dim); box-shadow:var(--shadow); }
   .inspect b { color:var(--fg); }
   .ins-h { color:var(--fg); font-size:12.5px; } .ins-h b { color:var(--accent); } .ins-name { color:var(--fg); font-weight:640; }
@@ -138,7 +139,7 @@
     <canvas id="cv"></canvas>
     <canvas id="labels"></canvas>
     <div class="renderer-tag" id="rtag"></div>
-    <div class="hud"><button id="back" title="back to previous focus" disabled>←</button><button id="zin" title="zoom in">+</button><button id="zout" title="zoom out">−</button><button id="fit" title="fit">⊡</button></div>
+    <div class="hud"><button id="back" title="back to previous focus" disabled>←</button><button id="labtog" class="active" title="toggle labels">A</button><button id="zin" title="zoom in">+</button><button id="zout" title="zoom out">−</button><button id="fit" title="fit">⊡</button></div>
     <div class="stage-note" id="note">Draw a neighbourhood to explore the graph.</div>
     <div class="inspect hidden" id="inspect"></div>
     <div class="toast hidden" id="toast"></div>
@@ -158,6 +159,7 @@ let idx = new Map();         // node id -> index
 let depth = [];              // index -> hop depth
 let names = [];              // index -> display name (may be null)
 let hasFocus = false;        // neighbourhood (show hop distance) vs whole-graph
+let labelsOn = true;         // on-graph label visibility (HUD toggle)
 const lcv = $('labels'), lctx = lcv.getContext('2d');  // 2D overlay for node labels
 let px, py, vx, vy;          // Float32Array positions/velocities
 let ePairs = [];             // [i,j] index pairs
@@ -279,18 +281,19 @@ function resize(){ W=cv.clientWidth; H=cv.clientHeight; cv.width=W*dpr; cv.heigh
 function drawLabels(){
   if(!lctx) return;
   lctx.setTransform(dpr,0,0,dpr,0,0); lctx.clearRect(0,0,W,H);
-  if(!N || N>80) return;
+  if(!N || N>80 || !labelsOn) return;
   const light = document.documentElement.dataset.theme==='light';
-  lctx.font='600 11px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif'; lctx.textBaseline='middle';
-  lctx.lineWidth=3; lctx.lineJoin='round';
+  lctx.font='500 11px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif'; lctx.textBaseline='middle';
+  lctx.lineWidth=2.5; lctx.lineJoin='round';
+  lctx.strokeStyle = light?'rgba(244,246,250,.55)':'rgba(8,10,16,.5)';
+  lctx.fillStyle = light?'rgba(52,62,82,.7)':'rgba(196,205,222,.6)';
   for(let i=0;i<N;i++){
     const sx=(px[i]+cam.x)*cam.z + W/2, sy=(py[i]+cam.y)*cam.z + H/2;
     if(sx<-60||sx>W+8||sy<-12||sy>H+12) continue;
     let t = names[i] || ('#'+ids[i]);
     if(hasFocus && depth[i]>0) t += ' ·'+depth[i];
     const x = sx + Math.max(6, 6*cam.z), y = sy;
-    lctx.strokeStyle = light?'rgba(244,246,250,.9)':'rgba(8,10,16,.85)'; lctx.strokeText(t,x,y);
-    lctx.fillStyle = light?'#1b2233':'#e8ecf4'; lctx.fillText(t,x,y);
+    lctx.strokeText(t,x,y); lctx.fillText(t,x,y);
   }
 }
 addEventListener('resize', resize);
@@ -312,6 +315,7 @@ addEventListener('mouseup',e=>{
   if(dragging&&!moved) pick(e); dragging=false; cv.classList.remove('drag'); });
 cv.addEventListener('wheel',e=>{ e.preventDefault(); const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left,my=e.clientY-rc.top; const [wx,wy]=world(mx,my); cam.z=Math.max(0.05,Math.min(cam.z*Math.exp(-e.deltaY*0.0016),8)); const [nx,ny]=world(mx,my); cam.x+=nx-wx; cam.y+=ny-wy; },{passive:false});
 $('zin').onclick=()=>cam.z=Math.min(cam.z*1.3,8); $('zout').onclick=()=>cam.z=Math.max(cam.z/1.3,0.05); $('fit').onclick=fit;
+$('labtog').onclick=()=>{ labelsOn=!labelsOn; $('labtog').classList.toggle('active', labelsOn); };
 
 const esc = s => (''+s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function fmtVal(o){ if(o==null) return '∅';
@@ -350,14 +354,15 @@ $('back').onclick=()=>{ if(!history.length) return; $('focus').value=history.pop
 
 // ---------- data ----------
 function toast(m,err){ const t=$('toast'); t.textContent=m; t.className='toast'+(err?' err':''); t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),2800); }
-async function go(){ const btn=$('go'); btn.disabled=true; hasFocus=true; $('inspect').classList.add('hidden');
+async function go(){ if($('focus').value.trim()===''){ toast('enter a focus node, or use “Show all nodes”',true); return; }
+  const btn=$('go'); btn.disabled=true; hasFocus=true; $('inspect').classList.add('hidden');
   try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
     if($('pred').value) req.predicate=$('pred').value; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     loadGraph(r.nodes, r.edges); toast(`${r.nodes.length} nodes · ${r.edges.length} edges within ${$('hops').value} hops`); fit();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
-async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; $('inspect').classList.add('hidden'); history=[]; updateBack();
+async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden'); history=[]; updateBack();
   try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     loadGraph(r.nodes, r.edges); toast(`whole graph · ${r.nodes.length} nodes · ${r.edges.length} edges${r.truncated?' (capped)':''}`); fit();
