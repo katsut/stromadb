@@ -47,7 +47,8 @@
   .legend { margin-top:14px; display:flex; flex-wrap:wrap; gap:8px 14px; } .legend span { font-size:11.5px; color:var(--fg-dim); display:flex; align-items:center; gap:6px; } .swatch { width:9px; height:9px; border-radius:50%; }
   .tip { color:var(--mut); font-size:11.5px; margin-top:12px; line-height:1.45; }
   main { position:relative; overflow:hidden; }
-  canvas { display:block; width:100%; height:100%; cursor:grab; } canvas.drag { cursor:grabbing; }
+  canvas#cv { display:block; width:100%; height:100%; cursor:grab; } canvas#cv.drag { cursor:grabbing; }
+  #labels { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
   .renderer-tag { position:absolute; left:16px; top:14px; font:500 11px var(--mono); color:var(--mut); } .renderer-tag b { color:var(--accent); }
   .hud { position:absolute; right:14px; top:14px; display:flex; gap:6px; }
   .hud button { background:var(--panel); border:1px solid var(--line-2); color:var(--fg-dim); border-radius:var(--r-sm); width:32px; height:32px; font-size:15px; cursor:pointer; } .hud button:hover { color:var(--fg); border-color:var(--accent); }
@@ -118,7 +119,7 @@
       <button class="primary" id="go">Draw neighbourhood</button>
       <button class="ghost" id="all">Show all nodes</button>
       <div class="legend" id="legend"></div>
-      <div class="tip">Drag the background to pan · scroll to zoom · <b>drag a node</b> to move it · <b>click a node</b> for details.</div>
+      <div class="tip">Drag the background to pan · scroll to zoom · <b>drag a node</b> to move it · <b>click</b> for details · <b>double-click</b> to focus.</div>
     </section>
 
     <section class="q" style="margin-top:14px">
@@ -135,6 +136,7 @@
 
   <main>
     <canvas id="cv"></canvas>
+    <canvas id="labels"></canvas>
     <div class="renderer-tag" id="rtag"></div>
     <div class="hud"><button id="back" title="back to previous focus" disabled>←</button><button id="zin" title="zoom in">+</button><button id="zout" title="zoom out">−</button><button id="fit" title="fit">⊡</button></div>
     <div class="stage-note" id="note">Draw a neighbourhood to explore the graph.</div>
@@ -154,6 +156,9 @@ let N = 0;                    // node count
 let ids = [];                // index -> node id
 let idx = new Map();         // node id -> index
 let depth = [];              // index -> hop depth
+let names = [];              // index -> display name (may be null)
+let hasFocus = false;        // neighbourhood (show hop distance) vs whole-graph
+const lcv = $('labels'), lctx = lcv.getContext('2d');  // 2D overlay for node labels
 let px, py, vx, vy;          // Float32Array positions/velocities
 let ePairs = [];             // [i,j] index pairs
 const cam = { x:0, y:0, z:1 };
@@ -162,9 +167,9 @@ let dragging=false, moved=false, lastX=0, lastY=0, dragIdx=-1, pinned=new Set();
 
 function loadGraph(nodes, edges) {
   dragIdx = -1; pinned.clear();
-  N = nodes.length; ids = new Array(N); idx = new Map(); depth = new Array(N);
+  N = nodes.length; ids = new Array(N); idx = new Map(); depth = new Array(N); names = new Array(N);
   px = new Float32Array(N); py = new Float32Array(N); vx = new Float32Array(N); vy = new Float32Array(N);
-  nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth;
+  nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth; names[i]=nd.name||null;
     const a = (i*2.399963), r = 30 + Math.sqrt(i)*22; px[i]=Math.cos(a)*r; py[i]=Math.sin(a)*r; });
   ePairs = []; for (const [a,b] of edges) { const i=idx.get(a), j=idx.get(b); if(i!==undefined&&j!==undefined) ePairs.push(i,j); }
   $('note').style.display = N ? 'none' : '';
@@ -268,9 +273,28 @@ function draw() {
   gl.bindVertexArray(null);
 }
 
-function resize(){ W=cv.clientWidth; H=cv.clientHeight; cv.width=W*dpr; cv.height=H*dpr; }
+function resize(){ W=cv.clientWidth; H=cv.clientHeight; cv.width=W*dpr; cv.height=H*dpr; lcv.width=W*dpr; lcv.height=H*dpr; }
+// node labels on a 2D overlay: name (+ hop distance in a neighbourhood view). Hidden past a
+// node-count threshold to avoid clutter — zoom/recenter to read a dense region.
+function drawLabels(){
+  if(!lctx) return;
+  lctx.setTransform(dpr,0,0,dpr,0,0); lctx.clearRect(0,0,W,H);
+  if(!N || N>80) return;
+  const light = document.documentElement.dataset.theme==='light';
+  lctx.font='600 11px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif'; lctx.textBaseline='middle';
+  lctx.lineWidth=3; lctx.lineJoin='round';
+  for(let i=0;i<N;i++){
+    const sx=(px[i]+cam.x)*cam.z + W/2, sy=(py[i]+cam.y)*cam.z + H/2;
+    if(sx<-60||sx>W+8||sy<-12||sy>H+12) continue;
+    let t = names[i] || ('#'+ids[i]);
+    if(hasFocus && depth[i]>0) t += ' ·'+depth[i];
+    const x = sx + Math.max(6, 6*cam.z), y = sy;
+    lctx.strokeStyle = light?'rgba(244,246,250,.9)':'rgba(8,10,16,.85)'; lctx.strokeText(t,x,y);
+    lctx.fillStyle = light?'#1b2233':'#e8ecf4'; lctx.fillText(t,x,y);
+  }
+}
 addEventListener('resize', resize);
-function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(autoFit && (settle%20===0||settle===0)) fit(); if(settle===0) autoFit=false; } if(gl&&N) draw(); requestAnimationFrame(loop); }
+function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(autoFit && (settle%20===0||settle===0)) fit(); if(settle===0) autoFit=false; } if(gl&&N){ draw(); drawLabels(); } requestAnimationFrame(loop); }
 
 function fit(){ if(!N)return; let a=1e9,b=1e9,c=-1e9,d=-1e9; for(let i=0;i<N;i++){ a=Math.min(a,px[i]);b=Math.min(b,py[i]);c=Math.max(c,px[i]);d=Math.max(d,py[i]); }
   const gw=c-a+120, gh=d-b+120; cam.z=Math.min(W/gw,H/gh,2.4); cam.x=-(a+c)/2; cam.y=-(b+d)/2; }
@@ -316,6 +340,7 @@ function nodeAt(e){ const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.l
   let best=-1, bd=1e9; for(let i=0;i<N;i++){ const dx=px[i]-wx, dy=py[i]-wy; const d=dx*dx+dy*dy; if(d<bd){bd=d;best=i;} }
   return (best>=0 && bd < (18/cam.z)**2) ? best : -1; }
 function pick(e){ const i=nodeAt(e); if(i>=0) showDetail(ids[i], depth[i]); }
+cv.addEventListener('dblclick', e=>{ const i=nodeAt(e); if(i>=0) recenter(ids[i]); });
 
 // ---------- drill-down history ----------
 let history=[];
@@ -325,14 +350,14 @@ $('back').onclick=()=>{ if(!history.length) return; $('focus').value=history.pop
 
 // ---------- data ----------
 function toast(m,err){ const t=$('toast'); t.textContent=m; t.className='toast'+(err?' err':''); t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),2800); }
-async function go(){ const btn=$('go'); btn.disabled=true; $('inspect').classList.add('hidden');
+async function go(){ const btn=$('go'); btn.disabled=true; hasFocus=true; $('inspect').classList.add('hidden');
   try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
     if($('pred').value) req.predicate=$('pred').value; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     loadGraph(r.nodes, r.edges); toast(`${r.nodes.length} nodes · ${r.edges.length} edges within ${$('hops').value} hops`); fit();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('go').onclick=()=>{ history=[]; updateBack(); go(); }; $('hops').oninput=e=>$('hopsv').textContent=e.target.value;
-async function drawAll(){ const btn=$('all'); btn.disabled=true; $('inspect').classList.add('hidden'); history=[]; updateBack();
+async function drawAll(){ const btn=$('all'); btn.disabled=true; hasFocus=false; $('inspect').classList.add('hidden'); history=[]; updateBack();
   try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=maskOf(activeRole()); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     loadGraph(r.nodes, r.edges); toast(`whole graph · ${r.nodes.length} nodes · ${r.edges.length} edges${r.truncated?' (capped)':''}`); fit();
