@@ -24,7 +24,7 @@ use stroma_core::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
 use stroma_core::changelog::WriteKind;
 use stroma_core::engine::Engine;
 use stroma_core::fold::{ObjKey, Snapshot};
-use stroma_core::ir::{Pipeline, Principal, Source, Transform, Traverser, run};
+use stroma_core::ir::{Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run};
 use stroma_core::ivf::IvfPq;
 use stroma_core::query;
 use stroma_core::version::{ReadMode, VersionVector};
@@ -359,6 +359,7 @@ impl Db {
             "graph" => self.graph(req, &snap),
             "overview" => self.overview(req, &snap),
             "schema" => Ok(self.schema()),
+            "pipeline" => self.pipeline(req, &snap),
             other => Err(format!("unknown op: {other}")),
         }
     }
@@ -694,6 +695,106 @@ impl Db {
             },
             vv,
         ))
+    }
+
+    /// Composable pipeline: surfaces the query IR as `source → steps → top-k`, so the console can let
+    /// a user *chain* primitives. Source is `{nodes:[..]}` (identity), `{similar:{node,k}}` (that
+    /// node's embedding as a type-ANN seed), or `{type_ann:{type,vector,k}}`. Steps are
+    /// `{expand:"pred"}` (follow a predicate) or `{filter_type:"T"}` (keep a type). Authz-scoped.
+    /// Returns `{ids, names}`.
+    fn pipeline(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        // ---- source ----
+        let src = &req["source"];
+        let (source, needs_ann) = if let Some(nodes) = src["nodes"].as_array() {
+            let subjects = nodes.iter().filter_map(|n| n.as_u64()).collect();
+            (Source::Point { subjects }, false)
+        } else if let Some(sim) = src.get("similar").filter(|v| !v.is_null()) {
+            // seed from a node's own embedding (search within its type)
+            let node = sim["node"].as_u64().ok_or("similar.node required")?;
+            let k = sim["k"].as_u64().unwrap_or(10) as usize;
+            let ty = self
+                .cat
+                .node_type(node)
+                .ok_or("that node has no type to search within")?;
+            let pos = self
+                .emb_ids
+                .iter()
+                .position(|&id| id == node)
+                .ok_or("that node has no embedding to search by")?;
+            let q = self.emb[pos * self.dim..(pos + 1) * self.dim].to_vec();
+            (
+                Source::TypeAnn {
+                    q,
+                    target_type: ty,
+                    k,
+                },
+                true,
+            )
+        } else if let Some(ta) = src.get("type_ann").filter(|v| !v.is_null()) {
+            let ty = ta["type"].as_str().ok_or("type_ann.type required")?;
+            let tid = self.cat.field_id(ty).ok_or(format!("unknown type: {ty}"))?;
+            let k = ta["k"].as_u64().unwrap_or(10) as usize;
+            let q = ta["vector"]
+                .as_array()
+                .ok_or("type_ann.vector required")?
+                .iter()
+                .map(|x| x.as_f64().unwrap_or(0.0) as f32)
+                .collect();
+            (
+                Source::TypeAnn {
+                    q,
+                    target_type: tid,
+                    k,
+                },
+                true,
+            )
+        } else {
+            return Err("source must be one of {nodes|similar|type_ann}".into());
+        };
+        // ---- steps ----
+        let mut transforms = Vec::new();
+        for step in req["steps"].as_array().into_iter().flatten() {
+            if let Some(p) = step["expand"].as_str() {
+                let pid = self
+                    .cat
+                    .field_id(p)
+                    .ok_or(format!("unknown predicate: {p}"))?;
+                transforms.push(Transform::Expand { predicate: pid });
+            } else if let Some(t) = step["filter_type"].as_str() {
+                let tid = self.cat.field_id(t).ok_or(format!("unknown type: {t}"))?;
+                transforms.push(Transform::Filter(Filter::HasType { ty: tid }));
+            } else {
+                return Err("step must be {expand:..} or {filter_type:..}".into());
+            }
+        }
+        let pipeline = Pipeline {
+            source,
+            transforms,
+            max_nodes: req["max_nodes"].as_u64().unwrap_or(3000) as usize,
+            mode: ReadMode::Fresh,
+        };
+        let head = self.eng.durable_head();
+        let vw = (self.emb_ids.len() as u64).min(head);
+        let vv = VersionVector::new(head, vw);
+        let principal = Principal {
+            allowed_labels: labels,
+        };
+        let t = if needs_ann {
+            let idx = self.index.as_ref().ok_or("no embeddings ingested")?;
+            run(snap, &self.cat, idx, &pipeline, &principal, vv)
+        } else {
+            run(snap, &self.cat, &NoAnn, &pipeline, &principal, vv)
+        };
+        let nodes: Vec<Value> = t
+            .ids
+            .iter()
+            .map(|&id| json!({ "id": id, "name": self.display_name(snap, id) }))
+            .collect();
+        Ok(json!({ "ids": t.ids, "nodes": nodes }))
     }
 
     /// Assemble LLM-ready context from a hybrid search: for each hit, the *current* value of the

@@ -59,6 +59,21 @@ impl AnnBackend for IvfPq {
     }
 }
 
+/// An empty vector backend — for pipelines whose source needs no ANN (e.g. `Point`), so the engine
+/// can run graph-only compositions on a database with no embeddings.
+pub struct NoAnn;
+impl AnnBackend for NoAnn {
+    fn ann_search(
+        &self,
+        _q: &[f32],
+        _k: usize,
+        _scope: Option<u64>,
+        _keep: &dyn Fn(NodeId) -> bool,
+    ) -> Vec<(NodeId, f32)> {
+        Vec::new()
+    }
+}
+
 /// The querying end-user principal (ABAC label bitmask). Unlabeled nodes are public.
 #[derive(Clone, Copy, Debug)]
 pub struct Principal {

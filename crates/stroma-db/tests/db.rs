@@ -322,6 +322,30 @@ fn overview_type_aggregate() {
     // inter-type edges only: Person–Project and Person–Team (no intra-type self edge)
     assert_eq!(r["edges"].as_array().unwrap().len(), 2);
 
+    // composable pipeline: source (node 1) → expand works-on → filter type Project
+    let ids = |r: &serde_json::Value| -> Vec<u64> {
+        let mut v: Vec<u64> = r["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_u64().unwrap())
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    let r = db
+        .query(&json!({"op":"pipeline","source":{"nodes":[1]}}))
+        .unwrap();
+    assert_eq!(ids(&r), vec![1]); // source = node 1
+    let r = db
+        .query(&json!({"op":"pipeline","source":{"nodes":[1]},"steps":[{"expand":"works-on"}]}))
+        .unwrap();
+    assert_eq!(ids(&r), vec![10]); // 1 -> works-on -> project 10
+    let r = db
+        .query(&json!({"op":"pipeline","source":{"nodes":[1]},"steps":[{"expand":"works-on"},{"filter_type":"Person"}]}))
+        .unwrap();
+    assert_eq!(ids(&r), Vec::<u64>::new()); // project 10 is not a Person → filtered out
+
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
