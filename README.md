@@ -4,6 +4,10 @@
 it fuses **meaning (vectors) × structure (typed graph) × time (bitemporal)** so an LLM can retrieve
 relevant, structurally-correct context in low-ms — over a graph that is updated by a live stream.
 
+![The StromaDB web console: a GPU-rendered graph explorer with type-aware vector search and node inspection](docs/console.png)
+
+<sub>The built-in console (`stroma-serve` at `http://localhost:7687/`): explore a neighbourhood, run a type-aware vector search, inspect a node down to its embedding, and compose queries — all live.</sub>
+
 It targets the **bounded scale of a single organization** (per-org graph is bounded), which is what
 makes low-cost *and* high-performance achievable at once: the hot working set fits in memory, the
 footprint is small, and idle tenants can scale to zero.
@@ -103,8 +107,11 @@ The image ships `stroma-serve` (entrypoint), plus the `stroma` CLI and `stroma-m
 ## Serve (HTTP)
 
 `stroma-serve` exposes the same database over HTTP so an agent or service can query and ingest it
-without embedding the engine — the intended surface for an LLM caller. It also serves a minimal
-dependency-free web console (query builder + click-to-explore) at `http://localhost:7687/`.
+without embedding the engine — the intended surface for an LLM caller. It also serves a
+dependency-free web console (single HTML file, no build step) at `http://localhost:7687/` — a
+GPU-rendered graph explorer (pictured above) with distance-filtered exploration, type-aware vector
+search, per-node inspection, composable step-by-step queries, and live updates as the database changes.
+Load the [sample dataset](examples/) to try it in a minute.
 
 ```bash
 stroma-serve --db ./mydb --addr 127.0.0.1:7687   # worker pool: concurrent reads, exclusive writes
