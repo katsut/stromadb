@@ -202,18 +202,33 @@ impl Db {
                     Some(Cardinality::One) => WriteKind::SetOne {
                         subject,
                         predicate,
-                        object,
+                        object: object.clone(),
                         valid_from,
                         valid_to,
                     },
                     _ => WriteKind::AddMany {
                         subject,
                         predicate,
-                        object,
+                        object: object.clone(),
                     },
                 };
                 batch.push((0, kind));
                 s.facts += 1;
+                // optional edge properties on this fact's edge (subject, predicate, object)
+                if let Some(props) = f.get("props").and_then(|p| p.as_object()) {
+                    for (key, val) in props {
+                        batch.push((
+                            0,
+                            WriteKind::SetEdgeProp {
+                                subject,
+                                predicate,
+                                object: object.clone(),
+                                key: key.clone(),
+                                value: value_key(val)?,
+                            },
+                        ));
+                    }
+                }
                 if batch.len() >= 10_000 {
                     self.flush(&mut batch)?;
                 }
@@ -316,6 +331,8 @@ impl Db {
     /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T]}` → `{"one":..}` or `{"many":[..]}`
     ///   (`valid_at` = valid-time as-of read for a One-predicate: the value in effect at instant `T`)
     /// - `{"op":"expand","subject":N,"predicate":"name"}` → `{"nodes":[..]}`
+    /// - `{"op":"edge_props","subject":N,"predicate":"name","object":{..}}` → `{"props":{k:v,..}}`
+    ///   (properties on the edge `(subject, predicate, object)`; set at ingest via a fact's `props`)
     /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
     ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
     pub fn query(&self, req: &Value) -> DbResult<Value> {
@@ -362,6 +379,27 @@ impl Db {
                 Ok(
                     json!({ "ids": t.ids, "scores": t.scores, "as_of": { "changelog": t.as_of.changelog_seqno, "vector": t.as_of.vector_watermark } }),
                 )
+            }
+            "edge_props" => {
+                let subject = req["subject"]
+                    .as_u64()
+                    .ok_or("edge_props.subject missing")?;
+                let pname = req["predicate"]
+                    .as_str()
+                    .ok_or("edge_props.predicate missing")?;
+                let pid = self
+                    .cat
+                    .field_id(pname)
+                    .ok_or(format!("unknown predicate: {pname}"))?;
+                let object = obj_key(&req["object"])?;
+                let props = query::edge_props(&snap, subject, pid, &object)
+                    .map(|m| {
+                        m.iter()
+                            .map(|(k, v)| (k.clone(), fmt_obj(v.clone())))
+                            .collect::<serde_json::Map<_, _>>()
+                    })
+                    .unwrap_or_default();
+                Ok(json!({ "props": props }))
             }
             "retrieve_context" => self.retrieve_context(req, &snap),
             "neighborhood" => self.neighborhood(req, &snap),
@@ -1012,6 +1050,18 @@ fn obj_key(v: &Value) -> DbResult<ObjKey> {
         return Ok(ObjKey::Bool(b));
     }
     Err("object must be one of {node|int|float|text|bool}".into())
+}
+
+/// A bare JSON scalar → value ObjKey, for edge-property values (`{"level": 5, "role": "lead"}`).
+fn value_key(v: &Value) -> DbResult<ObjKey> {
+    match v {
+        Value::Bool(b) => Ok(ObjKey::Bool(*b)),
+        Value::String(s) => Ok(ObjKey::Text(s.clone())),
+        Value::Number(n) if n.is_i64() => Ok(ObjKey::Int(n.as_i64().unwrap())),
+        Value::Number(n) if n.is_u64() => Ok(ObjKey::Int(n.as_u64().unwrap() as i64)),
+        Value::Number(n) => Ok(ObjKey::Float((n.as_f64().unwrap() as f32 as f64).to_bits())),
+        _ => Err("edge-property value must be a number, string, or bool".into()),
+    }
 }
 
 fn fmt_obj(o: ObjKey) -> Value {

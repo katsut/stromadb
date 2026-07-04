@@ -141,6 +141,9 @@ curl -s -X POST localhost:7687/query  -d '{"op":"search","type":"Person","vector
 # retrieve_context: assembled, date-stamped, current-value context ready for an LLM
 curl -s -X POST localhost:7687/query  -d '{"op":"retrieve_context","type":"Doc","vector":[...],"content":"body","date":"created_at","k":8}'
 curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2}}}'
+# edge properties: attach attributes to an edge, then read them back
+curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2},"props":{"role":"lead","allocation":60}}}'
+curl -s -X POST localhost:7687/query  -d '{"op":"edge_props","subject":1,"predicate":"works-on","object":{"node":2}}'
 curl -s localhost:7687/stats
 ```
 

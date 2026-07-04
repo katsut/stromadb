@@ -36,6 +36,29 @@ pub fn point_one_asof(
         .and_then(|(_ok, obj, _vf, _vt)| obj.clone())
 }
 
+/// All properties on the edge `(subject, predicate, object)` (empty if none), LWW-resolved.
+pub fn edge_props<'a>(
+    snap: &'a Snapshot,
+    subject: NodeId,
+    predicate: FieldId,
+    object: &ObjKey,
+) -> Option<&'a std::collections::BTreeMap<String, ObjKey>> {
+    snap.edge_props.get(&(subject, predicate))?.get(object)
+}
+
+/// A single property value on the edge `(subject, predicate, object)`.
+pub fn edge_prop(
+    snap: &Snapshot,
+    subject: NodeId,
+    predicate: FieldId,
+    object: &ObjKey,
+    key: &str,
+) -> Option<ObjKey> {
+    edge_props(snap, subject, predicate, object)?
+        .get(key)
+        .cloned()
+}
+
 /// Present element set of a cardinality-Many `(subject, predicate)` (empty if absent).
 pub fn point_many(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTreeSet<ObjKey> {
     snap.many
@@ -307,6 +330,55 @@ mod tests {
         assert_eq!(point_one_asof(&s, 7, 5, 250), None); // after the interval
         // current functional value ignores wall-clock: the asserted value is still present.
         assert_eq!(point_one(&s, 7, 5), Some(ObjKey::Node(42)));
+    }
+
+    #[test]
+    fn edge_props_lww_and_read() {
+        // Edge (1, has-skill=100, Skill 20): set level=3 then level=5 (later ok wins), plus role.
+        let ops = vec![
+            Op::AddMany {
+                subject: 1,
+                predicate: 100,
+                object: ObjKey::Node(20),
+                ok: ok(0),
+            },
+            Op::SetEdgeProp {
+                subject: 1,
+                predicate: 100,
+                object: ObjKey::Node(20),
+                key: "level".into(),
+                value: ObjKey::Int(3),
+                ok: ok(1),
+            },
+            Op::SetEdgeProp {
+                subject: 1,
+                predicate: 100,
+                object: ObjKey::Node(20),
+                key: "level".into(),
+                value: ObjKey::Int(5),
+                ok: ok(2), // greater order key → wins
+            },
+            Op::SetEdgeProp {
+                subject: 1,
+                predicate: 100,
+                object: ObjKey::Node(20),
+                key: "role".into(),
+                value: ObjKey::Text("lead".into()),
+                ok: ok(3),
+            },
+        ];
+        let s = fold(&ops).observe();
+        assert_eq!(
+            edge_prop(&s, 1, 100, &ObjKey::Node(20), "level"),
+            Some(ObjKey::Int(5))
+        );
+        assert_eq!(
+            edge_prop(&s, 1, 100, &ObjKey::Node(20), "role"),
+            Some(ObjKey::Text("lead".into()))
+        );
+        assert_eq!(edge_prop(&s, 1, 100, &ObjKey::Node(20), "missing"), None);
+        // a different edge object has no properties
+        assert_eq!(edge_props(&s, 1, 100, &ObjKey::Node(21)), None);
     }
 
     #[test]

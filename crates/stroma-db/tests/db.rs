@@ -104,6 +104,57 @@ fn valid_to_ingest_and_asof_read() {
 }
 
 #[test]
+fn edge_props_ingest_and_read() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_edgeprops_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Skill\"}}\n",
+        "{\"pred_def\":{\"name\":\"has-skill\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Skill\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":20,\"type\":\"Skill\"}}\n",
+        "{\"node\":{\"id\":21,\"type\":\"Skill\"}}\n",
+        // has-skill edge carrying a level and a role; a second skill with no props
+        "{\"fact\":{\"subject\":1,\"predicate\":\"has-skill\",\"object\":{\"node\":20},\"props\":{\"level\":5,\"role\":\"expert\"}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"has-skill\",\"object\":{\"node\":21}}}\n",
+        // LWW overwrite of the level on the same edge
+        "{\"fact\":{\"subject\":1,\"predicate\":\"has-skill\",\"object\":{\"node\":20},\"props\":{\"level\":4}}}\n",
+    ))
+    .unwrap();
+
+    // reopen: the edge properties must survive the WAL round-trip (replayed, not derived from schema)
+    let db = Db::open(&dir).unwrap();
+
+    // the skill edge still expands
+    assert_eq!(
+        db.query(&json!({"op":"expand","subject":1,"predicate":"has-skill"}))
+            .unwrap(),
+        json!({"nodes":[20,21]})
+    );
+    // level LWW-overwritten to 4; role kept
+    assert_eq!(
+        db.query(
+            &json!({"op":"edge_props","subject":1,"predicate":"has-skill","object":{"node":20}})
+        )
+        .unwrap(),
+        json!({"props":{"level":{"int":4},"role":{"text":"expert"}}})
+    );
+    // an edge with no properties returns an empty map
+    assert_eq!(
+        db.query(
+            &json!({"op":"edge_props","subject":1,"predicate":"has-skill","object":{"node":21}})
+        )
+        .unwrap(),
+        json!({"props":{}})
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn neighborhood_khop_and_authz() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_nbhd_test_{}", std::process::id()))

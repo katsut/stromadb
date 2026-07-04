@@ -50,6 +50,15 @@ enum Tmpl {
         tx: u64,
         src: u32,
     },
+    SetEdgeProp {
+        subj: u64,
+        pred: u32,
+        object: u64,
+        key: u8, // small key alphabet
+        value: u64,
+        tx: u64,
+        src: u32,
+    },
 }
 
 fn txsrc(t: &Tmpl) -> (u64, u32) {
@@ -58,7 +67,8 @@ fn txsrc(t: &Tmpl) -> (u64, u32) {
         | Tmpl::CloseOne { tx, src, .. }
         | Tmpl::AddMany { tx, src, .. }
         | Tmpl::RemoveMany { tx, src, .. }
-        | Tmpl::HardDelete { tx, src, .. } => (*tx, *src),
+        | Tmpl::HardDelete { tx, src, .. }
+        | Tmpl::SetEdgeProp { tx, src, .. } => (*tx, *src),
     }
 }
 
@@ -146,6 +156,21 @@ fn materialize(tmpls: &[Tmpl]) -> Vec<Op> {
                         Cardinality::One
                     },
                 },
+                Tmpl::SetEdgeProp {
+                    subj,
+                    pred,
+                    object,
+                    key,
+                    value,
+                    ..
+                } => Op::SetEdgeProp {
+                    subject: *subj,
+                    predicate: *pred,
+                    object: ObjKey::Node(*object),
+                    key: format!("k{key}"),
+                    value: ObjKey::Int(*value as i64),
+                    ok,
+                },
             }
         })
         .collect()
@@ -225,6 +250,26 @@ fn tmpl_strategy() -> impl Strategy<Value = Tmpl> {
                 src,
             }
         }),
+        (
+            0..SUBJECTS,
+            prop::sample::select(MANY_PREDS.to_vec()),
+            0..OBJECTS,
+            0..3u8,
+            0..3u64,
+            0..TX,
+            0..SRC
+        )
+            .prop_map(
+                |(subj, pred, object, key, value, tx, src)| Tmpl::SetEdgeProp {
+                    subj,
+                    pred,
+                    object,
+                    key,
+                    value,
+                    tx,
+                    src
+                }
+            ),
     ]
 }
 

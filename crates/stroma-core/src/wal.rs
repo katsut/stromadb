@@ -150,6 +150,20 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
                 Cardinality::Many => 1,
             });
         }
+        WriteKind::SetEdgeProp {
+            subject,
+            predicate,
+            object,
+            key,
+            value,
+        } => {
+            buf.push(5);
+            put_u64(buf, *subject);
+            put_u32(buf, *predicate);
+            put_objkey(buf, object);
+            put_str(buf, key);
+            put_objkey(buf, value);
+        }
     }
 }
 
@@ -300,6 +314,20 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
                 subject,
                 predicate,
                 cardinality,
+            }
+        }
+        5 => {
+            subject = r.u64()?;
+            predicate = r.u32()?;
+            let object = r.objkey()?;
+            let key = r.string()?;
+            let value = r.objkey()?;
+            WriteKind::SetEdgeProp {
+                subject,
+                predicate,
+                object,
+                key,
+                value,
             }
         }
         _ => return None,
