@@ -12,6 +12,7 @@
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stroma_db::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
+//!   POST /reset           → clears the whole database (opt-in: only when started with --allow-reset)
 //!
 //! Auth: every endpoint except `/health` and the login page/POST requires either a valid session
 //! cookie (issued by `POST /login`, in-memory, 12h) or, for programmatic clients, the API token as
@@ -45,6 +46,8 @@ struct Auth {
     user: String,
     pass: String,
     api_token: String,
+    /// Opt-in: allow `POST /reset` to clear the whole database (dev/demo). Off by default.
+    allow_reset: bool,
 }
 
 /// Active session tokens → unix-seconds expiry (in-memory; cleared on restart).
@@ -237,6 +240,8 @@ fn main() {
             "password",
         ),
         api_token: opt(&args, "--api-token", "STROMA_API_TOKEN", ""),
+        allow_reset: args.iter().any(|a| a == "--allow-reset")
+            || std::env::var("STROMA_ALLOW_RESET").is_ok_and(|v| v == "1" || v == "true"),
     });
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
@@ -324,6 +329,24 @@ fn main() {
                     let _ = req.respond(json_cookie_response(200, &json!({ "ok": true }), clear));
                 } else if method == Method::Get && path == "/me" {
                     let _ = req.respond(json_response(200, &json!({ "user": auth.user })));
+                } else if method == Method::Post && path == "/reset" {
+                    // opt-in, destructive: clear the whole database. Off unless --allow-reset is set.
+                    if !auth.allow_reset {
+                        let _ = req.respond(json_response(
+                            403,
+                            &json!({ "error": "reset is disabled (start with --allow-reset to enable)" }),
+                        ));
+                    } else {
+                        let r = db.write().unwrap_or_else(|e| e.into_inner()).reset();
+                        match r {
+                            Ok(()) => {
+                                let _ = req.respond(json_response(200, &json!({ "ok": true })));
+                            }
+                            Err(e) => {
+                                let _ = req.respond(json_response(500, &json!({ "error": e })));
+                            }
+                        }
+                    }
                 } else if method == Method::Get && path == "/events" {
                     // long-poll: block until the durable head advances past `since` (or ~20s), so the
                     // console can re-query its current slice the moment the database changes.

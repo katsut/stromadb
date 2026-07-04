@@ -104,6 +104,53 @@ fn valid_to_ingest_and_asof_read() {
 }
 
 #[test]
+fn reset_clears_the_database() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_reset_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+    ))
+    .unwrap();
+    assert_eq!(db.stats()["facts"]["durable_head"], json!(1));
+
+    db.reset().unwrap();
+
+    // empty after reset: the fact is gone and the predicate is unknown
+    assert_eq!(db.stats()["facts"]["durable_head"], json!(0));
+    assert!(
+        db.query(&json!({"op":"expand","subject":1,"predicate":"knows"}))
+            .is_err(),
+        "predicate should be unknown after reset"
+    );
+
+    // the db is usable again after reset — a fresh schema (incl. a different cardinality) loads clean,
+    // and the state survives a reopen
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+    ))
+    .unwrap();
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"knows"}))
+            .unwrap(),
+        json!({"one":{"node":2}})
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn redefining_predicate_cardinality_is_rejected() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_carddef_test_{}", std::process::id()))
