@@ -81,6 +81,16 @@ pub enum Op {
         ok: OrderKey,
         cardinality: Cardinality,
     },
+    /// Set a property on edge `(subject, predicate, object)`; last-writer-wins per `(edge, key)` by
+    /// `ok`. Folds into a store independent of the graph state, so graph determinism is unaffected.
+    SetEdgeProp {
+        subject: NodeId,
+        predicate: FieldId,
+        object: ObjKey,
+        key: String,
+        value: ObjKey,
+        ok: OrderKey,
+    },
 }
 
 impl Op {
@@ -128,6 +138,9 @@ impl Op {
             }
             | Op::HardDelete {
                 subject, predicate, ..
+            }
+            | Op::SetEdgeProp {
+                subject, predicate, ..
             } => (*subject, *predicate),
         }
     }
@@ -172,10 +185,20 @@ fn join_hd(a: Option<OrderKey>, b: Option<OrderKey>) -> Option<OrderKey> {
     a.max(b)
 }
 
-/// Folded graph state keyed by `(subject, predicate)`.
+/// A last-writer-wins register for one edge property: the value and the order key that set it.
+#[derive(Clone, Debug, PartialEq)]
+struct PropReg {
+    value: ObjKey,
+    ok: OrderKey,
+}
+
+/// Folded graph state keyed by `(subject, predicate)`. `edge_props` is an independent store: per
+/// `(subject, predicate)`, per edge object, an LWW register per property key. Independent of the
+/// graph fold, so edge properties never affect graph-state determinism.
 #[derive(Clone, Debug, Default)]
 pub struct Fold {
     keys: BTreeMap<(NodeId, FieldId), KeyState>,
+    edge_props: BTreeMap<(NodeId, FieldId), BTreeMap<ObjKey, BTreeMap<String, PropReg>>>,
 }
 
 /// One history row above the hard-delete floor: `(order key, object, valid_from, valid_to)`.
@@ -188,6 +211,8 @@ pub struct Snapshot {
     pub one: BTreeMap<(NodeId, FieldId), Option<ObjKey>>,
     pub one_history: BTreeMap<(NodeId, FieldId), Vec<VersionRow>>,
     pub many: BTreeMap<(NodeId, FieldId), BTreeSet<ObjKey>>,
+    /// Edge properties: `(subject, predicate)` → edge object → property key → value (LWW-resolved).
+    pub edge_props: BTreeMap<(NodeId, FieldId), BTreeMap<ObjKey, BTreeMap<String, ObjKey>>>,
 }
 
 impl Fold {
@@ -273,6 +298,38 @@ impl Fold {
                     KeyState::Many(s) => s.hd = join_hd(s.hd, Some(*ok)),
                 }
             }
+            Op::SetEdgeProp {
+                object,
+                key,
+                value,
+                ok,
+                ..
+            } => {
+                // LWW per (edge, key): the greatest order key wins, independent of apply order.
+                let reg = self
+                    .edge_props
+                    .entry(op.key())
+                    .or_default()
+                    .entry(object.clone())
+                    .or_default()
+                    .entry(key.clone());
+                match reg {
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(PropReg {
+                            value: value.clone(),
+                            ok: *ok,
+                        });
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut e) => {
+                        if *ok > e.get().ok {
+                            e.insert(PropReg {
+                                value: value.clone(),
+                                ok: *ok,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -307,6 +364,21 @@ impl Fold {
                         a.hd = join_hd(a.hd, b.hd);
                     } else {
                         panic!("cardinality mismatch on merge");
+                    }
+                }
+            }
+        }
+        // edge properties: LWW per (edge, key) — keep the register with the greater order key.
+        for (k, objs) in &other.edge_props {
+            let me = self.edge_props.entry(*k).or_default();
+            for (obj, props) in objs {
+                let mo = me.entry(obj.clone()).or_default();
+                for (key, reg) in props {
+                    match mo.get(key) {
+                        Some(cur) if cur.ok >= reg.ok => {}
+                        _ => {
+                            mo.insert(key.clone(), reg.clone());
+                        }
                     }
                 }
             }
@@ -355,7 +427,11 @@ impl Fold {
     /// Canonical observation. Keys with no live state are omitted.
     pub fn observe(&self) -> Snapshot {
         let mut snap = Snapshot::default();
-        for k in self.keys.keys() {
+        // union of graph keys and edge-property keys (a property may exist for an edge whose key
+        // carries no other live state, and vice versa).
+        let keys: BTreeSet<&(NodeId, FieldId)> =
+            self.keys.keys().chain(self.edge_props.keys()).collect();
+        for k in keys {
             self.observe_key_into(k, &mut snap);
         }
         snap
@@ -369,6 +445,23 @@ impl Fold {
         snap.one.remove(k);
         snap.one_history.remove(k);
         snap.many.remove(k);
+        snap.edge_props.remove(k);
+        // edge properties for this key: project each edge's LWW-resolved property values.
+        if let Some(objs) = self.edge_props.get(k) {
+            let projected: BTreeMap<ObjKey, BTreeMap<String, ObjKey>> = objs
+                .iter()
+                .map(|(obj, props)| {
+                    let vals = props
+                        .iter()
+                        .map(|(key, reg)| (key.clone(), reg.value.clone()))
+                        .collect();
+                    (obj.clone(), vals)
+                })
+                .collect();
+            if !projected.is_empty() {
+                snap.edge_props.insert(*k, projected);
+            }
+        }
         match self.keys.get(k) {
             Some(KeyState::One(s)) => {
                 let live: Vec<(OrderKey, Version)> = s

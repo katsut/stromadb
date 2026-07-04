@@ -52,6 +52,16 @@ pub enum WriteKind {
         predicate: FieldId,
         cardinality: Cardinality,
     },
+    /// Set a property on the edge `(subject, predicate, object)`. The key is carried as a string
+    /// (self-contained; not interned in the catalog, so it survives replay without a schema entry).
+    /// Last-writer-wins per `(edge, key)` by order key.
+    SetEdgeProp {
+        subject: NodeId,
+        predicate: FieldId,
+        object: ObjKey,
+        key: String,
+        value: ObjKey,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +145,20 @@ fn record_to_op(seqno: u64, source: FieldId, kind: &WriteKind) -> Op {
             predicate: *predicate,
             ok,
             cardinality: *cardinality,
+        },
+        WriteKind::SetEdgeProp {
+            subject,
+            predicate,
+            object,
+            key,
+            value,
+        } => Op::SetEdgeProp {
+            subject: *subject,
+            predicate: *predicate,
+            object: object.clone(),
+            key: key.clone(),
+            value: value.clone(),
+            ok,
         },
     }
 }
