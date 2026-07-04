@@ -197,12 +197,14 @@ impl Db {
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 let object = obj_key(&f["object"])?;
                 let valid_from = f["valid_from"].as_i64().unwrap_or(0);
+                let valid_to = f["valid_to"].as_i64();
                 let kind = match self.cardinality.get(pname) {
                     Some(Cardinality::One) => WriteKind::SetOne {
                         subject,
                         predicate,
                         object,
                         valid_from,
+                        valid_to,
                     },
                     _ => WriteKind::AddMany {
                         subject,
@@ -311,7 +313,8 @@ impl Db {
 
     /// Run a JSON query request and return a JSON result.
     ///
-    /// - `{"op":"point","subject":N,"predicate":"name"}` → `{"one":..}` or `{"many":[..]}`
+    /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T]}` → `{"one":..}` or `{"many":[..]}`
+    ///   (`valid_at` = valid-time as-of read for a One-predicate: the value in effect at instant `T`)
     /// - `{"op":"expand","subject":N,"predicate":"name"}` → `{"nodes":[..]}`
     /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
     ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
@@ -325,9 +328,16 @@ impl Db {
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
+                // optional valid-time as-of: `"valid_at": T` returns the One-value in effect at T
+                // (respecting the [valid_from, valid_to) interval); absent = current functional value.
+                let valid_at = req["valid_at"].as_i64();
                 Ok(match self.cardinality.get(pname) {
                     Some(Cardinality::One) => {
-                        json!({ "one": query::point_one(&snap, subject, pid).map(fmt_obj) })
+                        let obj = match valid_at {
+                            Some(at) => query::point_one_asof(&snap, subject, pid, at),
+                            None => query::point_one(&snap, subject, pid),
+                        };
+                        json!({ "one": obj.map(fmt_obj) })
                     }
                     _ => {
                         json!({ "many": query::point_many(&snap, subject, pid).into_iter().map(fmt_obj).collect::<Vec<_>>() })

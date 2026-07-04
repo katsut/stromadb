@@ -207,6 +207,7 @@ mod tests {
                 predicate: 0,
                 object: ObjKey::Node(10),
                 valid_from: 0,
+                valid_to: None,
             },
         )
         .unwrap();
@@ -254,6 +255,7 @@ mod tests {
                 predicate: 0,
                 object: ObjKey::Node(9),
                 valid_from: 0,
+                valid_to: None,
             },
         )
         .unwrap();
@@ -265,6 +267,7 @@ mod tests {
                 predicate: 0,
                 object: ObjKey::Node(10), // supersedes 9
                 valid_from: 1,
+                valid_to: None,
             },
         )
         .unwrap();
@@ -294,6 +297,7 @@ mod tests {
                     predicate: 0,
                     object: ObjKey::Node(9),
                     valid_from: 0,
+                    valid_to: None,
                 },
             )
             .unwrap();

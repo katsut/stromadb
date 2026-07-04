@@ -158,6 +158,7 @@ mod tests {
                             predicate: amount,
                             object: ObjKey::Int(v),
                             valid_from: 0,
+                            valid_to: None,
                         },
                     )
                     .unwrap();

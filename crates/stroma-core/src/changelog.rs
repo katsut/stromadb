@@ -28,6 +28,9 @@ pub enum WriteKind {
         predicate: FieldId,
         object: ObjKey,
         valid_from: i64,
+        /// End of the valid-time interval (`None` = open / currently valid). Used by valid-time
+        /// as-of reads; the fold's LWW ordering is unaffected.
+        valid_to: Option<i64>,
     },
     CloseOne {
         subject: NodeId,
@@ -85,11 +88,13 @@ fn record_to_op(seqno: u64, source: FieldId, kind: &WriteKind) -> Op {
             predicate,
             object,
             valid_from,
+            valid_to,
         } => Op::SetOne {
             subject: *subject,
             predicate: *predicate,
             object: object.clone(),
             valid_from: *valid_from,
+            valid_to: *valid_to,
             ok,
         },
         WriteKind::CloseOne {
@@ -313,6 +318,7 @@ mod tests {
                 predicate: 0,
                 object: ObjKey::Node(9),
                 valid_from: 0,
+                valid_to: None,
             },
         )
         .unwrap();
@@ -343,6 +349,7 @@ mod tests {
                 predicate: 0,
                 object: ObjKey::Text("v".into()),
                 valid_from: 5,
+                valid_to: None,
             },
         )
         .unwrap();
