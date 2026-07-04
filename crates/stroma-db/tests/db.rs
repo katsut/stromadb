@@ -65,6 +65,45 @@ fn ingest_embed_query_reopen() {
 }
 
 #[test]
+fn valid_to_ingest_and_asof_read() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_validto_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    // A one-cardinality membership valid over [100, 200): ends at 200.
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"member-of\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"member-of\",\"object\":{\"node\":9},\"valid_from\":100,\"valid_to\":200}}\n",
+    ))
+    .unwrap();
+
+    // reopen so the read is served from the replayed WAL (exercises valid_to durability round-trip)
+    let db = Db::open(&dir).unwrap();
+
+    let asof = |at: i64| {
+        db.query(&json!({"op":"point","subject":1,"predicate":"member-of","valid_at":at}))
+            .unwrap()
+    };
+    assert_eq!(asof(50), json!({ "one": null })); // before the interval
+    assert_eq!(asof(100), json!({ "one": { "node": 9 } })); // lower bound inclusive
+    assert_eq!(asof(150), json!({ "one": { "node": 9 } })); // inside
+    assert_eq!(asof(200), json!({ "one": null })); // upper bound exclusive = "no longer a member"
+    // without valid_at, point returns the asserted current value (wall-clock-free).
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"member-of"}))
+            .unwrap(),
+        json!({ "one": { "node": 9 } })
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn neighborhood_khop_and_authz() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_nbhd_test_{}", std::process::id()))

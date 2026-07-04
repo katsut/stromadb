@@ -18,6 +18,7 @@ enum Tmpl {
         pred: u32,
         object: u64,
         valid_from: i64,
+        valid_to: Option<i64>,
         tx: u64,
         src: u32,
     },
@@ -87,12 +88,14 @@ fn materialize(tmpls: &[Tmpl]) -> Vec<Op> {
                     pred,
                     object,
                     valid_from,
+                    valid_to,
                     ..
                 } => Op::SetOne {
                     subject: *subj,
                     predicate: *pred,
                     object: ObjKey::Node(*object),
                     valid_from: *valid_from,
+                    valid_to: *valid_to,
                     ok,
                 },
                 Tmpl::CloseOne {
@@ -155,17 +158,21 @@ fn tmpl_strategy() -> impl Strategy<Value = Tmpl> {
             prop::sample::select(ONE_PREDS.to_vec()),
             0..OBJECTS,
             0..TX,
+            prop::option::of(0..TX),
             0..TX,
             0..SRC
         )
-            .prop_map(|(subj, pred, object, valid_from, tx, src)| Tmpl::SetOne {
-                subj,
-                pred,
-                object,
-                valid_from: valid_from as i64,
-                tx,
-                src
-            }),
+            .prop_map(
+                |(subj, pred, object, valid_from, valid_to, tx, src)| Tmpl::SetOne {
+                    subj,
+                    pred,
+                    object,
+                    valid_from: valid_from as i64,
+                    valid_to: valid_to.map(|t| t as i64),
+                    tx,
+                    src
+                }
+            ),
         (
             0..SUBJECTS,
             prop::sample::select(ONE_PREDS.to_vec()),

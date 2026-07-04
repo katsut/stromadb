@@ -88,12 +88,21 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
             predicate,
             object,
             valid_from,
+            valid_to,
         } => {
             buf.push(0);
             put_u64(buf, *subject);
             put_u32(buf, *predicate);
             put_objkey(buf, object);
             put_i64(buf, *valid_from);
+            // trailing optional valid_to (backward compatible: absent tail decodes to None)
+            match valid_to {
+                Some(t) => {
+                    buf.push(1);
+                    put_i64(buf, *t);
+                }
+                None => buf.push(0),
+            }
         }
         WriteKind::CloseOne {
             subject,
@@ -208,6 +217,21 @@ impl<'a> Reader<'a> {
             seq: self.u64()?,
         })
     }
+    fn remaining(&self) -> usize {
+        self.b.len().saturating_sub(self.pos)
+    }
+    /// Trailing optional i64 (`[0]` = None, `[1][i64]` = Some). A record written before this field
+    /// existed simply has no trailing bytes, so an empty tail decodes to `None` (backward compatible).
+    fn opt_i64_tail(&mut self) -> Option<Option<i64>> {
+        if self.remaining() == 0 {
+            return Some(None);
+        }
+        match self.u8()? {
+            0 => Some(None),
+            1 => Some(Some(self.i64()?)),
+            _ => None,
+        }
+    }
 }
 
 fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
@@ -221,11 +245,13 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
             predicate = r.u32()?;
             let object = r.objkey()?;
             let valid_from = r.i64()?;
+            let valid_to = r.opt_i64_tail()?;
             WriteKind::SetOne {
                 subject,
                 predicate,
                 object,
                 valid_from,
+                valid_to,
             }
         }
         1 => {
@@ -351,6 +377,7 @@ mod tests {
                 predicate: 3,
                 object: ObjKey::Text("héllo".into()),
                 valid_from: -100,
+                valid_to: Some(500),
             },
         );
         roundtrip(

@@ -15,9 +15,10 @@ pub fn point_one(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option
 }
 
 /// Valid-time as-of read of a cardinality-One `(subject, predicate)`: the value in effect at
-/// valid-time `at`. Among the retained version rows with `valid_from <= at`, the one with the
-/// greatest `valid_from` wins (ties broken by the later write = a retroactive correction). Returns
-/// `None` if nothing was valid yet at `at`, or the effective version closed the value. This is
+/// valid-time `at`. A version row covers `at` iff `valid_from <= at` and (`valid_to` is open or
+/// `at < valid_to`) — a closed interval `[valid_from, valid_to)`. Among the covering rows the one
+/// with the greatest `valid_from` wins (ties broken by the later write = a retroactive correction).
+/// Returns `None` if nothing covered `at`, or the effective version closed the value. This is
 /// *valid-time* as-of (bitemporal, single-valued); transaction-time as-of is the version-vector pin.
 pub fn point_one_asof(
     snap: &Snapshot,
@@ -28,9 +29,11 @@ pub fn point_one_asof(
     snap.one_history
         .get(&(subject, predicate))?
         .iter()
-        .filter(|(_ok, _obj, valid_from)| *valid_from <= at)
+        .filter(|(_ok, _obj, valid_from, valid_to)| {
+            *valid_from <= at && valid_to.is_none_or(|to| at < to)
+        })
         .max_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)))
-        .and_then(|(_ok, obj, _vf)| obj.clone())
+        .and_then(|(_ok, obj, _vf, _vt)| obj.clone())
 }
 
 /// Present element set of a cardinality-Many `(subject, predicate)` (empty if absent).
@@ -216,6 +219,7 @@ mod tests {
                 predicate: 0,
                 object: ObjKey::Node(10),
                 valid_from: 0,
+                valid_to: None,
                 ok: ok(0),
             },
             Op::AddMany {
@@ -255,6 +259,7 @@ mod tests {
                 predicate: 5,
                 object: ObjKey::Node(100),
                 valid_from: 100,
+                valid_to: None,
                 ok: ok(0),
             },
             Op::SetOne {
@@ -262,6 +267,7 @@ mod tests {
                 predicate: 5,
                 object: ObjKey::Node(200),
                 valid_from: 200,
+                valid_to: None,
                 ok: ok(1),
             },
             Op::SetOne {
@@ -269,6 +275,7 @@ mod tests {
                 predicate: 5,
                 object: ObjKey::Node(150),
                 valid_from: 150,
+                valid_to: None,
                 ok: ok(2),
             },
         ];
@@ -279,6 +286,27 @@ mod tests {
         assert_eq!(point_one_asof(&s, 1, 5, 250), Some(ObjKey::Node(200)));
         // "now" (current functional value) = latest-written = the retroactive 150.
         assert_eq!(point_one(&s, 1, 5), Some(ObjKey::Node(150)));
+    }
+
+    #[test]
+    fn valid_time_bounded_interval() {
+        // A single closed interval [100, 200): valid at 150, not before 100, not at/after 200.
+        let ops = vec![Op::SetOne {
+            subject: 7,
+            predicate: 5,
+            object: ObjKey::Node(42),
+            valid_from: 100,
+            valid_to: Some(200),
+            ok: ok(0),
+        }];
+        let s = fold(&ops).observe();
+        assert_eq!(point_one_asof(&s, 7, 5, 50), None); // before the interval
+        assert_eq!(point_one_asof(&s, 7, 5, 100), Some(ObjKey::Node(42))); // lower bound inclusive
+        assert_eq!(point_one_asof(&s, 7, 5, 150), Some(ObjKey::Node(42))); // inside
+        assert_eq!(point_one_asof(&s, 7, 5, 200), None); // upper bound exclusive (ended)
+        assert_eq!(point_one_asof(&s, 7, 5, 250), None); // after the interval
+        // current functional value ignores wall-clock: the asserted value is still present.
+        assert_eq!(point_one(&s, 7, 5), Some(ObjKey::Node(42)));
     }
 
     #[test]

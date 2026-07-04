@@ -55,6 +55,7 @@ pub enum Op {
         predicate: FieldId,
         object: ObjKey,
         valid_from: i64,
+        valid_to: Option<i64>,
         ok: OrderKey,
     },
     CloseOne {
@@ -99,6 +100,7 @@ impl Op {
                 predicate,
                 object: ObjKey::of(&fact.object),
                 valid_from: fact.valid_time.from,
+                valid_to: fact.valid_time.to,
                 ok,
             },
             Cardinality::Many => Op::AddMany {
@@ -135,6 +137,7 @@ impl Op {
 struct Version {
     object: Option<ObjKey>, // None = close/delete
     valid_from: i64,
+    valid_to: Option<i64>, // end of valid interval (None = open); read-time only
 }
 
 #[derive(Clone, Debug, Default)]
@@ -175,8 +178,9 @@ pub struct Fold {
     keys: BTreeMap<(NodeId, FieldId), KeyState>,
 }
 
-/// One history row above the hard-delete floor.
-pub type VersionRow = (OrderKey, Option<ObjKey>, i64);
+/// One history row above the hard-delete floor: `(order key, object, valid_from, valid_to)`.
+/// `valid_to = None` means the interval is open (currently valid).
+pub type VersionRow = (OrderKey, Option<ObjKey>, i64, Option<i64>);
 
 /// Canonical, deterministic observation; two folds converge iff their snapshots are equal.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -194,6 +198,7 @@ impl Fold {
             Op::SetOne {
                 object,
                 valid_from,
+                valid_to,
                 ok,
                 ..
             } => {
@@ -207,6 +212,7 @@ impl Fold {
                         Version {
                             object: Some(object.clone()),
                             valid_from: *valid_from,
+                            valid_to: *valid_to,
                         },
                     );
                 } else {
@@ -224,6 +230,7 @@ impl Fold {
                         Version {
                             object: None,
                             valid_from: *valid_from,
+                            valid_to: None,
                         },
                     );
                 } else {
@@ -375,7 +382,7 @@ impl Fold {
                     snap.one_history.insert(
                         *k,
                         live.iter()
-                            .map(|(ok, v)| (*ok, v.object.clone(), v.valid_from))
+                            .map(|(ok, v)| (*ok, v.object.clone(), v.valid_from, v.valid_to))
                             .collect(),
                     );
                 }
@@ -477,6 +484,7 @@ mod tests {
             predicate: p,
             object: ObjKey::Node(10),
             valid_from: 0,
+            valid_to: None,
             ok: ok(1, 0, 0),
         };
         let b = Op::SetOne {
@@ -484,6 +492,7 @@ mod tests {
             predicate: p,
             object: ObjKey::Node(20),
             valid_from: 0,
+            valid_to: None,
             ok: ok(1, 2, 1),
         };
         let s1 = fold(&[a.clone(), b.clone()]).observe();

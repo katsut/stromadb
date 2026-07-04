@@ -392,6 +392,7 @@ mod tests {
                 predicate: age,
                 object: ObjKey::Int(30),
                 valid_from: 0,
+                valid_to: None,
                 ok: ok(0),
             },
             Op::SetOne {
@@ -399,6 +400,7 @@ mod tests {
                 predicate: age,
                 object: ObjKey::Int(40),
                 valid_from: 0,
+                valid_to: None,
                 ok: ok(1),
             },
             Op::SetOne {
@@ -406,6 +408,7 @@ mod tests {
                 predicate: age,
                 object: ObjKey::Int(50),
                 valid_from: 0,
+                valid_to: None,
                 ok: ok(2),
             },
             Op::SetOne {
@@ -413,6 +416,7 @@ mod tests {
                 predicate: age,
                 object: ObjKey::Int(41),
                 valid_from: 100,
+                valid_to: None,
                 ok: ok(3),
             },
         ])
