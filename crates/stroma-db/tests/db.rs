@@ -104,6 +104,48 @@ fn valid_to_ingest_and_asof_read() {
 }
 
 #[test]
+fn redefining_predicate_cardinality_is_rejected() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_carddef_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Project\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"assigned-to\",\"object\":{\"node\":2}}}\n",
+    ))
+    .unwrap();
+
+    // re-sending the same definition is idempotent (allowed)
+    assert!(
+        db.ingest_str("{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Project\"}}\n")
+            .is_ok()
+    );
+
+    // redefining it with a different cardinality is a clean error, not a panic / 500
+    let err = db
+        .ingest_str("{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n")
+        .unwrap_err();
+    assert!(
+        err.contains("already defined with cardinality"),
+        "unexpected error: {err}"
+    );
+
+    // the original many-edge still works after the rejected redefinition
+    assert_eq!(
+        db.query(&json!({"op":"expand","subject":1,"predicate":"assigned-to"}))
+            .unwrap(),
+        json!({"nodes":[2]})
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn edge_props_ingest_and_read() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_edgeprops_test_{}", std::process::id()))

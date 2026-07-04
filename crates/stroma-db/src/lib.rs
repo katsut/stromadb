@@ -998,6 +998,17 @@ fn apply_def(
             "one" => Cardinality::One,
             _ => Cardinality::Many,
         };
+        // A predicate's cardinality is load-bearing: existing facts were folded as One or Many under
+        // it. Redefining it with a different cardinality would make later writes conflict with the
+        // folded state, so reject it here with a clear error rather than letting the fold panic.
+        // Re-sending the same definition (same cardinality) is idempotent and allowed.
+        if let Some(&existing) = card.get(name)
+            && existing != c
+        {
+            return Err(format!(
+                "predicate '{name}' is already defined with cardinality {existing:?}; it cannot be redefined as {c:?}"
+            ));
+        }
         let domain = p["domain"].as_str().ok_or("pred_def.domain missing")?;
         let domain_id = cat
             .field_id(domain)
