@@ -191,3 +191,103 @@ fn serve_health_query_ingest() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Minimal HTTP/1.1 client that sends an optional `Authorization: Bearer` header.
+fn http_bearer(addr: &str, method: &str, path: &str, body: &str, bearer: Option<&str>) -> u16 {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let auth_hdr = bearer
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{auth_hdr}Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let resp = String::from_utf8_lossy(&raw).into_owned();
+    resp.split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+#[test]
+fn serve_api_token_auth() {
+    let base = std::env::temp_dir().join(format!("stroma_serve_token_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+    ))
+    .unwrap();
+    drop(db);
+
+    let port = 8600 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+        .args([
+            "--db",
+            dir.to_str().unwrap(),
+            "--addr",
+            &addr,
+            "--api-token",
+            "s3cr3t-token",
+        ])
+        .spawn()
+        .unwrap();
+    let _guard = Kill(child);
+
+    let mut up = false;
+    for _ in 0..50 {
+        if TcpStream::connect(&addr).is_ok() {
+            up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(up, "server did not come up");
+
+    let q = "{\"op\":\"expand\",\"subject\":1,\"predicate\":\"knows\"}";
+    // no token → 401
+    assert_eq!(
+        http_bearer(&addr, "POST", "/query", q, None),
+        401,
+        "no token must be 401"
+    );
+    // wrong token → 401
+    assert_eq!(
+        http_bearer(&addr, "POST", "/query", q, Some("nope")),
+        401,
+        "wrong token must be 401"
+    );
+    // correct token → 200 (no login/cookie round-trip)
+    assert_eq!(
+        http_bearer(&addr, "POST", "/query", q, Some("s3cr3t-token")),
+        200,
+        "valid token must authorize"
+    );
+    // token also authorizes ingest
+    assert_eq!(
+        http_bearer(
+            &addr,
+            "POST",
+            "/ingest",
+            "{\"fact\":{\"subject\":2,\"predicate\":\"knows\",\"object\":{\"node\":1}}}",
+            Some("s3cr3t-token")
+        ),
+        200,
+        "valid token must authorize ingest"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
