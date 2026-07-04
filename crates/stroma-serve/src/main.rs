@@ -13,9 +13,11 @@
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
 //!
-//! Auth: every endpoint except `/health` and the login page/POST requires a valid session cookie
-//! (issued by `POST /login`, in-memory, 12h). Credentials are `--admin-user`/`$STROMA_ADMIN_USER`
-//! (default `admin`) and `--admin-password`/`$STROMA_ADMIN_PASSWORD` (default `password`, warned).
+//! Auth: every endpoint except `/health` and the login page/POST requires either a valid session
+//! cookie (issued by `POST /login`, in-memory, 12h) or, for programmatic clients, the API token as
+//! `Authorization: Bearer <token>`. Credentials are `--admin-user`/`$STROMA_ADMIN_USER` (default
+//! `admin`) and `--admin-password`/`$STROMA_ADMIN_PASSWORD` (default `password`, warned). The API
+//! token is `--api-token`/`$STROMA_API_TOKEN` (unset = bearer auth disabled, cookie-only).
 //!
 //! Concurrency: a worker pool shares the database behind an `RwLock` — reads (`/query`, `/stats`,
 //! `/health`) run concurrently; writes (`/ingest`, `/embed`) take the write lock and are exclusive
@@ -37,10 +39,12 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 type SharedDb = Arc<RwLock<Db>>;
 
-/// Console credentials (flag/env, default `admin`/`password`).
+/// Console credentials (flag/env, default `admin`/`password`) plus an optional API token for
+/// programmatic clients. An empty `api_token` disables bearer auth (cookie-only, as before).
 struct Auth {
     user: String,
     pass: String,
+    api_token: String,
 }
 
 /// Active session tokens → unix-seconds expiry (in-memory; cleared on restart).
@@ -84,6 +88,20 @@ fn cookie_token(req: &Request) -> Option<String> {
         .map(str::trim)
         .find_map(|kv| kv.strip_prefix("stroma_session="))
         .map(str::to_string)
+}
+
+/// True iff the request presents the configured API token as `Authorization: Bearer <token>`.
+/// Always false when no token is configured, so bearer auth is opt-in. Constant-time compare.
+fn bearer_authed(auth: &Auth, req: &Request) -> bool {
+    if auth.api_token.is_empty() {
+        return false;
+    }
+    header_value(req, "authorization")
+        .and_then(|h| {
+            h.strip_prefix("Bearer ")
+                .or_else(|| h.strip_prefix("bearer "))
+        })
+        .is_some_and(|tok| ct_eq(tok.trim(), &auth.api_token))
 }
 
 /// True iff the request carries a live (unexpired) session cookie. Expired tokens are purged.
@@ -218,6 +236,7 @@ fn main() {
             "STROMA_ADMIN_PASSWORD",
             "password",
         ),
+        api_token: opt(&args, "--api-token", "STROMA_API_TOKEN", ""),
     });
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
@@ -287,8 +306,8 @@ fn main() {
                     continue;
                 }
 
-                // everything else needs a live session
-                if !authed(&sessions, &req) {
+                // everything else needs a live session (browser) or the API token (programmatic)
+                if !authed(&sessions, &req) && !bearer_authed(&auth, &req) {
                     if method == Method::Get && (path == "/" || path == "/ui") {
                         let _ = req.respond(login_response()); // browser → login page
                     } else {

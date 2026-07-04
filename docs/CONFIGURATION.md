@@ -16,6 +16,7 @@ the OS directly; the only knob that bounds resident memory is `STROMA_MAX_UNMERG
 | `STROMA_MAX_UNMERGED` | `--max-unmerged <n>` | `8000000` | serve, mcp | Upper bound on the un-merged read-merge tail (appended-but-not-materialized writes). This is the backpressure threshold and the main resident-memory knob: **larger** = more RAM headroom before backpressure; **smaller** = backpressure sooner, less memory. Not persisted — it is a per-process property. |
 | `STROMA_ADMIN_USER` | `--admin-user <name>` | `admin` | serve | Console login username. |
 | `STROMA_ADMIN_PASSWORD` | `--admin-password <pw>` | `password` | serve | Console login password. **Change this before exposing the server** — while the default is in use, `stroma-serve` prints a startup warning. |
+| `STROMA_API_TOKEN` | `--api-token <token>` | *(unset)* | serve | API token for programmatic clients. When set, requests carrying `Authorization: Bearer <token>` are authorized without the login/cookie flow. Unset = bearer auth disabled (cookie-only). |
 
 `RUST_BACKTRACE=1` is honored by the Rust runtime for panic diagnostics.
 
@@ -30,6 +31,12 @@ loads are served the login page. `POST /logout` ends the session.
 Credentials come from the settings above (default `admin` / `password`). There is no cookie
 `Secure` flag yet, so put the server behind TLS (or keep it on localhost) if the network is
 untrusted. The MCP stdio surface is local and is not affected by this login.
+
+For **programmatic clients** (a service or agent, not a browser), set `STROMA_API_TOKEN` and send it
+as `Authorization: Bearer <token>` — this authorizes `/query`, `/ingest`, and the other gated
+endpoints without the login/cookie round-trip. The token is compared in constant time. Leave it unset
+to keep bearer auth disabled (cookie-only). Put the server behind TLS when sending a token over an
+untrusted network.
 
 ## Using a `.env` file
 
