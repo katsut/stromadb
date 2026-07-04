@@ -36,6 +36,9 @@ StromaDB is built for LLM retrieval: stream-native, vector + typed-graph, low-co
 
 - **Type-aware hybrid search** — ANN candidates filtered/reranked by graph type, so disjoint-type
   mis-fusion is rejected.
+- **Typed property graph** — first-class typed edges with per-edge **properties** (a level, a role, an
+  allocation) in a separate store, ingested alongside facts (`"props": {…}`) and read back per edge;
+  ingest applies minimal constraint checks (domain/range, cardinality).
 - **Stream ingest, no write stalls** — append-only changelog; explicit backpressure under overload.
 - **Composable operator query IR** — `point / type-ANN / expand / filter / top-k` composed as a
   pipeline (filters cover type, current value, and **valid-time as-of** value). Standing queries are
