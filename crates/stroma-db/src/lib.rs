@@ -51,6 +51,7 @@ pub struct Db {
     emb: Vec<f32>,
     dim: usize,
     index: Option<IvfPq>,
+    n_max: usize,
 }
 
 impl Db {
@@ -111,9 +112,33 @@ impl Db {
             emb,
             dim,
             index: None,
+            n_max,
         };
         db.rebuild_index();
         Ok(db)
+    }
+
+    /// Clear the database to empty: remove the authoritative inputs (changelog, schema/node
+    /// assignments, received embeddings) and re-open a fresh engine. **Destructive** — every fact is
+    /// gone. Intended for tests and dev/demo resets; the `stroma-serve` endpoint that exposes it is
+    /// opt-in and off by default.
+    pub fn reset(&mut self) -> DbResult<()> {
+        for f in [
+            "wal.log",
+            "schema.jsonl",
+            "nodes.jsonl",
+            "embeddings.bin",
+            "embeddings.ids",
+            "meta.json",
+        ] {
+            let p = self.dir.join(f);
+            if p.exists() {
+                fs::remove_file(&p).map_err(|e| format!("reset: remove {f}: {e}"))?;
+            }
+        }
+        Self::init(&self.dir)?;
+        *self = Self::open_with(&self.dir, self.n_max)?;
+        Ok(())
     }
 
     /// Open the database, first creating an empty one if the directory has no WAL yet — the

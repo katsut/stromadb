@@ -17,6 +17,7 @@ the OS directly; the only knob that bounds resident memory is `STROMA_MAX_UNMERG
 | `STROMA_ADMIN_USER` | `--admin-user <name>` | `admin` | serve | Console login username. |
 | `STROMA_ADMIN_PASSWORD` | `--admin-password <pw>` | `password` | serve | Console login password. **Change this before exposing the server** — while the default is in use, `stroma-serve` prints a startup warning. |
 | `STROMA_API_TOKEN` | `--api-token <token>` | *(unset)* | serve | API token for programmatic clients. When set, requests carrying `Authorization: Bearer <token>` are authorized without the login/cookie flow. Unset = bearer auth disabled (cookie-only). |
+| `STROMA_ALLOW_RESET` | `--allow-reset` | `false` | serve | Enable `POST /reset`, which **clears the entire database**. Off by default; intended for dev/demo/test. Set `STROMA_ALLOW_RESET=1` (or pass the flag). Still requires auth. |
 
 `RUST_BACKTRACE=1` is honored by the Rust runtime for panic diagnostics.
 

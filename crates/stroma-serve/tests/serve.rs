@@ -288,6 +288,87 @@ fn serve_api_token_auth() {
         200,
         "valid token must authorize ingest"
     );
+    // /reset is disabled by default (server started without --allow-reset) → 403
+    assert_eq!(
+        http_bearer(&addr, "POST", "/reset", "", Some("s3cr3t-token")),
+        403,
+        "reset must be disabled without --allow-reset"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn serve_reset_when_enabled() {
+    let base = std::env::temp_dir().join(format!("stroma_serve_reset_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    Db::init(&dir).unwrap();
+    let mut db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+    ))
+    .unwrap();
+    drop(db);
+
+    let port = 8300 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+        .args([
+            "--db",
+            dir.to_str().unwrap(),
+            "--addr",
+            &addr,
+            "--api-token",
+            "tok",
+            "--allow-reset",
+        ])
+        .spawn()
+        .unwrap();
+    let _guard = Kill(child);
+    let mut up = false;
+    for _ in 0..50 {
+        if TcpStream::connect(&addr).is_ok() {
+            up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(up, "server did not come up");
+
+    // the fact is queryable before reset
+    assert_eq!(
+        http_bearer(
+            &addr,
+            "POST",
+            "/query",
+            "{\"op\":\"expand\",\"subject\":1,\"predicate\":\"knows\"}",
+            Some("tok")
+        ),
+        200,
+        "fact should be queryable before reset"
+    );
+    assert_eq!(
+        http_bearer(&addr, "POST", "/reset", "", Some("tok")),
+        200,
+        "reset must succeed when enabled"
+    );
+    // after reset the predicate is gone → query errors (400)
+    assert_eq!(
+        http_bearer(
+            &addr,
+            "POST",
+            "/query",
+            "{\"op\":\"expand\",\"subject\":1,\"predicate\":\"knows\"}",
+            Some("tok")
+        ),
+        400,
+        "predicate should be unknown after reset"
+    );
 
     let _ = std::fs::remove_dir_all(&base);
 }
