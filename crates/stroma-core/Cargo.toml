@@ -10,6 +10,7 @@ categories.workspace = true
 description = "StromaDB core engine: Fact model, type catalog, fold, and query."
 
 [dependencies]
+imbl = "7" # persistent HAMT for O(1)-clone snapshot maps (structural sharing on publish)
 
 [dev-dependencies]
 proptest = "1"

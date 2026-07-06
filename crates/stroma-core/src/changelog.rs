@@ -62,6 +62,11 @@ pub enum WriteKind {
         key: String,
         value: ObjKey,
     },
+    /// Set node `node`'s entity type; last-writer-wins by order key. Node-scoped (not
+    /// `(subject, predicate)`-keyed).
+    SetNodeType { node: NodeId, type_id: FieldId },
+    /// Set node `node`'s ABAC sensitivity label; last-writer-wins by order key. Node-scoped.
+    SetNodeLabel { node: NodeId, label: u8 },
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +163,16 @@ fn record_to_op(seqno: u64, source: FieldId, kind: &WriteKind) -> Op {
             object: object.clone(),
             key: key.clone(),
             value: value.clone(),
+            ok,
+        },
+        WriteKind::SetNodeType { node, type_id } => Op::SetNodeType {
+            node: *node,
+            type_id: *type_id,
+            ok,
+        },
+        WriteKind::SetNodeLabel { node, label } => Op::SetNodeLabel {
+            node: *node,
+            label: *label,
             ok,
         },
     }
@@ -291,22 +306,36 @@ impl Changelog {
         self.replay_range_into_tracked(from, fold);
     }
 
-    /// Like [`Changelog::replay_range_into`], but returns the set of `(subject, predicate)` keys the
-    /// range touched — the input for incremental snapshot refresh (`Fold::observe_key_into`).
+    /// Like [`Changelog::replay_range_into`], but returns what the range touched — the input for
+    /// incremental snapshot refresh: the `(subject, predicate)` graph keys (for
+    /// [`Fold::observe_key_into`]) and, separately, the node ids whose attributes changed (for
+    /// [`Fold::observe_node_into`]). Node-attribute ops are routed by node and never appear in the
+    /// graph key set.
     pub fn replay_range_into_tracked(
         &self,
         from: u64,
         fold: &mut Fold,
-    ) -> std::collections::BTreeSet<(NodeId, u32)> {
-        let mut touched = std::collections::BTreeSet::new();
+    ) -> (
+        std::collections::BTreeSet<(NodeId, FieldId)>,
+        std::collections::BTreeSet<NodeId>,
+    ) {
+        let mut keys = std::collections::BTreeSet::new();
+        let mut nodes = std::collections::BTreeSet::new();
         let start = (from as usize).min(self.records.len());
         for (offset, r) in self.records[start..].iter().enumerate() {
             let seqno = (start + offset) as u64;
             let op = record_to_op(seqno, r.source, &r.kind);
-            touched.insert(op.key());
+            match op.node_attr_node() {
+                Some(node) => {
+                    nodes.insert(node);
+                }
+                None => {
+                    keys.insert(op.key());
+                }
+            }
             fold.apply(&op);
         }
-        touched
+        (keys, nodes)
     }
 }
 

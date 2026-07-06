@@ -91,6 +91,21 @@ pub enum Op {
         value: ObjKey,
         ok: OrderKey,
     },
+    /// Set node `node`'s entity type; last-writer-wins by `ok`. Node-scoped, **not**
+    /// `(subject, predicate)`-keyed — see [`Op::node_attr_node`]. Folds into an independent
+    /// node-attribute store, so graph-state determinism is unaffected.
+    SetNodeType {
+        node: NodeId,
+        type_id: FieldId,
+        ok: OrderKey,
+    },
+    /// Set node `node`'s ABAC sensitivity label; last-writer-wins by `ok`. Node-scoped like
+    /// [`Op::SetNodeType`].
+    SetNodeLabel {
+        node: NodeId,
+        label: u8,
+        ok: OrderKey,
+    },
 }
 
 impl Op {
@@ -142,6 +157,23 @@ impl Op {
             | Op::SetEdgeProp {
                 subject, predicate, ..
             } => (*subject, *predicate),
+            // Node-attribute ops are not `(subject, predicate)`-keyed; callers must branch on
+            // `node_attr_node()` first (they route by node), so this is unreachable in practice.
+            // Guarded against misuse; never contributes to the graph touched-set.
+            Op::SetNodeType { node, .. } | Op::SetNodeLabel { node, .. } => {
+                debug_assert!(false, "Op::key() called on a node-attribute op");
+                (*node, FieldId::MAX)
+            }
+        }
+    }
+
+    /// The node a node-attribute op ([`Op::SetNodeType`]/[`Op::SetNodeLabel`]) targets, or `None`
+    /// for graph ops. Callers route node-attribute ops by node — never through [`Op::key`], which is
+    /// the `(subject, predicate)` graph touched-set accessor.
+    pub(crate) fn node_attr_node(&self) -> Option<NodeId> {
+        match self {
+            Op::SetNodeType { node, .. } | Op::SetNodeLabel { node, .. } => Some(*node),
+            _ => None,
         }
     }
 }
@@ -192,13 +224,24 @@ struct PropReg {
     ok: OrderKey,
 }
 
+/// A node's last-writer-wins attribute registers: its entity type and its ABAC label, each paired
+/// with the order key that set it (mirrors [`PropReg`]). Set-only registers — there is no
+/// hard-delete floor for node attributes (see [`Fold::gc`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct NodeAttrState {
+    ty: Option<(OrderKey, FieldId)>,
+    label: Option<(OrderKey, u8)>,
+}
+
 /// Folded graph state keyed by `(subject, predicate)`. `edge_props` is an independent store: per
-/// `(subject, predicate)`, per edge object, an LWW register per property key. Independent of the
-/// graph fold, so edge properties never affect graph-state determinism.
+/// `(subject, predicate)`, per edge object, an LWW register per property key. `node_attrs` is a
+/// second independent store: per node, LWW registers for its entity type and ABAC label. Both are
+/// independent of the graph fold, so neither affects graph-state determinism.
 #[derive(Clone, Debug, Default)]
 pub struct Fold {
     keys: BTreeMap<(NodeId, FieldId), KeyState>,
     edge_props: BTreeMap<(NodeId, FieldId), BTreeMap<ObjKey, BTreeMap<String, PropReg>>>,
+    node_attrs: BTreeMap<NodeId, NodeAttrState>,
 }
 
 /// One history row above the hard-delete floor: `(order key, object, valid_from, valid_to)`.
@@ -213,6 +256,11 @@ pub struct Snapshot {
     pub many: BTreeMap<(NodeId, FieldId), BTreeSet<ObjKey>>,
     /// Edge properties: `(subject, predicate)` → edge object → property key → value (LWW-resolved).
     pub edge_props: BTreeMap<(NodeId, FieldId), BTreeMap<ObjKey, BTreeMap<String, ObjKey>>>,
+    /// Node → entity type (LWW-resolved). A persistent HAMT so pinning a reader clones in O(1) and a
+    /// publish shares structure with the previous snapshot (structural sharing).
+    pub node_types: imbl::HashMap<NodeId, FieldId>,
+    /// Node → ABAC sensitivity label (LWW-resolved). Same persistent HAMT rationale as `node_types`.
+    pub node_labels: imbl::HashMap<NodeId, u8>,
 }
 
 impl Fold {
@@ -330,6 +378,19 @@ impl Fold {
                     }
                 }
             }
+            Op::SetNodeType { node, type_id, ok } => {
+                // LWW per node: the greatest order key wins, independent of apply order.
+                let st = self.node_attrs.entry(*node).or_default();
+                if st.ty.is_none_or(|(cur, _)| *ok > cur) {
+                    st.ty = Some((*ok, *type_id));
+                }
+            }
+            Op::SetNodeLabel { node, label, ok } => {
+                let st = self.node_attrs.entry(*node).or_default();
+                if st.label.is_none_or(|(cur, _)| *ok > cur) {
+                    st.label = Some((*ok, *label));
+                }
+            }
         }
     }
 
@@ -383,9 +444,26 @@ impl Fold {
                 }
             }
         }
+        // node attributes: LWW per node per register — keep the register with the greater order key.
+        for (node, st) in &other.node_attrs {
+            let me = self.node_attrs.entry(*node).or_default();
+            if let Some((ok, ty)) = st.ty
+                && me.ty.is_none_or(|(cur, _)| ok > cur)
+            {
+                me.ty = Some((ok, ty));
+            }
+            if let Some((ok, label)) = st.label
+                && me.label.is_none_or(|(cur, _)| ok > cur)
+            {
+                me.label = Some((ok, label));
+            }
+        }
     }
 
     /// Drop state dominated by the hard-delete floor; provably preserves `observe()`.
+    ///
+    /// `node_attrs` is intentionally untouched: node type/label are set-only LWW registers with no
+    /// hard-delete floor, so there is nothing to collect (nothing is ever dominated-and-removable).
     pub fn gc(&mut self) {
         for st in self.keys.values_mut() {
             match st {
@@ -433,6 +511,11 @@ impl Fold {
             self.keys.keys().chain(self.edge_props.keys()).collect();
         for k in keys {
             self.observe_key_into(k, &mut snap);
+        }
+        // node attributes live in a disjoint region of the snapshot (node_types/node_labels), so
+        // projecting them independently of the graph keys yields the same canonical observation.
+        for node in self.node_attrs.keys() {
+            self.observe_node_into(*node, &mut snap);
         }
         snap
     }
@@ -495,6 +578,24 @@ impl Fold {
                 }
             }
             None => {}
+        }
+    }
+
+    /// Re-observe a single node's attributes (entity type + ABAC label) into an existing snapshot —
+    /// the node-attribute analogue of [`Fold::observe_key_into`]. Removes the node's entries then
+    /// re-projects from its LWW registers (remove-then-reinsert), so an incremental refresh over the
+    /// touched nodes equals a full [`Fold::observe`]. A register with no live value leaves the node
+    /// absent (mirrors observe's omission).
+    pub fn observe_node_into(&self, node: NodeId, snap: &mut Snapshot) {
+        snap.node_types.remove(&node);
+        snap.node_labels.remove(&node);
+        if let Some(st) = self.node_attrs.get(&node) {
+            if let Some((_, ty)) = st.ty {
+                snap.node_types.insert(node, ty);
+            }
+            if let Some((_, label)) = st.label {
+                snap.node_labels.insert(node, label);
+            }
         }
     }
 }

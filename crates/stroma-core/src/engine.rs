@@ -111,18 +111,25 @@ impl Engine {
     /// touched — the driver for incremental Live-Query maintenance (`incremental::Maintained`):
     /// re-check only the rules whose inputs changed instead of recomputing over the whole graph.
     pub fn materialize_tracked(&mut self) -> std::collections::BTreeSet<(NodeId, FieldId)> {
-        let touched = self
+        let (keys, nodes) = self
             .changelog
             .replay_range_into_tracked(self.watermark, &mut self.base);
-        if !touched.is_empty() {
+        if !keys.is_empty() || !nodes.is_empty() {
+            // one copy-on-write of the shared snapshot, then refresh only what the tail touched:
+            // graph keys via observe_key_into, node attributes via observe_node_into.
             let snap = Arc::make_mut(&mut self.base_snap);
-            for k in &touched {
+            for k in &keys {
                 self.base.observe_key_into(k, snap);
+            }
+            for &node in &nodes {
+                self.base.observe_node_into(node, snap);
             }
         }
         self.watermark = self.changelog.head();
         self.changelog.mark_materialized(self.watermark);
-        touched
+        // Public contract unchanged: graph keys only (node-attr touches are internal to the snapshot
+        // refresh; incremental::Maintained keys off `(subject, predicate)`).
+        keys
     }
 
     /// The effective fold: materialized base merged with the bounded un-materialized tail.
@@ -246,8 +253,16 @@ mod tests {
         // mixed workload incl. supersession and removal so incremental observe hits every path
         e.write(0, add(1, 100, 20)).unwrap();
         e.write(0, add(1, 100, 21)).unwrap();
+        e.write(
+            0,
+            WriteKind::SetNodeType {
+                node: 2,
+                type_id: 5,
+            },
+        )
+        .unwrap();
         e.materialize();
-        let held = e.snapshot_arc(); // reader pins a view
+        let held = e.snapshot_arc(); // reader pins a view (node 2 typed 5, no label)
         e.write(
             0,
             WriteKind::SetOne {
@@ -271,15 +286,30 @@ mod tests {
             },
         )
         .unwrap();
+        e.write(
+            0,
+            WriteKind::SetNodeType {
+                node: 2,
+                type_id: 7,
+            },
+        ) // supersedes type 5
+        .unwrap();
+        e.write(0, WriteKind::SetNodeLabel { node: 2, label: 3 })
+            .unwrap();
         e.materialize();
-        // incremental refresh ≡ full observe
+        // incremental refresh ≡ full observe (now also over node attributes)
         assert_eq!(*e.snapshot_arc(), e.snapshot());
-        // pinned reader view unchanged (copy-on-write)
+        // fresh view sees the superseding type + the new label
+        assert_eq!(e.snapshot_arc().node_types.get(&2), Some(&7));
+        assert_eq!(e.snapshot_arc().node_labels.get(&2), Some(&3));
+        // pinned reader view unchanged (copy-on-write): still the pre-pin type, still no label
         assert_eq!(
             query::point_many(&held, 1, 100),
             [ObjKey::Node(20), ObjKey::Node(21)].into_iter().collect()
         );
         assert!(query::point_one(&held, 2, 0).is_none());
+        assert_eq!(held.node_types.get(&2), Some(&5));
+        assert!(held.node_labels.get(&2).is_none());
     }
 
     #[test]
