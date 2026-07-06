@@ -2,7 +2,7 @@
 //! Ports the Phase 0 `poc-fold-determinism` properties onto the engine's `fold` types.
 
 use proptest::prelude::*;
-use stroma_core::{Cardinality, ObjKey, Op, OrderKey, fold};
+use stroma_core::{Cardinality, ObjKey, Op, OrderKey, Snapshot, fold};
 
 const SUBJECTS: u64 = 3;
 const ONE_PREDS: [u32; 2] = [0, 1];
@@ -10,6 +10,10 @@ const MANY_PREDS: [u32; 2] = [100, 101];
 const OBJECTS: u64 = 5;
 const TX: u64 = 3; // small range so transaction-time ties are common (exercises tie-break)
 const SRC: u32 = 3;
+const TYPES: u32 = 3; // small entity-type alphabet for node-attribute ops
+const LABELS: u8 = 4; // small ABAC-label alphabet for node-attribute ops
+// node-attribute ops reuse the SUBJECTS alphabet for node ids, so a node appears as both a graph
+// subject and a node-attribute target (exercises the two disjoint snapshot regions together).
 
 #[derive(Clone, Debug)]
 enum Tmpl {
@@ -59,6 +63,18 @@ enum Tmpl {
         tx: u64,
         src: u32,
     },
+    SetNodeType {
+        node: u64,
+        type_id: u32,
+        tx: u64,
+        src: u32,
+    },
+    SetNodeLabel {
+        node: u64,
+        label: u8,
+        tx: u64,
+        src: u32,
+    },
 }
 
 fn txsrc(t: &Tmpl) -> (u64, u32) {
@@ -68,7 +84,9 @@ fn txsrc(t: &Tmpl) -> (u64, u32) {
         | Tmpl::AddMany { tx, src, .. }
         | Tmpl::RemoveMany { tx, src, .. }
         | Tmpl::HardDelete { tx, src, .. }
-        | Tmpl::SetEdgeProp { tx, src, .. } => (*tx, *src),
+        | Tmpl::SetEdgeProp { tx, src, .. }
+        | Tmpl::SetNodeType { tx, src, .. }
+        | Tmpl::SetNodeLabel { tx, src, .. } => (*tx, *src),
     }
 }
 
@@ -171,6 +189,16 @@ fn materialize(tmpls: &[Tmpl]) -> Vec<Op> {
                     value: ObjKey::Int(*value as i64),
                     ok,
                 },
+                Tmpl::SetNodeType { node, type_id, .. } => Op::SetNodeType {
+                    node: *node,
+                    type_id: *type_id,
+                    ok,
+                },
+                Tmpl::SetNodeLabel { node, label, .. } => Op::SetNodeLabel {
+                    node: *node,
+                    label: *label,
+                    ok,
+                },
             }
         })
         .collect()
@@ -270,6 +298,22 @@ fn tmpl_strategy() -> impl Strategy<Value = Tmpl> {
                     src
                 }
             ),
+        (0..SUBJECTS, 0..TYPES, 0..TX, 0..SRC).prop_map(|(node, type_id, tx, src)| {
+            Tmpl::SetNodeType {
+                node,
+                type_id,
+                tx,
+                src,
+            }
+        }),
+        (0..SUBJECTS, 0..LABELS, 0..TX, 0..SRC).prop_map(|(node, label, tx, src)| {
+            Tmpl::SetNodeLabel {
+                node,
+                label,
+                tx,
+                src,
+            }
+        }),
     ]
 }
 
@@ -289,6 +333,47 @@ fn shuffled(ops: &[Op], seed: u64) -> Vec<Op> {
     let mut idx: Vec<usize> = (0..ops.len()).collect();
     idx.sort_by_key(|&i| splitmix(seed.wrapping_add((i as u64).wrapping_mul(0x0100_0000_01B3))));
     idx.into_iter().map(|i| ops[i].clone()).collect()
+}
+
+/// The `(subject, predicate)` graph keys and the node ids the ops touched — the drivers for an
+/// incremental snapshot refresh (`observe_key_into` over keys, `observe_node_into` over nodes).
+/// Node-attribute ops ([`Op::SetNodeType`]/[`Op::SetNodeLabel`]) are routed by node, never as a
+/// graph key.
+type Touched = (
+    std::collections::BTreeSet<(u64, u32)>,
+    std::collections::BTreeSet<u64>,
+);
+fn touched(ops: &[Op]) -> Touched {
+    let mut keys = std::collections::BTreeSet::new();
+    let mut nodes = std::collections::BTreeSet::new();
+    for op in ops {
+        match op {
+            Op::SetOne {
+                subject, predicate, ..
+            }
+            | Op::CloseOne {
+                subject, predicate, ..
+            }
+            | Op::AddMany {
+                subject, predicate, ..
+            }
+            | Op::RemoveMany {
+                subject, predicate, ..
+            }
+            | Op::HardDelete {
+                subject, predicate, ..
+            }
+            | Op::SetEdgeProp {
+                subject, predicate, ..
+            } => {
+                keys.insert((*subject, *predicate));
+            }
+            Op::SetNodeType { node, .. } | Op::SetNodeLabel { node, .. } => {
+                nodes.insert(*node);
+            }
+        }
+    }
+    (keys, nodes)
 }
 
 proptest! {
@@ -345,5 +430,25 @@ proptest! {
         prop_assert_eq!(&before, &f.observe());
         f.merge(&fold(&ops));
         prop_assert_eq!(&before, &f.observe());
+    }
+
+    /// P5 — incremental refresh equals full observe. Rebuilding a snapshot from empty by re-observing
+    /// only the touched graph keys (`observe_key_into`) and touched nodes (`observe_node_into`) must
+    /// equal a full `observe()` — the invariant the engine's O(tail) snapshot cache depends on, now
+    /// covering node attributes as well as the graph.
+    #[test]
+    fn p5_incr_equals_full(tmpls in workload()) {
+        let ops = materialize(&tmpls);
+        let f = fold(&ops);
+        let full = f.observe();
+        let (keys, nodes) = touched(&ops);
+        let mut incr = Snapshot::default();
+        for k in &keys {
+            f.observe_key_into(k, &mut incr);
+        }
+        for &node in &nodes {
+            f.observe_node_into(node, &mut incr);
+        }
+        prop_assert_eq!(&full, &incr);
     }
 }

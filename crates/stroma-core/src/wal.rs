@@ -164,6 +164,16 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
             put_str(buf, key);
             put_objkey(buf, value);
         }
+        WriteKind::SetNodeType { node, type_id } => {
+            buf.push(6);
+            put_u64(buf, *node);
+            put_u32(buf, *type_id);
+        }
+        WriteKind::SetNodeLabel { node, label } => {
+            buf.push(7);
+            put_u64(buf, *node);
+            buf.push(*label);
+        }
     }
 }
 
@@ -330,6 +340,16 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
                 value,
             }
         }
+        6 => {
+            let node = r.u64()?;
+            let type_id = r.u32()?;
+            WriteKind::SetNodeType { node, type_id }
+        }
+        7 => {
+            let node = r.u64()?;
+            let label = r.u8()?;
+            WriteKind::SetNodeLabel { node, label }
+        }
         _ => return None,
     };
     // Trailing bytes ⇒ a shorter record was mis-framed into a longer slice: reject.
@@ -457,6 +477,30 @@ mod tests {
                 subject: 8,
                 predicate: 4,
                 cardinality: Cardinality::Many,
+            },
+        );
+        roundtrip(
+            3,
+            WriteKind::SetEdgeProp {
+                subject: 8,
+                predicate: 4,
+                object: ObjKey::Node(9),
+                key: "since".into(),
+                value: ObjKey::Int(2020),
+            },
+        );
+        roundtrip(
+            6,
+            WriteKind::SetNodeType {
+                node: 77,
+                type_id: 12,
+            },
+        );
+        roundtrip(
+            0,
+            WriteKind::SetNodeLabel {
+                node: 77,
+                label: 200,
             },
         );
     }
