@@ -48,6 +48,8 @@ struct Auth {
     api_token: String,
     /// Opt-in: allow `POST /reset` to clear the whole database (dev/demo). Off by default.
     allow_reset: bool,
+    /// Opt-in: disable the auth gate entirely (local dev only). Off by default.
+    no_auth: bool,
 }
 
 /// Active session tokens → unix-seconds expiry (in-memory; cleared on restart).
@@ -242,6 +244,8 @@ fn main() {
         api_token: opt(&args, "--api-token", "STROMA_API_TOKEN", ""),
         allow_reset: args.iter().any(|a| a == "--allow-reset")
             || std::env::var("STROMA_ALLOW_RESET").is_ok_and(|v| v == "1" || v == "true"),
+        no_auth: args.iter().any(|a| a == "--no-auth")
+            || std::env::var("STROMA_NO_AUTH").is_ok_and(|v| v == "1" || v == "true"),
     });
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
@@ -265,7 +269,11 @@ fn main() {
         .unwrap_or(4)
         .clamp(2, 32);
     eprintln!("stroma-serve: http://{addr}  (db: {dir}, {workers} workers)");
-    if auth.pass == "password" {
+    if auth.no_auth {
+        eprintln!(
+            "WARNING: auth gate DISABLED (--no-auth / $STROMA_NO_AUTH) — local dev only, never expose this server."
+        );
+    } else if auth.pass == "password" {
         eprintln!(
             "WARNING: default console password in use — set --admin-password / $STROMA_ADMIN_PASSWORD before exposing this server."
         );
@@ -311,8 +319,9 @@ fn main() {
                     continue;
                 }
 
-                // everything else needs a live session (browser) or the API token (programmatic)
-                if !authed(&sessions, &req) && !bearer_authed(&auth, &req) {
+                // everything else needs a live session (browser) or the API token (programmatic),
+                // unless the auth gate is disabled for local dev (--no-auth / $STROMA_NO_AUTH)
+                if !auth.no_auth && !authed(&sessions, &req) && !bearer_authed(&auth, &req) {
                     if method == Method::Get && (path == "/" || path == "/ui") {
                         let _ = req.respond(login_response()); // browser → login page
                     } else {
