@@ -1171,8 +1171,8 @@ fn pick_m(dim: usize) -> usize {
 }
 
 /// All declared node ids (union of typed and labelled nodes), sorted ascending — the source for a
-/// whole-graph view. Sorted because `imbl::HashMap`'s randomized hasher makes iteration order
-/// nondeterministic, but the graph/overview views expect a stable, ordered node set.
+/// whole-graph view. Sorted because a `HashMap`'s iteration order is unspecified, but the
+/// graph/overview views expect a stable, ordered node set.
 fn node_ids(snap: &Snapshot) -> Vec<NodeId> {
     let mut s: BTreeSet<NodeId> = snap.node_types.keys().copied().collect();
     s.extend(snap.node_labels.keys().copied());

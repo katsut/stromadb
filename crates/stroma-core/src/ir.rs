@@ -296,6 +296,8 @@ pub fn run<A: AnnBackend>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
     use crate::fold::{ObjKey, Op, OrderKey, fold};
@@ -353,12 +355,13 @@ mod tests {
             },
         ])
         .observe();
+        let nt = Arc::make_mut(&mut snap.node_types);
         for n in [1u64, 2] {
-            snap.node_types.insert(n, person);
+            nt.insert(n, person);
         }
-        snap.node_types.insert(10, project);
-        snap.node_types.insert(11, project);
-        snap.node_types.insert(20, skill);
+        nt.insert(10, project);
+        nt.insert(11, project);
+        nt.insert(20, skill);
 
         let mut vec = VectorIndex::new(2);
         vec.insert(1, 0, vec![0.0, 0.0]); // person 1 near origin
@@ -421,8 +424,9 @@ mod tests {
             },
         ])
         .observe();
+        let nt = Arc::make_mut(&mut snap.node_types);
         for n in [1u64, 2, 3] {
-            snap.node_types.insert(n, person);
+            nt.insert(n, person);
         }
         let vec = VectorIndex::new(2);
         let ids = |transforms: Vec<Transform>| -> BTreeSet<u64> {
@@ -507,7 +511,7 @@ mod tests {
     #[test]
     fn authz_scopes_the_source() {
         let (mut snap, c, vec) = setup();
-        snap.node_labels.insert(2, 3); // person 2 is sensitive (label 3)
+        Arc::make_mut(&mut snap.node_labels).insert(2, 3); // person 2 is sensitive (label 3)
         let person = c.field_id("Person").unwrap();
         let pl = Pipeline {
             source: Source::TypeAnn {
@@ -581,7 +585,7 @@ mod tests {
     #[test]
     fn ivfpq_backend_scopes_authz_at_source() {
         let (mut snap, c, _) = setup();
-        snap.node_labels.insert(2, 3); // person 2 sensitive
+        Arc::make_mut(&mut snap.node_labels).insert(2, 3); // person 2 sensitive
         let ivf = ivf_backend();
         let person = c.field_id("Person").unwrap();
         let pl = Pipeline {

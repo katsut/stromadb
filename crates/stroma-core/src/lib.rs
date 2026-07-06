@@ -11,6 +11,7 @@ pub mod changelog;
 pub mod engine;
 pub mod fact;
 pub mod fold;
+pub mod hash;
 pub mod hybrid;
 pub mod incremental;
 pub mod ir;
