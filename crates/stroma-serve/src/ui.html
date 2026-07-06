@@ -339,7 +339,7 @@ function initGL() {
     `#version 300 es
      precision mediump float; in float v_w; in float v_hi; uniform vec4 u_edge; uniform vec4 u_hi; uniform float u_selactive; out vec4 o;
      void main(){ float k=clamp(0.6+0.34*(v_w-1.0), 0.5, 1.7); vec3 c=u_edge.rgb; float a=u_edge.a*k;
-       if(u_selactive>0.5){ if(v_hi>0.5){ c=u_hi.rgb; a=u_hi.a*k; } else { a*=0.16; } }  // incident: accent · rest: dimmed
+       if(u_selactive>0.5){ if(v_hi>0.5){ c=u_hi.rgb; a=u_hi.a*k; } else { a*=0.45; } }  // incident: accent · rest: kept faint (not hidden)
        o=vec4(c, a); }`);
   uCamN=gl.getUniformLocation(progN,'u_cam'); uResN=gl.getUniformLocation(progN,'u_res');
   uCamE=gl.getUniformLocation(progE,'u_cam'); uResE=gl.getUniformLocation(progE,'u_res'); uEdgeE=gl.getUniformLocation(progE,'u_edge');
@@ -445,7 +445,7 @@ function drawLabels(){
   }
 }
 addEventListener('resize', resize);
-function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(autoFit && (settle%20===0||settle===0)) fit(); if(settle===0) autoFit=false; } if(gl&&N){ draw(); drawLabels(); } requestAnimationFrame(loop); }
+function loop(){ if(settle>0){ for(let k=0;k<2;k++) step(); settle--; if(autoFit && (settle%20===0||settle===0)) fit(); if(settle===0) autoFit=false; } if(gl){ draw(); drawLabels(); } requestAnimationFrame(loop); }  // draw() clears then returns on N=0, so an empty graph blanks the canvas
 
 function fit(){ if(!N)return; let a=1e9,b=1e9,c=-1e9,d=-1e9; for(let i=0;i<N;i++){ a=Math.min(a,px[i]);b=Math.min(b,py[i]);c=Math.max(c,px[i]);d=Math.max(d,py[i]); }
   const gw=c-a+120, gh=d-b+120; cam.z=Math.min(W/gw,H/gh,2.4); cam.x=-(a+c)/2; cam.y=-(b+d)/2; }
