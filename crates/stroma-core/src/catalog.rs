@@ -89,7 +89,7 @@ pub enum ConstraintError {
     ExpectedValueObject,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Interner {
     by_name: HashMap<String, FieldId>,
     names: Vec<String>,
@@ -124,7 +124,7 @@ fn value_type(v: &Value) -> ValueType {
 
 /// The type catalog. Predicates/types are interned and registered; node→type assignments enable
 /// domain/range validation. Bounded by design (tens–hundreds of predicates).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Catalog {
     interner: Interner,
     types: HashSet<FieldId>,

@@ -99,8 +99,10 @@ fn cli_end_to_end() {
     ]);
     assert!(ok && out.contains("\"ids\":[2]"), "authz search: {out}");
 
+    // durable_head counts every changelog record: 6 node ops (3 nodes × {type, label}) + 4 facts + 1
+    // retract = 11 (node type/label assignments are folded through the changelog now).
     let (ok, out) = stroma(&["stats", "--db", dbs]);
-    assert!(ok && out.contains("\"durable_head\": 5"), "stats: {out}");
+    assert!(ok && out.contains("\"durable_head\": 11"), "stats: {out}");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -20,10 +20,11 @@
 //! `admin`) and `--admin-password`/`$STROMA_ADMIN_PASSWORD` (default `password`, warned). The API
 //! token is `--api-token`/`$STROMA_API_TOKEN` (unset = bearer auth disabled, cookie-only).
 //!
-//! Concurrency: a worker pool shares the database behind an `RwLock` — reads (`/query`, `/stats`,
-//! `/health`) run concurrently; writes (`/ingest`, `/embed`) take the write lock and are exclusive
-//! (reads briefly wait for the duration of a write). Fully lock-free reads *during* a write (over a
-//! pinned snapshot) are a follow-up. Addresses #25.
+//! Concurrency: a worker pool shares the database as a plain `Arc<Db>`. Reads (`/query`) are
+//! lock-free — each pins the current read view (a momentary lock + `Arc` clone) and then runs on it
+//! with no lock held, so an in-flight write never blocks a read. Writes (`/ingest`, `/embed`,
+//! `/reset`) serialize on the database's internal write mutex and publish a fresh read view on
+//! completion. Addresses #25.
 //!
 //! Config: `--db <dir>` / `$STROMA_DB` (default `.`), `--addr <host:port>` / `$STROMA_ADDR`
 //! (default `127.0.0.1:7687`), `--max-unmerged` / `$STROMA_MAX_UNMERGED`. A flag overrides the env
@@ -32,13 +33,13 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::process::exit;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use stroma_db::Db;
 use tiny_http::{Header, Method, Request, Response, Server};
 
-type SharedDb = Arc<RwLock<Db>>;
+type SharedDb = Arc<Db>;
 
 /// Console credentials (flag/env, default `admin`/`password`) plus an optional API token for
 /// programmatic clients. An empty `api_token` disables bearer auth (cookie-only, as before).
@@ -184,26 +185,22 @@ fn handle(db: &SharedDb, req: &mut Request) -> (u16, Value) {
     let path = url.split('?').next().unwrap_or("");
     match (req.method(), path) {
         (Method::Get, "/health") => (200, json!({ "status": "ok" })),
-        // reads: shared lock (concurrent). recover from a poisoned lock rather than crash the pool.
-        (Method::Get, "/stats") => (200, db.read().unwrap_or_else(|e| e.into_inner()).stats()),
+        // reads: lock-free over a pinned read view (query internally pins the current Arc<ReadState>).
+        (Method::Get, "/stats") => (200, db.stats()),
         (Method::Post, "/query") => {
             let body = read_body(req);
             match serde_json::from_str::<Value>(&body) {
-                Ok(v) => match db.read().unwrap_or_else(|e| e.into_inner()).query(&v) {
+                Ok(v) => match db.query(&v) {
                     Ok(r) => (200, r),
                     Err(e) => (400, json!({ "error": e })),
                 },
                 Err(e) => (400, json!({ "error": format!("bad json: {e}") })),
             }
         }
-        // writes: exclusive lock.
+        // writes: serialize on the database's internal write mutex, then publish a fresh read view.
         (Method::Post, "/ingest") => {
             let body = read_body(req);
-            match db
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .ingest_str(&body)
-            {
+            match db.ingest_str(&body) {
                 Ok(s) => (
                     200,
                     json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "durable_head": s.durable_head }),
@@ -213,11 +210,7 @@ fn handle(db: &SharedDb, req: &mut Request) -> (u16, Value) {
         }
         (Method::Post, "/embed") => {
             let body = read_body(req);
-            match db
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .embed_str(&body)
-            {
+            match db.embed_str(&body) {
                 Ok(n) => (200, json!({ "embedded": n })),
                 Err(e) => (400, json!({ "error": e })),
             }
@@ -251,7 +244,7 @@ fn main() {
 
     // open_or_init: a fresh directory (e.g. an empty Docker volume) is created on first run.
     let db: SharedDb = match Db::open_or_init_with(std::path::Path::new(&dir), n_max) {
-        Ok(db) => Arc::new(RwLock::new(db)),
+        Ok(db) => Arc::new(db),
         Err(e) => {
             eprintln!("error: {e}");
             exit(1);
@@ -346,7 +339,7 @@ fn main() {
                             &json!({ "error": "reset is disabled (start with --allow-reset to enable)" }),
                         ));
                     } else {
-                        let r = db.write().unwrap_or_else(|e| e.into_inner()).reset();
+                        let r = db.reset();
                         match r {
                             Ok(()) => {
                                 let _ = req.respond(json_response(200, &json!({ "ok": true })));
@@ -366,7 +359,7 @@ fn main() {
                         .and_then(|s| s.split('&').next())
                         .and_then(|s| s.parse::<u64>().ok())
                         .unwrap_or(0);
-                    let head_now = || db.read().unwrap_or_else(|e| e.into_inner()).durable_head();
+                    let head_now = || db.durable_head();
                     let mut head = head_now();
                     let mut waited = 0u32;
                     while head == since && waited < 20_000 {

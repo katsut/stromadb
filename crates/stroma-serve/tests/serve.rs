@@ -60,7 +60,7 @@ fn serve_health_query_ingest() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("db");
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
@@ -221,7 +221,7 @@ fn serve_api_token_auth() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("db");
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
@@ -304,7 +304,7 @@ fn serve_reset_when_enabled() {
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("db");
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",

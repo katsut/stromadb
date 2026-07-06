@@ -66,7 +66,9 @@ fn main() {
     let ctr = centers();
     let data = gen_vecs(N, 42, &ctr);
 
-    // catalog: every node is a Doc; `refs` is a Doc→Doc relation; authz label = node % 4.
+    // catalog: every node is a Doc; `refs` is a Doc→Doc relation; authz label = node % 4. Node
+    // type/label attributes reach the read path via the snapshot (SetNodeType/SetNodeLabel ops seeded
+    // below), so `run` scopes on the snapshot — the catalog only interns the type/predicate names.
     let mut cat = Catalog::new();
     let doc = cat.register_type("Doc");
     let refs = cat.register_predicate(
@@ -76,10 +78,6 @@ fn main() {
         doc,
         Range::Type(doc),
     );
-    for i in 0..N as u64 {
-        cat.set_node_type(i, doc);
-        cat.set_node_label(i, (i % 4) as u8);
-    }
 
     // real vector backend (IVF-PQ), parallel build — nlist scales with N (#30: avoids cell imbalance)
     let mut ivf = IvfPq::new(DIM, IvfPq::suggested_nlist(N), M);
@@ -103,6 +101,20 @@ fn main() {
             .flat_map(|i| {
                 let i = i as u64;
                 [
+                    (
+                        0u32,
+                        WriteKind::SetNodeType {
+                            node: i,
+                            type_id: doc,
+                        },
+                    ),
+                    (
+                        0u32,
+                        WriteKind::SetNodeLabel {
+                            node: i,
+                            label: (i % 4) as u8,
+                        },
+                    ),
                     (
                         0u32,
                         WriteKind::AddMany {
@@ -212,7 +224,7 @@ fn main() {
         for _ in 0..READS_PER_EPOCH {
             let q = queries[read_idx % queries.len()].clone();
             let start = Instant::now();
-            let _ = run(&snap, &cat, &ivf, &pipeline(q), &principal, vv);
+            let _ = run(&snap, &ivf, &pipeline(q), &principal, vv);
             let s = start.elapsed().as_secs_f64();
             read_wall += s;
             lat.push(s * 1e3);
@@ -222,9 +234,12 @@ fn main() {
 
     // --- read latency breakdown (isolate ANN vs authz+type filter vs +expand/IR overhead) ---
     let vv = VersionVector::new(eng.durable_head(), ivf.len() as u64);
-    let keep_cat = |n: u64| {
-        cat.node_label(n).is_none_or(|l| principal.can_see_label(l))
-            && cat.node_type(n) == Some(doc)
+    // authz + type filter read off the pinned snapshot (the read view `run` uses), not the catalog.
+    let keep_snap = |n: u64| {
+        snap.node_labels
+            .get(&n)
+            .is_none_or(|&l| principal.can_see_label(l))
+            && snap.node_types.get(&n) == Some(&doc)
     };
     let mut b_ann = Vec::new();
     let mut b_filt = Vec::new();
@@ -234,10 +249,10 @@ fn main() {
         let _ = ivf.search_rerank(q, K, 8, 256, None, |_| true, |_| true); // pure ANN
         b_ann.push(t.elapsed().as_secs_f64() * 1e3);
         let t = Instant::now();
-        let _ = ivf.search_rerank(q, K, 8, 256, None, |_| true, keep_cat); // + authz/type filter
+        let _ = ivf.search_rerank(q, K, 8, 256, None, |_| true, keep_snap); // + authz/type filter
         b_filt.push(t.elapsed().as_secs_f64() * 1e3);
         let t = Instant::now();
-        let _ = run(&snap, &cat, &ivf, &pipeline(q.to_vec()), &principal, vv); // + expand + IR
+        let _ = run(&snap, &ivf, &pipeline(q.to_vec()), &principal, vv); // + expand + IR
         b_full.push(t.elapsed().as_secs_f64() * 1e3);
     }
     for v in [&mut b_ann, &mut b_filt, &mut b_full] {
