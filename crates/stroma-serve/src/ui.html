@@ -273,6 +273,7 @@ let eW = [];                 // per-edge strength (distinct predicates connectin
 const cam = { x:0, y:0, z:1 };
 let W=0, H=0; const dpr = Math.min(devicePixelRatio||1, 2);
 let dragging=false, moved=false, lastX=0, lastY=0, dragIdx=-1, pinned=new Set();
+let selected=-1;   // clicked node index → highlight only its incident edges + pulse it
 let liveHead=0, liveOn=true, lastReq=null, pollStarted=false;   // live update state
 
 // live=true keeps existing nodes where they are (position-preserving update) and doesn't re-fit —
@@ -282,7 +283,7 @@ function loadGraph(nodes, edges, live) {
   const prev = live ? new Map() : null;
   const pinnedIds = live ? [...pinned].map(i=>ids[i]) : [];
   if (live) for (let i=0;i<N;i++) prev.set(ids[i], [px[i],py[i],vx[i],vy[i]]);
-  dragIdx = -1; if (!live) pinned.clear();
+  dragIdx = -1; selected = -1; if (!live) pinned.clear();
   N = nodes.length; ids = new Array(N); idx = new Map(); depth = new Array(N); names = new Array(N); counts = new Array(N);
   px = new Float32Array(N); py = new Float32Array(N); vx = new Float32Array(N); vy = new Float32Array(N);
   nodes.forEach((nd,i) => { ids[i]=nd.id; idx.set(nd.id,i); depth[i]=nd.depth; names[i]=nd.name||null; counts[i]=(nd.count!=null?nd.count:null);
@@ -303,7 +304,7 @@ function updateNodeCandidates(){ for(let i=0;i<N;i++){ if(names[i]) _cand.set(id
 
 // ---------- WebGL2 ----------
 const cv = $('cv'); let gl = cv.getContext('webgl2', { antialias:true, alpha:true });
-let progN, progE, vaoN, vaoE, bufPos, bufCol, bufSize, bufEdge, bufEdgeW, uCamN, uCamE, uResN, uResE, uEdgeE, uGlowN, edgeCount=0;
+let progN, progE, vaoN, vaoE, bufPos, bufCol, bufSize, bufEdge, bufEdgeW, bufEdgeHi, uCamN, uCamE, uResN, uResE, uEdgeE, uGlowN, uSelN, uTimeN, uEdgeHiE, uSelActE, edgeCount=0;
 let edgeRGBA=[.5,.6,1.,.42]; let additive=true;
 function sh(type, src){ const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s); if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s)); return s; }
 function prog(vs, fs){ const p=gl.createProgram(); gl.attachShader(p,sh(gl.VERTEX_SHADER,vs)); gl.attachShader(p,sh(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p); return p; }
@@ -313,30 +314,39 @@ function initGL() {
   const camXform = `vec2 sxy=(a_pos+u_cam.xy)*u_cam.z+u_res*.5; vec2 clip=sxy/u_res*2.0-1.0; clip.y=-clip.y;`;
   progN = prog(
     `#version 300 es
-     in vec2 a_pos; in vec3 a_col; in float a_size; uniform vec3 u_cam; uniform vec2 u_res; out vec3 v_col;
-     void main(){ ${camXform} gl_Position=vec4(clip,0.,1.); gl_PointSize=max(a_size*u_cam.z, 3.0); v_col=a_col; }`,
+     in vec2 a_pos; in vec3 a_col; in float a_size; uniform vec3 u_cam; uniform vec2 u_res; uniform float u_sel; uniform float u_time; out vec3 v_col; out float v_sel;
+     void main(){ ${camXform} gl_Position=vec4(clip,0.,1.);
+       float sz=a_size; v_sel=0.0;
+       if(u_sel>=0.0 && gl_VertexID==int(u_sel)){ sz*=1.35+0.18*sin(u_time*4.0); v_sel=1.0; }  // selected: bigger + gentle pulse
+       gl_PointSize=max(sz*u_cam.z, 3.0); v_col=a_col; }`,
     `#version 300 es
-     precision mediump float; in vec3 v_col; uniform float u_glow; out vec4 o;
+     precision mediump float; in vec3 v_col; in float v_sel; uniform float u_glow; out vec4 o;
      void main(){
        vec2 d=gl_PointCoord-vec2(.5); float r=length(d); if(r>.5) discard;
        float cr=.34; float t=clamp(r/cr,0.,1.); float sphere=sqrt(max(0.,1.-t*t));
        vec3 body=v_col*(0.42+0.58*sphere);                                  // shaded metal sphere
        float spec=smoothstep(.24,0.,distance(gl_PointCoord,vec2(.37,.32))); // off-centre highlight
        body+=spec*(0.55+0.4*u_glow);                                        // metallic sheen
+       body+=v_sel*0.30;                                                    // selected: brighter
        float disc=smoothstep(cr+.03,cr-.02,r);                              // crisp orb
        float halo=smoothstep(.5,cr,r)*u_glow*.6;                            // cosmic outer glow
+       halo=max(halo, v_sel*smoothstep(.5,cr,r)*.45);                       // selected: extra glow ring
        o=vec4(body, max(disc, halo)); }`);
   progE = prog(
     `#version 300 es
-     in vec2 a_pos; in float a_w; uniform vec3 u_cam; uniform vec2 u_res; out float v_w;
-     void main(){ ${camXform} gl_Position=vec4(clip,0.,1.); v_w=a_w; }`,
+     in vec2 a_pos; in float a_w; in float a_hi; uniform vec3 u_cam; uniform vec2 u_res; out float v_w; out float v_hi;
+     void main(){ ${camXform} gl_Position=vec4(clip,0.,1.); v_w=a_w; v_hi=a_hi; }`,
     `#version 300 es
-     precision mediump float; in float v_w; uniform vec4 u_edge; out vec4 o;
-     void main(){ float k=clamp(0.6+0.34*(v_w-1.0), 0.5, 1.7); o=vec4(u_edge.rgb, u_edge.a*k); }`);
+     precision mediump float; in float v_w; in float v_hi; uniform vec4 u_edge; uniform vec4 u_hi; uniform float u_selactive; out vec4 o;
+     void main(){ float k=clamp(0.6+0.34*(v_w-1.0), 0.5, 1.7); vec3 c=u_edge.rgb; float a=u_edge.a*k;
+       if(u_selactive>0.5){ if(v_hi>0.5){ c=u_hi.rgb; a=u_hi.a*k; } else { a*=0.16; } }  // incident: accent · rest: dimmed
+       o=vec4(c, a); }`);
   uCamN=gl.getUniformLocation(progN,'u_cam'); uResN=gl.getUniformLocation(progN,'u_res');
   uCamE=gl.getUniformLocation(progE,'u_cam'); uResE=gl.getUniformLocation(progE,'u_res'); uEdgeE=gl.getUniformLocation(progE,'u_edge');
   uGlowN=gl.getUniformLocation(progN,'u_glow');
-  bufPos=gl.createBuffer(); bufCol=gl.createBuffer(); bufSize=gl.createBuffer(); bufEdge=gl.createBuffer(); bufEdgeW=gl.createBuffer();
+  uSelN=gl.getUniformLocation(progN,'u_sel'); uTimeN=gl.getUniformLocation(progN,'u_time');
+  uEdgeHiE=gl.getUniformLocation(progE,'u_hi'); uSelActE=gl.getUniformLocation(progE,'u_selactive');
+  bufPos=gl.createBuffer(); bufCol=gl.createBuffer(); bufSize=gl.createBuffer(); bufEdge=gl.createBuffer(); bufEdgeW=gl.createBuffer(); bufEdgeHi=gl.createBuffer();
   vaoN=gl.createVertexArray(); vaoE=gl.createVertexArray();
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   $('rtag').innerHTML='renderer <b>WebGL2</b>';
@@ -364,10 +374,13 @@ function buildBuffers() {
   const ew=new Float32Array(edgeCount); for(let k=0;k<eW.length;k++){ ew[2*k]=eW[k]; ew[2*k+1]=eW[k]; }
   gl.bindBuffer(gl.ARRAY_BUFFER,bufEdgeW); gl.bufferData(gl.ARRAY_BUFFER, ew, gl.STATIC_DRAW);
   let lw=gl.getAttribLocation(progE,'a_w'); gl.enableVertexAttribArray(lw); gl.vertexAttribPointer(lw,1,gl.FLOAT,false,0,0);
+  // per-edge highlight flag (1 = incident to the selected node) — filled each frame in draw()
+  gl.bindBuffer(gl.ARRAY_BUFFER,bufEdgeHi); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(edgeCount), gl.DYNAMIC_DRAW);
+  let lh=gl.getAttribLocation(progE,'a_hi'); gl.enableVertexAttribArray(lh); gl.vertexAttribPointer(lh,1,gl.FLOAT,false,0,0);
   gl.bindVertexArray(null);
-  posBuf=new Float32Array(N*2); edgeBuf=new Float32Array(edgeCount*2);
+  posBuf=new Float32Array(N*2); edgeBuf=new Float32Array(edgeCount*2); edgeHiBuf=new Float32Array(edgeCount);
 }
-let posBuf, edgeBuf;
+let posBuf, edgeBuf, edgeHiBuf;
 
 // ---------- layout: grid-accelerated repulsion + spring ----------
 let settle=0, autoFit=false;
@@ -391,13 +404,19 @@ function draw() {
   gl.blendFunc(gl.SRC_ALPHA, additive?gl.ONE:gl.ONE_MINUS_SRC_ALPHA);
   // edges
   for(let e=0,o=0;e<ePairs.length;e+=2){ const i=ePairs[e], j=ePairs[e+1]; edgeBuf[o++]=px[i]; edgeBuf[o++]=py[i]; edgeBuf[o++]=px[j]; edgeBuf[o++]=py[j]; }
+  for(let e=0,v=0;e<ePairs.length;e+=2){ const hi=(selected>=0 && (ePairs[e]===selected||ePairs[e+1]===selected))?1:0; edgeHiBuf[v++]=hi; edgeHiBuf[v++]=hi; }
   gl.useProgram(progE); gl.uniform3fv(uCamE,camv); gl.uniform2fv(uResE,res); gl.uniform4fv(uEdgeE,edgeRGBA);
-  gl.bindVertexArray(vaoE); gl.bindBuffer(gl.ARRAY_BUFFER,bufEdge); gl.bufferData(gl.ARRAY_BUFFER,edgeBuf,gl.DYNAMIC_DRAW);
+  gl.uniform4f(uEdgeHiE, 0.216,0.839,0.659, 0.95); gl.uniform1f(uSelActE, selected>=0?1:0);  // incident-edge accent (teal)
+  gl.bindVertexArray(vaoE);
+  gl.bindBuffer(gl.ARRAY_BUFFER,bufEdge); gl.bufferData(gl.ARRAY_BUFFER,edgeBuf,gl.DYNAMIC_DRAW);
   const le=gl.getAttribLocation(progE,'a_pos'); gl.enableVertexAttribArray(le); gl.vertexAttribPointer(le,2,gl.FLOAT,false,0,0);
+  gl.bindBuffer(gl.ARRAY_BUFFER,bufEdgeHi); gl.bufferData(gl.ARRAY_BUFFER,edgeHiBuf,gl.DYNAMIC_DRAW);
+  const lh=gl.getAttribLocation(progE,'a_hi'); gl.enableVertexAttribArray(lh); gl.vertexAttribPointer(lh,1,gl.FLOAT,false,0,0);
   gl.drawArrays(gl.LINES,0,edgeCount);
   // nodes
   for(let i=0;i<N;i++){ posBuf[i*2]=px[i]; posBuf[i*2+1]=py[i]; }
   gl.useProgram(progN); gl.uniform3fv(uCamN,camv); gl.uniform2fv(uResN,res); gl.uniform1f(uGlowN, additive?1.:0.);
+  gl.uniform1f(uSelN, selected); gl.uniform1f(uTimeN, performance.now()*0.001);  // pulse the selected node
   gl.bindVertexArray(vaoN); gl.bindBuffer(gl.ARRAY_BUFFER,bufPos); gl.bufferData(gl.ARRAY_BUFFER,posBuf,gl.DYNAMIC_DRAW);
   const lp=gl.getAttribLocation(progN,'a_pos'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp,2,gl.FLOAT,false,0,0);
   gl.drawArrays(gl.POINTS,0,N);
@@ -440,7 +459,7 @@ addEventListener('mousemove',e=>{
   if(dragIdx>=0){ const rc=cv.getBoundingClientRect(); const [wx,wy]=world(e.clientX-rc.left, e.clientY-rc.top); px[dragIdx]=wx; py[dragIdx]=wy; vx[dragIdx]=0; vy[dragIdx]=0; lastX=e.clientX; lastY=e.clientY; return; }
   if(!dragging)return; cam.x+=dx/cam.z; cam.y+=dy/cam.z; lastX=e.clientX; lastY=e.clientY; });
 addEventListener('mouseup',e=>{
-  if(dragIdx>=0){ if(moved) pinned.add(dragIdx); else showDetail(ids[dragIdx], depth[dragIdx]); dragIdx=-1; cv.classList.remove('drag'); return; }
+  if(dragIdx>=0){ if(moved) pinned.add(dragIdx); else { selected=dragIdx; showDetail(ids[dragIdx], depth[dragIdx]); } dragIdx=-1; cv.classList.remove('drag'); return; }
   if(dragging&&!moved) pick(e); dragging=false; cv.classList.remove('drag'); });
 cv.addEventListener('wheel',e=>{ e.preventDefault(); const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left,my=e.clientY-rc.top; const [wx,wy]=world(mx,my); cam.z=Math.max(0.05,Math.min(cam.z*Math.exp(-e.deltaY*0.0016),8)); const [nx,ny]=world(mx,my); cam.x+=nx-wx; cam.y+=ny-wy; },{passive:false});
 $('zin').onclick=()=>cam.z=Math.min(cam.z*1.3,8); $('zout').onclick=()=>cam.z=Math.max(cam.z/1.3,0.05); $('fit').onclick=fit;
@@ -451,7 +470,7 @@ const esc = s => (''+s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 function fmtVal(o){ if(o==null) return '∅';
   if(o.node!==undefined) return `<span class="ins-node" onclick="recenter(${o.node})">→ node ${o.node}</span>`;
   if(o.text!==undefined) return esc(o.text); if(o.int!==undefined) return o.int; if(o.float!==undefined) return o.float; if(o.bool!==undefined) return ''+o.bool; return esc(JSON.stringify(o)); }
-window.hideDetail = ()=> $('inspect').classList.add('hidden');
+window.hideDetail = ()=> { selected=-1; $('inspect').classList.add('hidden'); };
 // make the inspect panel floating + draggable by its header
 (function(){ const ins=$('inspect'); let dx=0,dy=0,dragging=false;
   ins.addEventListener('mousedown', e=>{ if(!e.target.closest('.ins-h') || e.target.closest('.ins-x')) return;
@@ -495,9 +514,9 @@ async function showDetail(id, dep){
 function nodeAt(e){ const rc=cv.getBoundingClientRect(); const mx=e.clientX-rc.left, my=e.clientY-rc.top; const [wx,wy]=world(mx,my);
   let best=-1, bd=1e9; for(let i=0;i<N;i++){ const dx=px[i]-wx, dy=py[i]-wy; const d=dx*dx+dy*dy; if(d<bd){bd=d;best=i;} }
   return (best>=0 && bd < (18/cam.z)**2) ? best : -1; }
-function pick(e){ const i=nodeAt(e); if(i<0) return;
+function pick(e){ const i=nodeAt(e); if(i<0){ selected=-1; return; }  // click empty space → clear selection
   if(overviewMode){ const s=overviewSamples.get(ids[i]); if(s!==undefined) recenter(s); return; }  // drill from a cluster into its region
-  showDetail(ids[i], depth[i]); }
+  selected=i; showDetail(ids[i], depth[i]); }
 cv.addEventListener('dblclick', e=>{ const i=nodeAt(e); if(i>=0) recenter(ids[i]); });
 
 // ---------- drill-down history ----------
