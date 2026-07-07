@@ -2,9 +2,9 @@
 
 Core design of the StromaDB engine. Companion to `../SPEC.md`. Technical scope only.
 
-The load-bearing technical bets below were validated in Phase 0 via throwaway kill-switch spikes
+The load-bearing technical bets below were each validated up front with throwaway spikes
 (single-algebra ownership, fold determinism, open-loop warm latency, cross-store snapshot
-consistency, integrated tail, and the type-aware-hybrid quality).
+consistency, integrated tail, and type-aware-hybrid quality).
 
 ## 1. Data model — Fact-centric
 
@@ -57,7 +57,7 @@ consistency, integrated tail, and the type-aware-hybrid quality).
   one engine (validated).
 - Macro planning (which questions, in what order) is the agent's; intelligence is caller-side.
 
-## 6. Type-aware hybrid (CAP-3)
+## 6. Type-aware hybrid
 
 - Vectors are pre-computed and received, stored in a separate quantized index + pointer.
 - **Type-aware hybrid**: ANN candidates are filtered/reranked by graph type/constraints. On a
@@ -79,7 +79,7 @@ consistency, integrated tail, and the type-aware-hybrid quality).
 
 | Half | Where | Content |
 |---|---|---|
-| **Declarative** | DB | predicates, cardinality, properties, types, valid-time policy, embeddings — vocabulary + structural rules + *expectations* (completeness, CAP-12) |
+| **Declarative** | DB | predicates, cardinality, properties, types, valid-time policy, embeddings — vocabulary + structural rules + *expectations* (completeness) |
 | **Procedural** | Caller (LLM) | decision recipes (how predicates are composed into a judgment) |
 
 The declarative half amounts to a lightweight ontology (types, domain/range, cardinality, relation
