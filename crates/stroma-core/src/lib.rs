@@ -8,6 +8,7 @@
 pub mod calendar;
 pub mod catalog;
 pub mod changelog;
+pub mod conformance;
 pub mod engine;
 pub mod fact;
 pub mod fold;

@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 use stroma_core::calendar::Calendar;
 use stroma_core::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
 use stroma_core::changelog::WriteKind;
+use stroma_core::conformance;
 use stroma_core::engine::Engine;
 use stroma_core::fact::NodeId;
 use stroma_core::fold::{ObjKey, Snapshot};
@@ -617,6 +618,7 @@ impl ReadState {
             "overview" => self.overview(req),
             "schema" => Ok(self.schema_view()),
             "pipeline" => self.pipeline(req),
+            "conformance" => self.conformance(req),
             other => Err(format!("unknown op: {other}")),
         }
     }
@@ -1079,6 +1081,40 @@ impl ReadState {
         Ok(json!({ "ids": t.ids, "nodes": nodes }))
     }
 
+    /// Evaluate a declared conformance rule (`req["rule"]`) into deterministic per-subject verdicts.
+    /// Predicate/type names are resolved against the catalog (unknown names are a clear error), then
+    /// [`conformance::evaluate`] composes the existing read primitives into `OK | ABSENT | MISMATCH |
+    /// NOT_APPLICABLE` verdicts, authz-scoped by `allowed_labels` (default all). Returns
+    /// `{ "verdicts": [ { subject, verdict, required, actual, as_of }, .. ] }`.
+    fn conformance(&self, req: &Value) -> DbResult<Value> {
+        let rule = parse_conformance_rule(&req["rule"])?;
+        let missing = conformance::unresolved_names(&rule, &self.schema.cat);
+        if !missing.is_empty() {
+            return Err(format!(
+                "unknown name(s) in conformance rule: {}",
+                missing.join(", ")
+            ));
+        }
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let verdicts = conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels);
+        let out: Vec<Value> = verdicts
+            .into_iter()
+            .map(|v| {
+                json!({
+                    "subject": v.subject,
+                    "verdict": v.verdict.as_str(),
+                    "required": v.required.map(fmt_obj),
+                    "actual": v.actual.map(fmt_obj),
+                    "as_of": v.as_of,
+                })
+            })
+            .collect();
+        Ok(json!({ "verdicts": out }))
+    }
+
     /// Assemble LLM-ready context from a hybrid search: for each hit, the *current* value of the
     /// `content` predicate plus a calendar-framed stamp of its `date` predicate (weekday, days
     /// relative to `as_of`, business-hours, fiscal quarter), ordered oldest→newest. An optional
@@ -1302,6 +1338,51 @@ fn value_key(v: &Value) -> DbResult<ObjKey> {
         Value::Number(n) => Ok(ObjKey::Float((n.as_f64().unwrap() as f32 as f64).to_bits())),
         _ => Err("edge-property value must be a number, string, or bool".into()),
     }
+}
+
+/// Parse a conformance rule from its JSON declaration into the name-based [`conformance::Rule`]
+/// (names are resolved to field ids later, at evaluation, via the catalog).
+fn parse_conformance_rule(v: &Value) -> DbResult<conformance::Rule> {
+    let subject_type = v["subject_type"]
+        .as_str()
+        .ok_or("rule.subject_type missing")?
+        .to_string();
+    let actual = v["actual"]
+        .as_str()
+        .ok_or("rule.actual missing")?
+        .to_string();
+    let hops_v = v["required"]["hops"]
+        .as_array()
+        .ok_or("rule.required.hops missing")?;
+    let mut required = Vec::with_capacity(hops_v.len());
+    for h in hops_v {
+        let predicate = h["predicate"]
+            .as_str()
+            .ok_or("rule.required hop predicate missing")?
+            .to_string();
+        let as_of = h.get("as_of").and_then(|a| a.as_str()).map(str::to_string);
+        required.push(conformance::Hop { predicate, as_of });
+    }
+    Ok(conformance::Rule {
+        subject_type,
+        scope: parse_conformance_cond(&v["scope"])?,
+        required,
+        actual,
+        absent_when: parse_conformance_cond(&v["absent_when"])?,
+    })
+}
+
+/// Parse an optional `{ "predicate": name, "equals": scalar }` condition (absent/null → `None`).
+fn parse_conformance_cond(v: &Value) -> DbResult<Option<conformance::Cond>> {
+    if v.is_null() {
+        return Ok(None);
+    }
+    let predicate = v["predicate"]
+        .as_str()
+        .ok_or("conformance condition predicate missing")?
+        .to_string();
+    let equals = value_key(&v["equals"])?;
+    Ok(Some(conformance::Cond { predicate, equals }))
 }
 
 fn fmt_obj(o: ObjKey) -> Value {
