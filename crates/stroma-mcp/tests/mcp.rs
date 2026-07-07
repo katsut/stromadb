@@ -82,7 +82,10 @@ fn mcp_initialize_list_call() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(
-        names.contains(&"schema") && names.contains(&"search") && names.contains(&"expand"),
+        names.contains(&"schema")
+            && names.contains(&"search")
+            && names.contains(&"expand")
+            && names.contains(&"conformance"),
         "tools: {names:?}"
     );
 
@@ -131,6 +134,97 @@ fn mcp_initialize_list_call() {
     // unknown method → JSON-RPC error
     let r = mcp.call(json!({"jsonrpc":"2.0","id":6,"method":"bogus"}));
     assert_eq!(r["error"]["code"], -32601, "err: {r}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn mcp_conformance() {
+    let base = std::env::temp_dir().join(format!("stroma_mcp_conf_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // A tiny release-approval graph: department 1's manager transfers Alice(10) → Carol(12) at
+    // valid-time 5000 (a one-cardinality `manager-of` that changes). The required derived path is
+    // Issue --assigned-to--> Person --member-of--> Department --manager-of (as-of `approved-at`)-->
+    // Person, compared to the issue's `approved-by`. Issue 1001 was approved at 1200 (Alice still
+    // manager) → OK; issue 1002 was approved at 6000 (Carol is manager, but Alice held the role
+    // before the transfer) → MISMATCH with kind `stale`.
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Department\"}}\n",
+        "{\"type_def\":{\"name\":\"Issue\"}}\n",
+        "{\"pred_def\":{\"name\":\"member-of\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Department\"}}\n",
+        "{\"pred_def\":{\"name\":\"manager-of\",\"cardinality\":\"one\",\"domain\":\"Department\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"approved-by\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"approved-at\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range_value\":\"int\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Department\"}}\n",
+        "{\"node\":{\"id\":10,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":12,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":201,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1001,\"type\":\"Issue\"}}\n",
+        "{\"node\":{\"id\":1002,\"type\":\"Issue\"}}\n",
+        "{\"fact\":{\"subject\":201,\"predicate\":\"member-of\",\"object\":{\"node\":1},\"valid_from\":1000}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"manager-of\",\"object\":{\"node\":10},\"valid_from\":1000}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"manager-of\",\"object\":{\"node\":12},\"valid_from\":5000}}\n",
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"assigned-to\",\"object\":{\"node\":201}}}\n",
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"approved-at\",\"object\":{\"int\":1200}}}\n",
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+        "{\"fact\":{\"subject\":1002,\"predicate\":\"assigned-to\",\"object\":{\"node\":201}}}\n",
+        "{\"fact\":{\"subject\":1002,\"predicate\":\"approved-at\",\"object\":{\"int\":6000}}}\n",
+        "{\"fact\":{\"subject\":1002,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":6000}}\n",
+    ))
+    .unwrap();
+    drop(db);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stroma-mcp"))
+        .args(["--db", dir.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut mcp = Mcp {
+        child,
+        stdin,
+        stdout,
+    };
+
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
+    assert_eq!(r["result"]["serverInfo"]["name"], "stroma-mcp", "init: {r}");
+
+    // tools/call conformance → deterministic per-subject verdicts for the declared rule.
+    let rule = json!({
+        "subject_type": "Issue",
+        "required": { "hops": [
+            { "predicate": "assigned-to" },
+            { "predicate": "member-of" },
+            { "predicate": "manager-of", "as_of": "approved-at" }
+        ] },
+        "actual": "approved-by"
+    });
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{"name":"conformance","arguments":{"rule":rule}}}));
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    let out: Value = serde_json::from_str(text).unwrap();
+    let verdicts = out["verdicts"].as_array().unwrap();
+
+    // 1001 approved at 1200 while Alice(10) was still the manager → OK.
+    let v1001 = verdicts.iter().find(|v| v["subject"] == 1001).unwrap();
+    assert_eq!(v1001["verdict"], "OK", "1001: {v1001}");
+
+    // 1002 approved at 6000: as-of that anchor the required manager is Carol(12), not the approver
+    // Alice(10) → MISMATCH; Alice held the role before the 5000 transfer → kind `stale`.
+    let v1002 = verdicts.iter().find(|v| v["subject"] == 1002).unwrap();
+    assert_eq!(v1002["verdict"], "MISMATCH", "1002: {v1002}");
+    assert_eq!(v1002["kind"], "stale", "1002 kind: {v1002}");
+    assert_eq!(v1002["required"], json!({ "node": 12 }));
+    assert_eq!(v1002["actual"], json!({ "node": 10 }));
+    assert_eq!(v1002["as_of"], json!(6000));
 
     let _ = std::fs::remove_dir_all(&base);
 }

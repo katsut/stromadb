@@ -1,8 +1,9 @@
 //! `stroma-mcp` — a Model Context Protocol server exposing a StromaDB database as tools an LLM agent
 //! can call directly. Transport: newline-delimited JSON-RPC 2.0 over stdio (the MCP stdio transport).
 //!
-//! Tools: `schema`, `point`, `expand`, `search` (authz-scoped hybrid), `stats`, `ingest`. Read tools
-//! map to `stroma_db::Db::query`; `ingest` writes facts. Requests are handled sequentially (single writer).
+//! Tools: `schema`, `point`, `expand`, `search` (authz-scoped hybrid), `conformance` (declared-rule
+//! per-subject verdicts), `stats`, `ingest`. Read tools map to `stroma_db::Db::query`; `ingest` writes
+//! facts. Requests are handled sequentially (single writer).
 //!
 //! Usage: stroma-mcp --db <dir>   (spoken to by an MCP client over stdin/stdout)
 
@@ -80,6 +81,17 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "conformance",
+            "description": "Evaluate a declared conformance rule and return a deterministic verdict per subject: `OK` / `ABSENT` / `MISMATCH` / `NOT_APPLICABLE` (a `MISMATCH` carries a `kind` of `stale`|`wrong`). Declare the rule and act on the verdicts instead of composing the multi-hop as-of check yourself. Rule shape: `{subject_type, scope?{predicate,equals}, required{hops:[{predicate, as_of?}]}, actual, absent_when?{predicate,equals}}` — `required` is a derived path of one-cardinality hops walked from each subject (the last hop optionally read as-of a valid-time instant given by the `as_of` predicate on the subject), compared against the subject's `actual` predicate. `scope` restricts which subjects are in scope (others are `NOT_APPLICABLE`); `absent_when` marks a missing `actual` as `ABSENT` rather than `OK`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "rule": { "type": "object", "description": "the rule declaration (see description for shape)" }
+                },
+                "required": ["rule"]
+            }
+        },
+        {
             "name": "stats",
             "description": "Database counters: durable head, schema/embedding counts, storage bytes.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -98,7 +110,7 @@ fn tools() -> Value {
 
 fn call_tool(db: &Db, name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "schema" | "point" | "expand" | "search" | "retrieve_context" => {
+        "schema" | "point" | "expand" | "search" | "retrieve_context" | "conformance" => {
             let mut req = args.clone();
             req["op"] = json!(name);
             db.query(&req)
@@ -140,7 +152,7 @@ fn handle(db: &Db, msg: &Value) -> Option<Value> {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "stroma-mcp", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Use `point` for one-cardinality predicates (add `valid_at` for an as-of read) and `expand` for many-cardinality ones. There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node."
+                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Use `point` for one-cardinality predicates (add `valid_at` for an as-of read) and `expand` for many-cardinality ones. There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`."
             }),
         ),
         "ping" => rpc_result(&id, json!({})),
