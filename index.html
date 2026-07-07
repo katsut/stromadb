@@ -144,6 +144,11 @@
   #how{padding:14px 0 8px}
   .flow{max-width:940px;margin:28px auto 0}
   .flow svg{width:100%;height:auto;display:block}
+  /* CJK: wrap at phrase boundaries + kinsoku, so Japanese/Chinese don't break mid-phrase */
+  html:lang(ja) .lede, html:lang(ja) .sublead, html:lang(ja) .cap p, html:lang(ja) .stat .l, html:lang(ja) .perfnote,
+  html:lang(zh) .lede, html:lang(zh) .sublead, html:lang(zh) .cap p, html:lang(zh) .stat .l, html:lang(zh) .perfnote{
+    line-break:strict; word-break:auto-phrase;
+  }
 </style>
 
 <div class="wrap">
@@ -250,8 +255,8 @@
       <div class="cap reveal">
         <svg class="ic" viewBox="0 0 32 32" fill="none" stroke="#37D6A8" stroke-width="1.6"><circle cx="9" cy="16" r="4"/><circle cx="23" cy="9" r="3"/><circle cx="23" cy="23" r="3"/><path d="M12.5 14 20 10M12.5 18 20 22"/></svg>
         <h3>Type-aware hybrid search</h3>
-        <p data-i18n="cap1.p">Vector similarity scoped by node type and graph structure, authz-filtered at the source — so an approximate ANN × a type filter doesn't collapse recall. Types are declared in a lightweight ontology (domain/range, cardinality, relation properties) — no axioms, no reasoner.</p>
-        <div class="m">filtered recall@10 ~1.0 vs ~0.13 plain-ANN</div>
+        <p data-i18n="cap1.p">Vector search filtered by node type, graph structure, and per-user authz — so an approximate match never returns the semantically-close but wrong node. Types come from a lightweight ontology (domain/range, cardinality, relation properties) — no axioms, no reasoner.</p>
+        <div class="m">recall@10 ≈ 1.0 vs ≈ 0.13 (plain ANN)</div>
       </div>
       <div class="cap reveal">
         <svg class="ic" viewBox="0 0 32 32" fill="none" stroke="#37D6A8" stroke-width="1.6"><circle cx="16" cy="16" r="10"/><path d="M16 10v6l4 3"/></svg>
@@ -394,23 +399,23 @@
       zh: `同时兼顾语义、结构与时间的检索 —— 而不是把向量存储硬拼到图数据库上。`
     },
     "cap1.p": {
-      en: `Vector similarity scoped by node type and graph structure, authz-filtered at the source — so an approximate ANN × a type filter doesn't collapse recall. Types are declared in a lightweight ontology (domain/range, cardinality, relation properties) — no axioms, no reasoner.`,
-      ja: `ベクトル類似度をノード型とグラフ構造でスコープし、ソース側で authz フィルタする — 近似 ANN × 型フィルタで recall が崩れないように。型は lightweight ontology（domain/range, cardinality, relation properties）で宣言する — no axioms, no reasoner。`,
-      zh: `向量相似度按节点类型与图结构进行范围限定，并在源头做 authz 过滤 —— 让近似 ANN × 类型过滤不会使 recall 崩塌。类型在一个 lightweight ontology（domain/range, cardinality, relation properties）中声明 —— no axioms, no reasoner。`
+      en: `Vector search filtered by node type, graph structure, and per-user authz — so an approximate match never returns the semantically-close but wrong node. Types come from a lightweight ontology (domain/range, cardinality, relation properties) — no axioms, no reasoner.`,
+      ja: `ベクトル検索を、ノードの型・グラフ構造・ユーザーごとの authz で絞り込みます。だから、意味は近いのに種類が違うノードを誤って返しません。型は軽量な ontology（domain/range・cardinality・関係プロパティ）で宣言します — axiom も reasoner もありません。`,
+      zh: `向量检索按节点类型、图结构以及每个用户的 authz 过滤——因此近似匹配绝不会返回语义相近但类型错误的节点。类型在一个轻量 ontology（domain/range、cardinality、关系属性）中声明——没有 axiom，也没有 reasoner。`
     },
     "cap2.p": {
       en: `Every fact carries a validity interval. Ask for the value in effect at any instant — "who approved this, as of the approval time" — not just the latest write.`,
-      ja: `すべての fact は valid-time の区間を持ちます。任意の時点で有効だった値を問い合わせられる — 「承認時点で、これを承認したのは誰か」— 最新の書き込みだけではなく。`,
+      ja: `すべての fact は valid-time の区間を持ちます。最新の書き込みだけでなく、任意の時点で有効だった値を問い合わせられます — 例：「承認された時点で、承認者は誰だったか」。`,
       zh: `每条 fact 都带有一个 valid-time 区间。可以查询任意时刻当时生效的值 —— “在审批发生的那一刻，是谁批准了它” —— 而不仅仅是最新一次写入。`
     },
     "cap3.p": {
       en: `Lock-free reads over a pinned snapshot: a long streaming ingest never stalls a reader, and each read is snapshot-isolated.`,
-      ja: `pinned なスナップショット上での lock-free な読み取り。長時間のストリーミング取り込みがリーダーを止めることはなく、各読み取りは snapshot-isolated です。`,
+      ja: `固定したスナップショット上を lock-free で読み取ります。長時間のストリーミング取り込みでも読み取りは止まらず、各読み取りは snapshot 分離されています。`,
       zh: `在固定（pinned）快照之上进行 lock-free 读取：长时间的流式摄入绝不会阻塞读取方，且每次读取都是 snapshot-isolated 的。`
     },
     "cap4.p": {
       en: `Evaluate a declared rule over the graph deterministically: what's expected-but-absent, and what's present-but-wrong (with an as-of derived path). No reasoner.`,
-      ja: `宣言したルールをグラフ上で決定的に評価する。期待されるのに存在しないもの、存在するが誤っているもの（as-of で導出したパス付き）を洗い出す。No reasoner。`,
+      ja: `宣言したルールをグラフ上で決定論的に評価します。「あるべきなのに無い」ものと「あるが間違っている」もの（as-of で辿った導出パス付き）を洗い出す。推論エンジンは使いません。`,
       zh: `在图谱上以确定性方式评估已声明的规则：哪些是「应存在却缺失」，哪些是「存在却错误」（附带一条 as-of 推导路径）。No reasoner。`
     },
     "cap5.p": {
@@ -420,7 +425,7 @@
     },
     "cap6.p": {
       en: `Ships a Model Context Protocol server: an LLM discovers the schema and calls the graph as tools — schema, point, expand, search, conformance — over stdio.`,
-      ja: `Model Context Protocol サーバを同梱。LLM がスキーマを discover し、グラフを tools として呼び出す — schema, point, expand, search, conformance — を stdio 経由で。`,
+      ja: `Model Context Protocol サーバを同梱。LLM がスキーマを把握し、グラフを tools（schema・point・expand・search・conformance）として stdio 経由で呼び出せます。`,
       zh: `内置一个 Model Context Protocol 服务器：LLM 发现 schema，并把图谱作为 tools 调用 —— schema、point、expand、search、conformance —— 全部通过 stdio。`
     },
     "perf.sublead": {
@@ -450,8 +455,8 @@
     },
     "perf.note": {
       en: `Rationale &amp; evidence: <span class="mint">docs/DECISIONS.md</span> · probes in <span class="mint">crates/stroma-core/examples/</span>`,
-      ja: `根拠とエビデンス: <span class="mint">docs/DECISIONS.md</span> · probe は <span class="mint">crates/stroma-core/examples/</span>`,
-      zh: `依据与证据: <span class="mint">docs/DECISIONS.md</span> · probe 位于 <span class="mint">crates/stroma-core/examples/</span>`
+      ja: `根拠と実測値は <span class="mint">docs/DECISIONS.md</span>、再現用の probe は <span class="mint">crates/stroma-core/examples/</span> に。`,
+      zh: `依据与实测见 <span class="mint">docs/DECISIONS.md</span>，可复现的 probe 位于 <span class="mint">crates/stroma-core/examples/</span>。`
     },
     "agents.sublead": {
       en: `An LLM is great at orchestration and language, unreliable at exact multi-hop, as-of graph logic. So the engine evaluates declared rules and returns a deterministic verdict; the agent calls it and acts.`,
