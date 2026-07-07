@@ -37,6 +37,18 @@ pub fn point_one_asof(
         .and_then(|(_ok, obj, _vf, _vt)| obj.clone())
 }
 
+/// The interned `source` of the current functional value's winning version — the provenance of the
+/// value [`point_one`] returns. The winner is the greatest-`OrderKey` live row, which is the last
+/// entry of the ascending `one_history`, so this reads that row's `OrderKey.source`. `None` when the
+/// key has no history; a `source` of `0` is the "unset"/unknown sentinel (callers decide how to
+/// surface it — typically by omitting provenance).
+pub fn point_one_source(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<FieldId> {
+    snap.one_history
+        .get(&(subject, predicate))?
+        .last()
+        .map(|(ok, _obj, _vf, _vt)| ok.source)
+}
+
 /// All properties on the edge `(subject, predicate, object)` (empty if none), LWW-resolved.
 pub fn edge_props<'a>(
     snap: &'a Snapshot,
@@ -495,6 +507,61 @@ mod tests {
             point_many(&s, 1, 100),
             [ObjKey::Node(20), ObjKey::Node(21)].into_iter().collect()
         );
+    }
+
+    #[test]
+    fn point_one_source_is_the_winner() {
+        // Two competing SetOne on (1, 5) from different sources, different valid_from. The current
+        // functional value is the greatest-OrderKey write (source 9), so its source is the provenance.
+        let ops = vec![
+            Op::SetOne {
+                subject: 1,
+                predicate: 5,
+                object: ObjKey::Node(100),
+                valid_from: 10,
+                valid_to: None,
+                ok: OrderKey {
+                    tx: 1,
+                    source: 7,
+                    seq: 0,
+                },
+            },
+            Op::SetOne {
+                subject: 1,
+                predicate: 5,
+                object: ObjKey::Node(200),
+                valid_from: 20,
+                valid_to: None,
+                ok: OrderKey {
+                    tx: 2,
+                    source: 9,
+                    seq: 1,
+                },
+            },
+        ];
+        let s = fold(&ops).observe();
+        assert_eq!(point_one(&s, 1, 5), Some(ObjKey::Node(200)));
+        assert_eq!(point_one_source(&s, 1, 5), Some(9));
+    }
+
+    #[test]
+    fn point_one_source_unset_and_absent() {
+        // A write with no source carries the 0 sentinel; an absent key has no source at all.
+        let ops = vec![Op::SetOne {
+            subject: 1,
+            predicate: 5,
+            object: ObjKey::Node(1),
+            valid_from: 0,
+            valid_to: None,
+            ok: OrderKey {
+                tx: 1,
+                source: 0,
+                seq: 0,
+            },
+        }];
+        let s = fold(&ops).observe();
+        assert_eq!(point_one_source(&s, 1, 5), Some(0)); // 0 = unset sentinel
+        assert_eq!(point_one_source(&s, 1, 999), None); // absent key
     }
 
     #[test]
