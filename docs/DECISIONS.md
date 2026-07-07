@@ -215,6 +215,15 @@
 These are deferred by decision, not oversights — the core is validated for a bounded, single-node,
 pre-production workload:
 
+- **Distribution / replication / HA:** the engine is single-node and scale-*up* by design — the bounded
+  per-org envelope (millions–tens-of-millions of nodes, GB-class hot set) is what keeps the hot working
+  set in memory, which is what buys the low-ms reads and the small footprint at once. There is no
+  built-in replication or failover (a single node is a single point of failure); durability rests on the
+  WAL + fsync and a backup/PITR of the authoritative input (changelog + type catalog + embeddings), from
+  which every derived store rebuilds (cold-start RTO 0.81s). A read replica / hot standby fed from the
+  changelog (the single version authority) is future work — a *different axis* from horizontal sharding,
+  which is a non-goal: web-scale (billion-node), multi-region, and petabyte distributed processing are out
+  of scope by design, not gaps.
 - **LSM backend + compaction/checkpoint:** durability is a file-WAL today; without compaction the WAL grows
   and cold-start RTO scales with total history, not live state.
 - **Concurrency:** reads are now lock-free over a pinned snapshot (D19), so reads run during a write; a
