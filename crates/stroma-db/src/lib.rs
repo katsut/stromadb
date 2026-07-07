@@ -251,7 +251,9 @@ impl Db {
     ///
     /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T]}` → `{"one":..}` or `{"many":[..]}`
     ///   (`valid_at` = valid-time as-of read for a One-predicate: the value in effect at instant `T`)
-    /// - `{"op":"expand","subject":N,"predicate":"name"}` → `{"nodes":[..]}`
+    /// - `{"op":"expand","subject":N,"predicate":"name"[,"max_depth":D]}` → `{"nodes":[..]}`
+    ///   (honors the predicate's declared props — symmetric / inverse / transitive; `max_depth`
+    ///   bounds the transitive closure, default 16)
     /// - `{"op":"edge_props","subject":N,"predicate":"name","object":{..}}` → `{"props":{k:v,..}}`
     ///   (properties on the edge `(subject, predicate, object)`; set at ingest via a fact's `props`)
     /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
@@ -598,8 +600,11 @@ impl ReadState {
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
+                // Honor the predicate's declared relationship properties (symmetric / inverse /
+                // transitive); `max_depth` bounds the transitive closure (default 16).
+                let max_depth = req["max_depth"].as_u64().map(|d| d as usize).unwrap_or(16);
                 Ok(
-                    json!({ "nodes": query::expand(&self.snap, subject, pid).into_iter().collect::<Vec<_>>() }),
+                    json!({ "nodes": query::expand_rel(&self.snap, &self.schema.cat, subject, pid, max_depth).into_iter().collect::<Vec<_>>() }),
                 )
             }
             "search" => {
@@ -1375,9 +1380,23 @@ fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
                 _ => Range::Value(ValueType::Text),
             }
         };
+        // Declared relationship properties, evaluated at query time by `expand` (never materialized).
+        // `inverse` names another predicate; intern it to a stable Field-ID even if that predicate's
+        // own pred_def has not arrived yet (a forward reference), so declaration order does not matter.
+        let symmetric = p["symmetric"].as_bool().unwrap_or(false);
+        let transitive = p["transitive"].as_bool().unwrap_or(false);
+        let inverse = p
+            .get("inverse")
+            .and_then(|x| x.as_str())
+            .map(|inv| schema.cat.intern_ref(inv));
+        let props = RelProps {
+            symmetric,
+            transitive,
+            inverse,
+        };
         schema
             .cat
-            .register_predicate(name, c, RelProps::default(), domain_id, range);
+            .register_predicate(name, c, props, domain_id, range);
         schema.cardinality.insert(name.to_string(), c);
         return Ok(());
     }
