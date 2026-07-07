@@ -1,8 +1,8 @@
 //! `stroma-mcp` — a Model Context Protocol server exposing a StromaDB database as tools an LLM agent
 //! can call directly. Transport: newline-delimited JSON-RPC 2.0 over stdio (the MCP stdio transport).
 //!
-//! Tools: `point`, `expand`, `search` (authz-scoped hybrid), `stats`, `ingest`. Read tools map to
-//! `stroma_db::Db::query`; `ingest` writes facts. Requests are handled sequentially (single writer).
+//! Tools: `schema`, `point`, `expand`, `search` (authz-scoped hybrid), `stats`, `ingest`. Read tools
+//! map to `stroma_db::Db::query`; `ingest` writes facts. Requests are handled sequentially (single writer).
 //!
 //! Usage: stroma-mcp --db <dir>   (spoken to by an MCP client over stdin/stdout)
 
@@ -16,13 +16,19 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 fn tools() -> Value {
     json!([
         {
+            "name": "schema",
+            "description": "Discover what is queryable: the registered predicates (each with `card` one|many and its `domain`/`range`) and the node labels in use. Call this first to learn which predicate names exist and their cardinality before composing point/expand queries.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "point",
             "description": "Look up the value(s) of a (subject, predicate) fact. Returns {one:..} for cardinality-one predicates or {many:[..]} for cardinality-many.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "subject": { "type": "integer", "description": "subject node id" },
-                    "predicate": { "type": "string", "description": "predicate name" }
+                    "predicate": { "type": "string", "description": "predicate name" },
+                    "valid_at": { "type": "integer", "description": "as-of valid-time: the value in effect at instant T (for a one-cardinality predicate)" }
                 },
                 "required": ["subject", "predicate"]
             }
@@ -92,7 +98,7 @@ fn tools() -> Value {
 
 fn call_tool(db: &Db, name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "point" | "expand" | "search" | "retrieve_context" => {
+        "schema" | "point" | "expand" | "search" | "retrieve_context" => {
             let mut req = args.clone();
             req["op"] = json!(name);
             db.query(&req)
@@ -133,7 +139,8 @@ fn handle(db: &Db, msg: &Value) -> Option<Value> {
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "stroma-mcp", "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": { "name": "stroma-mcp", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Use `point` for one-cardinality predicates (add `valid_at` for an as-of read) and `expand` for many-cardinality ones. There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node."
             }),
         ),
         "ping" => rpc_result(&id, json!({})),
