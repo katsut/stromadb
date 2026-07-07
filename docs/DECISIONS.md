@@ -8,14 +8,14 @@
 
 ## Method
 
-### D0. De-risk with kill-switches before building
+### D0. Prove risky variables with throwaway probes before building
 - **Context:** an ambitious core (durable versioned graph + vector hybrid + reactive queries) has several
   places it could be fundamentally infeasible.
 - **Decision:** before the full build, prove each scary variable with a cheap, isolated probe; only then
   implement.
 - **Why:** cheapest place to kill a bad idea is before the code exists.
 - **Status:** the `examples/` probes (durability RTO, ANN recall/cost, SSD re-rank, integrated open-loop)
-  are the descendants of those kill-switches and stay in-tree as reproducible checks.
+  are the descendants of those probes and stay in-tree as reproducible checks.
 
 ### D1. Measure only under representative, unfriendly conditions
 - **Context:** early "green" numbers repeatedly turned out to be artifacts of easy conditions (nprobe=1,
@@ -181,7 +181,7 @@
 ### D20. Conformance = a declared rule → deterministic per-subject verdict
 - **Context:** evaluating a multi-hop, as-of compliance rule (e.g. "was this approved by the manager of the
   assignee's department *as of the approval time*") is deterministic, but a caller that re-derives it each
-  time is not: a de-risk found a mid-tier agent, handed only the read primitives, scored 0–13% perfect on
+  time is not: a measurement found a mid-tier agent, handed only the read primitives, scored 0–13% perfect on
   such an audit and dropped the timing-sensitive case even when guided.
 - **Decision:** a `conformance` op evaluates a *declared* rule — a subject type, an optional scope, a
   required derived path (a chain of one-cardinality hops, the last optionally read *as-of* a valid-time
