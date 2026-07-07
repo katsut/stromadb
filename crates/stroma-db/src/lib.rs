@@ -33,6 +33,7 @@ use serde_json::{Value, json};
 use stroma_core::calendar::Calendar;
 use stroma_core::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
 use stroma_core::changelog::WriteKind;
+use stroma_core::completeness;
 use stroma_core::conformance;
 use stroma_core::engine::Engine;
 use stroma_core::fact::NodeId;
@@ -637,6 +638,7 @@ impl ReadState {
             "schema" => Ok(self.schema_view()),
             "pipeline" => self.pipeline(req),
             "conformance" => self.conformance(req),
+            "completeness" => self.completeness(req),
             other => Err(format!("unknown op: {other}")),
         }
     }
@@ -1146,6 +1148,46 @@ impl ReadState {
             })
             .collect();
         Ok(json!({ "verdicts": out }))
+    }
+
+    /// Report, per node of a type, the schema-required predicates that are *absent* — the
+    /// "expected-but-absent" completeness check. The `required` set is an explicit list of predicate
+    /// names given in the request (`{"op":"completeness","type":"Issue","required":["assigned-to",..]}`);
+    /// type + predicate names are resolved against the catalog (unknown names are a clear error), then
+    /// [`completeness::evaluate`] reports, for each node of `type`, the required predicates with no
+    /// value — deterministic (sorted by node id, missing list in request order) and authz-scoped by
+    /// `allowed_labels` (default all). Nodes with every required predicate present are omitted. Returns
+    /// `{ "incomplete": [ { "node": N, "missing": ["P", ..] }, .. ] }`.
+    fn completeness(&self, req: &Value) -> DbResult<Value> {
+        let type_name = req["type"].as_str().ok_or("completeness.type missing")?;
+        let required_v = req["required"]
+            .as_array()
+            .ok_or("completeness.required must be an array of predicate names")?;
+        let mut required: Vec<String> = Vec::with_capacity(required_v.len());
+        for p in required_v {
+            required.push(
+                p.as_str()
+                    .ok_or("completeness.required entries must be strings")?
+                    .to_string(),
+            );
+        }
+        let missing = completeness::unresolved_names(type_name, &required, &self.schema.cat);
+        if !missing.is_empty() {
+            return Err(format!(
+                "unknown name(s) in completeness request: {}",
+                missing.join(", ")
+            ));
+        }
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let incomplete: Vec<Value> =
+            completeness::evaluate(&self.snap, &self.schema.cat, type_name, &required, labels)
+                .into_iter()
+                .map(|i| json!({ "node": i.node, "missing": i.missing }))
+                .collect();
+        Ok(json!({ "incomplete": incomplete }))
     }
 
     /// Assemble LLM-ready context from a hybrid search: for each hit, the *current* value of the
