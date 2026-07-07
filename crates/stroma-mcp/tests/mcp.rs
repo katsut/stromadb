@@ -44,9 +44,11 @@ fn mcp_initialize_list_call() {
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"status\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\"}}\n",
         "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
         "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
         "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"active\"},\"valid_from\":100}}\n",
     ))
     .unwrap();
     drop(db);
@@ -80,14 +82,34 @@ fn mcp_initialize_list_call() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(
-        names.contains(&"search") && names.contains(&"expand"),
+        names.contains(&"schema") && names.contains(&"search") && names.contains(&"expand"),
         "tools: {names:?}"
+    );
+
+    // tools/call schema → predicates are discoverable
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"schema","arguments":{}}}));
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("predicates") && text.contains("knows") && text.contains("status"),
+        "schema: {text}"
     );
 
     // tools/call expand → text content with [2]
     let r = mcp.call(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"expand","arguments":{"subject":1,"predicate":"knows"}}}));
     let text = r["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("[2]"), "call result: {text}");
+
+    // tools/call point with valid_at (as-of read of a one-cardinality predicate)
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"point","arguments":{"subject":1,"predicate":"status","valid_at":150}}}));
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("active"),
+        "point valid_at (in effect): {text}"
+    );
+    // before the value's valid_from → no value in effect
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"point","arguments":{"subject":1,"predicate":"status","valid_at":50}}}));
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(!text.contains("active"), "point valid_at (before): {text}");
 
     // tools/call ingest (write) then read back
     let r = mcp.call(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ingest","arguments":{"jsonl":"{\"fact\":{\"subject\":2,\"predicate\":\"knows\",\"object\":{\"node\":1}}}"}}}));
