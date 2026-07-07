@@ -82,13 +82,13 @@ fn tools() -> Value {
         },
         {
             "name": "conformance",
-            "description": "Evaluate a declared conformance rule and return a deterministic verdict per subject: `OK` / `ABSENT` / `MISMATCH` / `NOT_APPLICABLE` (a `MISMATCH` carries a `kind` of `stale`|`wrong`). Declare the rule and act on the verdicts instead of composing the multi-hop as-of check yourself. Rule shape: `{subject_type, scope?{predicate,equals}, required{hops:[{predicate, as_of?}]}, actual, absent_when?{predicate,equals}}` — `required` is a derived path of one-cardinality hops walked from each subject (the last hop optionally read as-of a valid-time instant given by the `as_of` predicate on the subject), compared against the subject's `actual` predicate. `scope` restricts which subjects are in scope (others are `NOT_APPLICABLE`); `absent_when` marks a missing `actual` as `ABSENT` rather than `OK`.",
+            "description": "Evaluate a declared conformance rule and return a deterministic verdict per subject: `OK` / `ABSENT` / `MISMATCH` / `NOT_APPLICABLE` (a `MISMATCH` carries a `kind` of `stale`|`wrong`). Pass either `rule` (an inline declaration) or `rule_name` (a rule stored earlier via a `rule_def` ingest line). Act on the verdicts instead of composing the multi-hop as-of check yourself. Rule shape: `{subject_type, scope?{predicate,equals}, required{hops:[{predicate, as_of?}]}, actual, absent_when?{predicate,equals}}` — `required` is a derived path of one-cardinality hops walked from each subject (the last hop optionally read as-of a valid-time instant given by the `as_of` predicate on the subject), compared against the subject's `actual` predicate. `scope` restricts which subjects are in scope (others are `NOT_APPLICABLE`); `absent_when` marks a missing `actual` as `ABSENT` rather than `OK`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "rule": { "type": "object", "description": "the rule declaration (see description for shape)" }
-                },
-                "required": ["rule"]
+                    "rule": { "type": "object", "description": "an inline rule declaration (see description for shape)" },
+                    "rule_name": { "type": "string", "description": "the name of a rule stored via a `rule_def` ingest line (alternative to `rule`)" }
+                }
             }
         },
         {

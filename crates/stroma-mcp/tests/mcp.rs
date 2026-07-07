@@ -226,5 +226,26 @@ fn mcp_conformance() {
     assert_eq!(v1002["actual"], json!({ "node": 10 }));
     assert_eq!(v1002["as_of"], json!(6000));
 
+    // Declare the same rule by name (a rule_def ingest), then evaluate via `rule_name` → same verdicts.
+    let rule_def = json!({ "rule_def": { "name": "approval", "rule": rule } }).to_string();
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"ingest","arguments":{"jsonl":rule_def}}}));
+    assert!(
+        r["result"]["isError"] != json!(true),
+        "rule_def ingest: {r}"
+    );
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+        "params":{"name":"conformance","arguments":{"rule_name":"approval"}}}));
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    let out: Value = serde_json::from_str(text).unwrap();
+    let v1002 = out["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["subject"] == 1002)
+        .unwrap();
+    assert_eq!(v1002["verdict"], "MISMATCH", "by name 1002: {v1002}");
+    assert_eq!(v1002["kind"], "stale", "by name 1002 kind: {v1002}");
+
     let _ = std::fs::remove_dir_all(&base);
 }
