@@ -20,6 +20,17 @@ Everything is a **fact**:
 fact = ⟨ subject, predicate, object, valid-time, transaction-time, provenance ⟩
 ```
 
+Nodes and edges are **projections** of this one unit:
+
+```mermaid
+flowchart TB
+  F["<b>fact</b> — the unit of everything<br/>⟨ subject · predicate · object · valid-time · transaction-time · provenance ⟩"]
+  F -->|projected as| N["<b>node</b><br/>id · type · access label"]
+  F -->|projected as an edge| E["<b>edge</b> — object is a node<br/>subject → object, via a predicate"]
+  E -->|may carry| P["<b>edge properties</b><br/>role · level · allocation"]
+  F -->|two clocks| T["<b>bitemporal</b><br/>valid-time interval + transaction-time"]
+```
+
 - **Subjects** are node ids (`u64`). **Objects** are either another node (an edge) or a typed literal
   (int, float, text, bool).
 - **Nodes and edges are projections of facts.** A node carries a `type` and an access-control
