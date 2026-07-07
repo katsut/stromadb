@@ -1,0 +1,14 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  secrets-pii:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Credential & PII check
+        run: bash .github/scripts/pii-check.sh
