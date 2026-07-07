@@ -37,11 +37,11 @@ fn ingest_embed_query_reopen() {
     // reopen: catalog replay + embedding reload must reconstruct the same state
     let db = Db::open(&dir).unwrap();
 
-    // LWW: later valid_from wins
+    // LWW: later valid_from wins (a current One read now also carries additive `confidence`)
     assert_eq!(
         db.query(&json!({"op":"point","subject":1,"predicate":"age"}))
-            .unwrap(),
-        json!({"one":{"int":35}})
+            .unwrap()["one"],
+        json!({"int":35})
     );
     // retract removed node 3
     assert_eq!(
@@ -99,8 +99,8 @@ fn valid_to_ingest_and_asof_read() {
     // without valid_at, point returns the asserted current value (wall-clock-free).
     assert_eq!(
         db.query(&json!({"op":"point","subject":1,"predicate":"member-of"}))
-            .unwrap(),
-        json!({ "one": { "node": 9 } })
+            .unwrap()["one"],
+        json!({ "node": 9 })
     );
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
@@ -147,8 +147,8 @@ fn reset_clears_the_database() {
     let db = Db::open(&dir).unwrap();
     assert_eq!(
         db.query(&json!({"op":"point","subject":1,"predicate":"knows"}))
-            .unwrap(),
-        json!({"one":{"node":2}})
+            .unwrap()["one"],
+        json!({"node":2})
     );
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
@@ -612,12 +612,14 @@ fn provenance_capture_survives_reopen() {
     assert_eq!(r["one"], json!({ "text": "v2" }));
     assert_eq!(r["provenance"], json!("doc-B"));
 
-    // a source-less One value omits provenance entirely (additive, no shape change)
+    // a source-less One value omits provenance entirely (the additive `confidence` is still present
+    // and reports the source-less value as tier "low").
     let r = db
         .query(&json!({"op":"point","subject":1,"predicate":"note"}))
         .unwrap();
-    assert_eq!(r, json!({ "one": { "text": "x" } }));
+    assert_eq!(r["one"], json!({ "text": "x" }));
     assert!(r.get("provenance").is_none());
+    assert_eq!(r["confidence"]["tier"], json!("low"));
 
     // node detail carries the One value's source; the source-less One has no `source`
     let r = db.query(&json!({"op":"node","subject":1})).unwrap();
@@ -634,6 +636,69 @@ fn provenance_capture_survives_reopen() {
         .unwrap();
     assert_eq!(r["one"], json!({ "text": "v2" }));
     assert_eq!(r["provenance"], json!("doc-B"));
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn coarse_confidence_from_provenance() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_conf_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Doc\"}}\n",
+        "{\"pred_def\":{\"name\":\"title\",\"cardinality\":\"one\",\"domain\":\"Doc\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Doc\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Doc\"}}\n",
+        "{\"node\":{\"id\":3,\"type\":\"Doc\"}}\n",
+        // subject 1: the SAME value from two distinct sources → corroborated (high).
+        "{\"fact\":{\"subject\":1,\"predicate\":\"title\",\"object\":{\"text\":\"v1\"},\"valid_from\":10,\"source\":\"doc-A\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"title\",\"object\":{\"text\":\"v1\"},\"valid_from\":20,\"source\":\"doc-B\"}}\n",
+        // subject 2: a single sourced value → medium.
+        "{\"fact\":{\"subject\":2,\"predicate\":\"title\",\"object\":{\"text\":\"v2\"},\"valid_from\":10,\"source\":\"doc-A\"}}\n",
+        // subject 3: no source → low.
+        "{\"fact\":{\"subject\":3,\"predicate\":\"title\",\"object\":{\"text\":\"v3\"},\"valid_from\":10}}\n",
+    ))
+    .unwrap();
+
+    // corroborated → high; raw signals expose corroboration == sources == 2; no `now` → no age.
+    let r = db
+        .query(&json!({"op":"point","subject":1,"predicate":"title"}))
+        .unwrap();
+    assert_eq!(r["confidence"]["tier"], json!("high"));
+    assert_eq!(r["confidence"]["corroboration"], json!(2));
+    assert_eq!(r["confidence"]["sources"], json!(2));
+    assert!(r["confidence"].get("age").is_none());
+
+    // single source → medium
+    let r = db
+        .query(&json!({"op":"point","subject":2,"predicate":"title"}))
+        .unwrap();
+    assert_eq!(r["confidence"]["tier"], json!("medium"));
+    assert_eq!(r["confidence"]["corroboration"], json!(1));
+
+    // source-less → low
+    let r = db
+        .query(&json!({"op":"point","subject":3,"predicate":"title"}))
+        .unwrap();
+    assert_eq!(r["confidence"]["tier"], json!("low"));
+    assert_eq!(r["confidence"]["corroboration"], json!(0));
+
+    // corroborated but stale (now ≫ valid_from, small max_age) → low; age is exposed.
+    let r = db
+        .query(&json!({"op":"point","subject":1,"predicate":"title","now":1000,"max_age":100}))
+        .unwrap();
+    assert_eq!(r["confidence"]["tier"], json!("low"));
+    assert_eq!(r["confidence"]["age"], json!(980)); // 1000 - valid_from(20)
+
+    // an as-of read omits confidence entirely (identical old shape).
+    let r = db
+        .query(&json!({"op":"point","subject":1,"predicate":"title","valid_at":15}))
+        .unwrap();
+    assert!(r.get("confidence").is_none());
 
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
