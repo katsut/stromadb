@@ -249,8 +249,12 @@ impl Db {
 
     /// Pin the current read view and run a JSON query on it with no lock held (lock-free read).
     ///
-    /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T]}` → `{"one":..}` or `{"many":[..]}`
-    ///   (`valid_at` = valid-time as-of read for a One-predicate: the value in effect at instant `T`)
+    /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T][,"now":T,"max_age":A]}` →
+    ///   `{"one":..}` or `{"many":[..]}` (`valid_at` = valid-time as-of read for a One-predicate: the
+    ///   value in effect at instant `T`). A *current* One answer also carries an additive
+    ///   `"confidence"` `{tier, corroboration, sources[, age]}` — a coarse tier plus its raw signals;
+    ///   omitted for an as-of / absent read. `now`/`max_age` supply the freshness reference
+    ///   (`age = now - valid_from`; stale when `age > max_age`).
     /// - `{"op":"expand","subject":N,"predicate":"name"[,"max_depth":D]}` → `{"nodes":[..]}`
     ///   (honors the predicate's declared props — symmetric / inverse / transitive; `max_depth`
     ///   bounds the transitive closure, default 16)
@@ -619,9 +623,31 @@ impl ReadState {
                                     .map(str::to_string)
                             })
                             .flatten();
+                        // A *current* One value (not an as-of read, value present) carries the
+                        // additive confidence signals below; `obj` is consumed building `resp`.
+                        let is_current = valid_at.is_none() && obj.is_some();
                         let mut resp = json!({ "one": obj.map(fmt_obj) });
                         if let Some(p) = provenance {
                             resp["provenance"] = json!(p);
+                        }
+                        // Coarse confidence for a *current* One value (additive; omitted for an
+                        // as-of / absent read, so the shape is then identical to before). The raw
+                        // signals (corroboration, sources, age) accompany the engine's default tier
+                        // so a caller/policy layer can derive its own.
+                        if is_current {
+                            let now = req["now"].as_i64();
+                            let max_age = req["max_age"].as_i64();
+                            let c =
+                                query::confidence_signals(&self.snap, subject, pid, now, max_age);
+                            let mut conf = json!({
+                                "tier": c.tier.as_str(),
+                                "corroboration": c.corroboration,
+                                "sources": c.corroboration,
+                            });
+                            if let Some(age) = c.age {
+                                conf["age"] = json!(age);
+                            }
+                            resp["confidence"] = conf;
                         }
                         resp
                     }

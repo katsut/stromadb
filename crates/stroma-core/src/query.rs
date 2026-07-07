@@ -49,6 +49,98 @@ pub fn point_one_source(snap: &Snapshot, subject: NodeId, predicate: FieldId) ->
         .map(|(ok, _obj, _vf, _vt)| ok.source)
 }
 
+/// A coarse, deterministic confidence tier for a `point` answer — see [`confidence_signals`].
+/// Deliberately three buckets, not a continuous score: the engine reports only what it can observe
+/// from provenance and valid-time, and leaves calibration to a policy layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    Low,
+    Medium,
+    High,
+}
+
+impl Tier {
+    /// Stable lowercase wire name (`"low"` | `"medium"` | `"high"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Tier::Low => "low",
+            Tier::Medium => "medium",
+            Tier::High => "high",
+        }
+    }
+}
+
+/// The raw confidence signals the engine can observe for a cardinality-One `(subject, predicate)`
+/// answer, plus the coarse [`Tier`] derived from them. The raw counts travel with the tier so a
+/// caller/policy layer can apply its own thresholds — the engine's `tier` is a coarse default, not
+/// the last word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConfidenceSignals {
+    /// Number of DISTINCT sources (excluding the `0` unset sentinel) that asserted the current
+    /// winning value. `>= 2` means multiple independent sources agree on the same value.
+    pub corroboration: usize,
+    /// Whether the winning value carries a source (its `OrderKey.source != 0`).
+    pub has_source: bool,
+    /// `now - valid_from` of the winning value when a reference `now` was supplied, else `None`
+    /// (freshness is unknown without a reference time).
+    pub age: Option<i64>,
+    /// The coarse tier derived from the signals above (see [`confidence_signals`]).
+    pub tier: Tier,
+}
+
+/// Derive coarse, deterministic [`ConfidenceSignals`] for a cardinality-One `(subject, predicate)`
+/// answer from the signals the engine actually has — no trust ranking of sources, no continuous
+/// score, no calibration. Everything is read from `one_history`; the winning (current functional)
+/// version is the greatest-`OrderKey` live row = its last entry.
+///
+/// - **corroboration** = distinct non-zero `OrderKey.source` among the live rows whose object equals
+///   the current winning value.
+/// - **has_source** = the winning row's `source != 0`.
+/// - **age** = `now - winning valid_from` when `now` is given, else `None`; **stale** = `max_age`
+///   given and `age > max_age` (both required, so without `now` nothing is ever stale).
+///
+/// Tier: **low** when the value is source-less OR stale; **high** when corroboration `>= 2` and not
+/// stale; **medium** otherwise (a single sourced value, fresh or freshness-unknown). `low` is checked
+/// first, so a source-less or stale value is never `high`.
+pub fn confidence_signals(
+    snap: &Snapshot,
+    subject: NodeId,
+    predicate: FieldId,
+    now: Option<i64>,
+    max_age: Option<i64>,
+) -> ConfidenceSignals {
+    let history = snap.one_history.get(&(subject, predicate));
+    // The winning (current functional) value is the greatest-`OrderKey` live row = the last entry.
+    let winner = history.and_then(|h| h.last());
+    let has_source = winner.is_some_and(|(ok, ..)| ok.source != 0);
+    let corroboration = match winner {
+        Some((_, obj, ..)) => history
+            .into_iter()
+            .flatten()
+            .filter(|(_, o, ..)| o == obj)
+            .map(|(ok, ..)| ok.source)
+            .filter(|&src| src != 0)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        None => 0,
+    };
+    let age = winner.and_then(|(_, _, valid_from, _)| now.map(|n| n - *valid_from));
+    let stale = matches!((age, max_age), (Some(a), Some(m)) if a > m);
+    let tier = if !has_source || stale {
+        Tier::Low
+    } else if corroboration >= 2 {
+        Tier::High
+    } else {
+        Tier::Medium
+    };
+    ConfidenceSignals {
+        corroboration,
+        has_source,
+        age,
+        tier,
+    }
+}
+
 /// All properties on the edge `(subject, predicate, object)` (empty if none), LWW-resolved.
 pub fn edge_props<'a>(
     snap: &'a Snapshot,
@@ -725,6 +817,101 @@ mod tests {
             expand_rel(&s, &c, 1, reaches, 16),
             [1, 2, 3].into_iter().collect()
         );
+    }
+
+    // ---- coarse confidence signals (confidence_signals) ----
+
+    fn ok_src(seq: u64, source: FieldId) -> OrderKey {
+        OrderKey {
+            tx: seq,
+            source,
+            seq,
+        }
+    }
+
+    /// A single One value at `(1, 5)` = Node(100), asserted `valid_from` at `vf` by each of `sources`
+    /// in order (later writes win). A `source` of `0` is the unset sentinel.
+    fn one_value(sources: &[(FieldId, i64)]) -> Snapshot {
+        let ops: Vec<Op> = sources
+            .iter()
+            .enumerate()
+            .map(|(i, &(source, vf))| Op::SetOne {
+                subject: 1,
+                predicate: 5,
+                object: ObjKey::Node(100),
+                valid_from: vf,
+                valid_to: None,
+                ok: ok_src(i as u64, source),
+            })
+            .collect();
+        fold(&ops).observe()
+    }
+
+    #[test]
+    fn confidence_two_distinct_sources_is_high() {
+        // Same value from two distinct sources (7, 9) → corroborated, sourced, fresh → high.
+        let s = one_value(&[(7, 10), (9, 20)]);
+        let c = confidence_signals(&s, 1, 5, None, None);
+        assert_eq!(c.corroboration, 2);
+        assert!(c.has_source);
+        assert_eq!(c.age, None);
+        assert_eq!(c.tier, Tier::High);
+        assert_eq!(c.tier.as_str(), "high");
+    }
+
+    #[test]
+    fn confidence_single_source_is_medium() {
+        let s = one_value(&[(7, 10)]);
+        let c = confidence_signals(&s, 1, 5, None, None);
+        assert_eq!(c.corroboration, 1);
+        assert!(c.has_source);
+        assert_eq!(c.tier, Tier::Medium);
+        assert_eq!(c.tier.as_str(), "medium");
+    }
+
+    #[test]
+    fn confidence_sourceless_is_low() {
+        // The winning value carries the 0 unset sentinel → no source → low; 0 is not corroboration.
+        let s = one_value(&[(0, 10)]);
+        let c = confidence_signals(&s, 1, 5, None, None);
+        assert_eq!(c.corroboration, 0);
+        assert!(!c.has_source);
+        assert_eq!(c.tier, Tier::Low);
+        assert_eq!(c.tier.as_str(), "low");
+    }
+
+    #[test]
+    fn confidence_stale_overrides_corroboration_to_low() {
+        // Corroborated + sourced, but old relative to now/max_age → stale → low.
+        let s = one_value(&[(7, 100), (9, 100)]);
+        let c = confidence_signals(&s, 1, 5, Some(1000), Some(100));
+        assert_eq!(c.corroboration, 2);
+        assert_eq!(c.age, Some(900)); // 1000 - valid_from(100)
+        assert_eq!(c.tier, Tier::Low);
+        // within max_age → fresh again → back to high (corroborated).
+        let c2 = confidence_signals(&s, 1, 5, Some(150), Some(100));
+        assert_eq!(c2.age, Some(50));
+        assert_eq!(c2.tier, Tier::High);
+    }
+
+    #[test]
+    fn confidence_now_without_max_age_is_never_stale() {
+        // `now` alone yields an age but no staleness (max_age is required to judge stale).
+        let s = one_value(&[(7, 0)]);
+        let c = confidence_signals(&s, 1, 5, Some(10_000), None);
+        assert_eq!(c.age, Some(10_000));
+        assert_eq!(c.tier, Tier::Medium);
+    }
+
+    #[test]
+    fn confidence_absent_value_is_low() {
+        let s = one_value(&[(7, 10)]);
+        // an unasserted key: no winner → no source, no corroboration, unknown age → low.
+        let c = confidence_signals(&s, 1, 999, Some(100), Some(1));
+        assert_eq!(c.corroboration, 0);
+        assert!(!c.has_source);
+        assert_eq!(c.age, None);
+        assert_eq!(c.tier, Tier::Low);
     }
 
     #[test]
