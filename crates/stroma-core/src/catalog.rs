@@ -188,6 +188,14 @@ impl Catalog {
         self.interner.get(name)
     }
 
+    /// Intern a name to its stable Field-ID, defining nothing — used to resolve a *forward* reference
+    /// to a predicate that a `RelProps.inverse` names before that predicate's own `register_predicate`
+    /// arrives. Interning is order-deterministic, so the id returned here equals the one the eventual
+    /// registration assigns; the reference therefore stays valid regardless of declaration order.
+    pub fn intern_ref(&mut self, name: &str) -> FieldId {
+        self.interner.intern(name)
+    }
+
     pub fn name(&self, id: FieldId) -> Option<&str> {
         self.interner.name(id)
     }

@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
 use crate::fold::{ObjKey, Snapshot};
 
@@ -80,6 +81,110 @@ pub fn expand(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTreeSet<
         }
     }
     out
+}
+
+/// Reverse adjacency for a single predicate: for each node-valued edge `s --predicate--> o`, maps `o`
+/// to the set of subjects `s` that point at it (`{s : s --predicate--> o}`). A single scan restricted
+/// to `predicate` — the reverse-direction lookup the symmetric / inverse expansions need without
+/// storing both directions.
+fn reverse_adjacency(snap: &Snapshot, predicate: FieldId) -> HashMap<NodeId, BTreeSet<NodeId>> {
+    let mut rev: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
+    for (&(s, p), v) in snap.one.iter() {
+        if p == predicate
+            && let Some(ObjKey::Node(o)) = v
+        {
+            rev.entry(*o).or_default().insert(s);
+        }
+    }
+    for (&(s, p), set) in snap.many.iter() {
+        if p != predicate {
+            continue;
+        }
+        for o in set {
+            if let ObjKey::Node(o) = o {
+                rev.entry(*o).or_default().insert(s);
+            }
+        }
+    }
+    rev
+}
+
+/// Property-aware expand: 1-hop or a bounded transitive closure honoring the predicate's declared
+/// [`RelProps`](crate::catalog::RelProps) (`symmetric` / `inverse` / `transitive`). A predicate with
+/// no declared properties behaves exactly like [`expand`] (direct 1-hop). Deterministic (BFS over
+/// sorted sets) and always bounded by `max_depth` — a visited-set terminates cycles — so it never
+/// recurses unboundedly.
+///
+/// - **symmetric**: each hop is undirected — both `subject --P--> b` and `b --P--> subject`.
+/// - **inverse = Q**: each hop also yields `{b : b --Q--> subject}`, the reverse of the named
+///   predicate's stored edges (so an inverse predicate is answerable without storing both directions).
+/// - **transitive**: every node reachable in `1..=max_depth` hops (each hop honoring the above).
+pub fn expand_rel(
+    snap: &Snapshot,
+    catalog: &Catalog,
+    subject: NodeId,
+    predicate: FieldId,
+    max_depth: usize,
+) -> BTreeSet<NodeId> {
+    let props = catalog
+        .predicate(predicate)
+        .map(|d| d.props)
+        .unwrap_or_default();
+    // No declared properties → identical to the plain 1-hop direct expand.
+    if !props.symmetric && !props.transitive && props.inverse.is_none() {
+        return expand(snap, subject, predicate);
+    }
+    // Reverse adjacency is only needed for the undirected (symmetric) and inverse cases; build each
+    // once (a single restricted scan) and reuse it across every hop.
+    let rev_p = props.symmetric.then(|| reverse_adjacency(snap, predicate));
+    let rev_inv = props.inverse.map(|inv| reverse_adjacency(snap, inv));
+    // One property-aware hop from `node`: forward P edges, plus (symmetric) reverse P edges, plus
+    // (inverse) the reverse of the named predicate's edges.
+    let step = |node: NodeId| -> BTreeSet<NodeId> {
+        let mut out = expand(snap, node, predicate);
+        if let Some(rp) = &rev_p
+            && let Some(s) = rp.get(&node)
+        {
+            out.extend(s.iter().copied());
+        }
+        if let Some(ri) = &rev_inv
+            && let Some(s) = ri.get(&node)
+        {
+            out.extend(s.iter().copied());
+        }
+        out
+    };
+
+    if !props.transitive {
+        return step(subject);
+    }
+
+    // Bounded, deterministic BFS transitive closure. `result` doubles as the visited-set so cycles
+    // terminate, and `max_depth` caps the number of hops so it is never unbounded.
+    let mut result = BTreeSet::new();
+    if max_depth == 0 {
+        return result;
+    }
+    let mut current = step(subject);
+    let mut hops = 1usize;
+    loop {
+        let mut newly = Vec::new();
+        for n in &current {
+            if result.insert(*n) {
+                newly.push(*n);
+            }
+        }
+        if hops >= max_depth || newly.is_empty() {
+            break;
+        }
+        let mut next = BTreeSet::new();
+        for n in &newly {
+            next.extend(step(*n));
+        }
+        current = next.into_iter().filter(|v| !result.contains(v)).collect();
+        hops += 1;
+    }
+    result
 }
 
 /// All node-valued neighbours of `subject` across *every* predicate (One current value + Many
@@ -404,5 +509,177 @@ mod tests {
         // person 1 -member-of-> project 10 -needs-skill-> {20, 22}
         let s = snap();
         assert_eq!(two_hop(&s, 1, 0, 101), [20, 22].into_iter().collect());
+    }
+
+    // ---- property-aware expand (expand_rel) ----
+
+    use crate::catalog::{Cardinality, Catalog, Range, RelProps};
+
+    /// A Many-cardinality graph from `(subject, predicate, object)` edges (all node-valued).
+    fn many_edges(edges: &[(NodeId, FieldId, NodeId)]) -> Snapshot {
+        let ops: Vec<Op> = edges
+            .iter()
+            .enumerate()
+            .map(|(i, &(subject, predicate, object))| Op::AddMany {
+                subject,
+                predicate,
+                object: ObjKey::Node(object),
+                ok: ok(i as u64),
+            })
+            .collect();
+        fold(&ops).observe()
+    }
+
+    #[test]
+    fn expand_rel_default_props_equals_plain_expand() {
+        let mut c = Catalog::new();
+        let t = c.register_type("T");
+        let p = c.register_predicate(
+            "p",
+            Cardinality::Many,
+            RelProps::default(),
+            t,
+            Range::Type(t),
+        );
+        let s = many_edges(&[(1, p, 2), (1, p, 3)]);
+        assert_eq!(expand_rel(&s, &c, 1, p, 16), expand(&s, 1, p));
+        assert_eq!(expand_rel(&s, &c, 1, p, 16), [2, 3].into_iter().collect());
+    }
+
+    #[test]
+    fn expand_rel_symmetric_is_undirected() {
+        let mut c = Catalog::new();
+        let t = c.register_type("T");
+        let knows = c.register_predicate(
+            "knows",
+            Cardinality::Many,
+            RelProps {
+                symmetric: true,
+                transitive: false,
+                inverse: None,
+            },
+            t,
+            Range::Type(t),
+        );
+        // 1 knows 2 (forward); 3 knows 1 (reverse — reachable from 1 only because knows is symmetric).
+        let s = many_edges(&[(1, knows, 2), (3, knows, 1)]);
+        assert_eq!(
+            expand_rel(&s, &c, 1, knows, 16),
+            [2, 3].into_iter().collect()
+        );
+        // plain (direction-respecting) expand sees only the forward edge
+        assert_eq!(expand(&s, 1, knows), [2].into_iter().collect());
+    }
+
+    #[test]
+    fn expand_rel_inverse_reads_reverse_of_named_predicate() {
+        let mut c = Catalog::new();
+        let t = c.register_type("T");
+        let parent = c.register_predicate(
+            "parent-of",
+            Cardinality::Many,
+            RelProps::default(),
+            t,
+            Range::Type(t),
+        );
+        let child = c.register_predicate(
+            "child-of",
+            Cardinality::Many,
+            RelProps {
+                symmetric: false,
+                transitive: false,
+                inverse: Some(parent),
+            },
+            t,
+            Range::Type(t),
+        );
+        // 1 parent-of {2, 3}; child-of stores no edges of its own.
+        let s = many_edges(&[(1, parent, 2), (1, parent, 3)]);
+        // expanding the inverse (child-of) on 2 yields 2's parents = {1}
+        assert_eq!(expand_rel(&s, &c, 2, child, 16), [1].into_iter().collect());
+        assert_eq!(expand_rel(&s, &c, 3, child, 16), [1].into_iter().collect());
+        // 1 has no parent → child-of on 1 is empty
+        assert!(expand_rel(&s, &c, 1, child, 16).is_empty());
+        // parent-of still expands directly (forward)
+        assert_eq!(
+            expand_rel(&s, &c, 1, parent, 16),
+            [2, 3].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn expand_rel_transitive_closure_and_depth_bound() {
+        let mut c = Catalog::new();
+        let t = c.register_type("T");
+        let reaches = c.register_predicate(
+            "reaches",
+            Cardinality::Many,
+            RelProps {
+                symmetric: false,
+                transitive: true,
+                inverse: None,
+            },
+            t,
+            Range::Type(t),
+        );
+        // chain 1 → 2 → 3 → 4
+        let s = many_edges(&[(1, reaches, 2), (2, reaches, 3), (3, reaches, 4)]);
+        assert_eq!(
+            expand_rel(&s, &c, 1, reaches, 16),
+            [2, 3, 4].into_iter().collect()
+        );
+        // depth bound respected
+        assert_eq!(
+            expand_rel(&s, &c, 1, reaches, 2),
+            [2, 3].into_iter().collect()
+        );
+        assert_eq!(expand_rel(&s, &c, 1, reaches, 1), [2].into_iter().collect());
+    }
+
+    #[test]
+    fn expand_rel_transitive_cycle_terminates() {
+        let mut c = Catalog::new();
+        let t = c.register_type("T");
+        let reaches = c.register_predicate(
+            "reaches",
+            Cardinality::Many,
+            RelProps {
+                symmetric: false,
+                transitive: true,
+                inverse: None,
+            },
+            t,
+            Range::Type(t),
+        );
+        // cycle 1 → 2 → 3 → 1: the visited-set must terminate the BFS. 1 is re-reached at 3 hops, so
+        // the whole cycle is in the 1..=16-hop reachable set.
+        let s = many_edges(&[(1, reaches, 2), (2, reaches, 3), (3, reaches, 1)]);
+        assert_eq!(
+            expand_rel(&s, &c, 1, reaches, 16),
+            [1, 2, 3].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn expand_rel_symmetric_transitive_reaches_component() {
+        let mut c = Catalog::new();
+        let t = c.register_type("T");
+        let linked = c.register_predicate(
+            "linked",
+            Cardinality::Many,
+            RelProps {
+                symmetric: true,
+                transitive: true,
+                inverse: None,
+            },
+            t,
+            Range::Type(t),
+        );
+        // stored one-directionally: 1-2, 2-3, 4-3 → undirected + transitive spans component {1,2,3,4}.
+        let s = many_edges(&[(1, linked, 2), (2, linked, 3), (4, linked, 3)]);
+        assert_eq!(
+            expand_rel(&s, &c, 1, linked, 16),
+            [1, 2, 3, 4].into_iter().collect()
+        );
     }
 }
