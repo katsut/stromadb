@@ -13,12 +13,14 @@
 //!   wal.log          append-only changelog (facts + node type/label ops; crash-sound, group-commit)
 //!   schema.jsonl     type/predicate definitions, replayed in order (Field-ID interning is
 //!                    order-deterministic, so ids are stable across restarts)
+//!   rules.jsonl      named conformance rules (`rule_def`), replayed in order into the rule registry
 //!   nodes.jsonl      node type/label assignments (mirrored here for counts; the authority is the WAL
 //!                    ops, which the recovered snapshot carries — nodes.jsonl is not replayed)
 //!   embeddings.bin   received embeddings, flat f32 LE; embeddings.ids = u64 LE per row
 //!   meta.json        { "dim": N }
 //!
-//! Record formats (JSONL) — ingest: type_def / pred_def / node / fact / retract; embed: {node,vector}.
+//! Record formats (JSONL) — ingest: type_def / pred_def / rule_def / node / fact / retract;
+//! embed: {node,vector}.
 //! Query request (JSON): {"op":"point"|"expand"|"search", ...} — see [`Db::query`].
 
 use std::collections::{BTreeSet, HashMap};
@@ -53,12 +55,16 @@ pub struct IngestStats {
 }
 
 /// The schema-level catalog authority: the interner + registered types/predicates plus each
-/// predicate's cardinality. Cloneable and `Arc`-shared into the read view; rebuilt (copy-on-write)
-/// only when a `type_def`/`pred_def` arrives, so the frequent node/fact writes never re-clone it.
+/// predicate's cardinality, and the durable registry of named conformance rules. Cloneable and
+/// `Arc`-shared into the read view; rebuilt (copy-on-write) only when a `type_def`/`pred_def`/
+/// `rule_def` arrives, so the frequent node/fact writes never re-clone it.
 #[derive(Clone, Default)]
 struct Schema {
     cat: Catalog,
     cardinality: HashMap<String, Cardinality>,
+    /// Named conformance rules declared once (`rule_def`) and evaluated by `rule_name`. Parsed at
+    /// declaration; names are resolved against the catalog only at evaluation.
+    rules: HashMap<String, conformance::Rule>,
 }
 
 /// A directory-backed database. Reads are lock-free over a pinned [`ReadState`]; writes hold the
@@ -134,6 +140,12 @@ impl Db {
             let v: Value = serde_json::from_str(&line).map_err(|e| format!("schema.jsonl: {e}"))?;
             apply_def(&mut schema, &v)?;
         }
+        // Named conformance rules replay after the catalog (names are resolved only at evaluation,
+        // so rule order relative to the defs it references does not matter here).
+        for line in read_lines(&dir.join("rules.jsonl")) {
+            let v: Value = serde_json::from_str(&line).map_err(|e| format!("rules.jsonl: {e}"))?;
+            apply_rule_def(&mut schema, &v)?;
+        }
         // Node type/label attributes live in the WAL now (SetNodeType/SetNodeLabel ops), so the
         // recovered snapshot already carries them — nodes.jsonl is kept only for counts, not replayed.
         let meta: Value = fs::read_to_string(dir.join("meta.json"))
@@ -192,6 +204,7 @@ impl Db {
         for f in [
             "wal.log",
             "schema.jsonl",
+            "rules.jsonl",
             "nodes.jsonl",
             "embeddings.bin",
             "embeddings.ids",
@@ -216,8 +229,8 @@ impl Db {
         Ok(())
     }
 
-    /// Ingest a JSONL batch (type_def / pred_def / node / fact / retract). Durable on return; the
-    /// updated read view is published atomically before this returns.
+    /// Ingest a JSONL batch (type_def / pred_def / rule_def / node / fact / retract). Durable on
+    /// return; the updated read view is published atomically before this returns.
     pub fn ingest_str(&self, jsonl: &str) -> DbResult<IngestStats> {
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         let s = w.ingest(jsonl)?;
@@ -284,7 +297,7 @@ impl Db {
             .unwrap_or(0);
         json!({
             "facts": { "durable_head": w.eng.durable_head(), "unmerged": w.eng.unmerged() },
-            "schema": { "defs": read_lines(&w.dir.join("schema.jsonl")).len(), "nodes": read_lines(&w.dir.join("nodes.jsonl")).len() },
+            "schema": { "defs": read_lines(&w.dir.join("schema.jsonl")).len(), "nodes": read_lines(&w.dir.join("nodes.jsonl")).len(), "rules": read_lines(&w.dir.join("rules.jsonl")).len() },
             "embeddings": { "count": w.emb_ids.len(), "dim": w.dim },
             "storage": { "wal_bytes": wal_bytes, "embeddings_bytes": w.emb.len() * 4 },
         })
@@ -360,6 +373,11 @@ impl WriteState {
                 apply_def(Arc::make_mut(&mut self.schema), &v)?;
                 self.append_line("schema.jsonl", line)?;
                 s.defs += 1;
+            } else if v.get("rule_def").is_some() {
+                // A named conformance rule: parse + store (names are validated at evaluation, not
+                // here — the referenced predicates may be declared later), persist for replay.
+                apply_rule_def(Arc::make_mut(&mut self.schema), &v)?;
+                self.append_line("rules.jsonl", line)?;
             } else if let Some(n) = v.get("node") {
                 self.apply_node(n)?;
                 self.append_line("nodes.jsonl", line)?;
@@ -1081,14 +1099,27 @@ impl ReadState {
         Ok(json!({ "ids": t.ids, "nodes": nodes }))
     }
 
-    /// Evaluate a declared conformance rule (`req["rule"]`) into deterministic per-subject verdicts.
-    /// Predicate/type names are resolved against the catalog (unknown names are a clear error), then
-    /// [`conformance::evaluate`] composes the existing read primitives into `OK | ABSENT | MISMATCH |
-    /// NOT_APPLICABLE` verdicts, authz-scoped by `allowed_labels` (default all). A `MISMATCH` carries a
-    /// `kind` of `"stale"` or `"wrong"`. Returns
+    /// Evaluate a declared conformance rule into deterministic per-subject verdicts. The rule is given
+    /// either inline as `req["rule"]` or by `req["rule_name"]` (a rule declared once via `rule_def` and
+    /// stored in the registry) — exactly one is required. Predicate/type names are resolved against the
+    /// catalog (unknown names are a clear error), then [`conformance::evaluate`] composes the existing
+    /// read primitives into `OK | ABSENT | MISMATCH | NOT_APPLICABLE` verdicts, authz-scoped by
+    /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`. Returns
     /// `{ "verdicts": [ { subject, verdict, kind, required, actual, as_of }, .. ] }`.
     fn conformance(&self, req: &Value) -> DbResult<Value> {
-        let rule = parse_conformance_rule(&req["rule"])?;
+        let rule = if let Some(name) = req["rule_name"].as_str() {
+            self.schema
+                .rules
+                .get(name)
+                .cloned()
+                .ok_or(format!("unknown rule_name: {name}"))?
+        } else if !req["rule"].is_null() {
+            parse_conformance_rule(&req["rule"])?
+        } else {
+            return Err(
+                "conformance requires either 'rule' (inline) or 'rule_name' (stored)".into(),
+            );
+        };
         let missing = conformance::unresolved_names(&rule, &self.schema.cat);
         if !missing.is_empty() {
             return Err(format!(
@@ -1309,6 +1340,21 @@ fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
         return Ok(());
     }
     Err("schema line must be type_def or pred_def".into())
+}
+
+/// Register a named conformance rule from a `{"rule_def":{"name":..,"rule":{..}}}` line into the
+/// registry. The rule is parsed structurally here (via [`parse_conformance_rule`]); its predicate/
+/// type names are resolved against the catalog only at evaluation, so a rule may be declared before
+/// the predicates it references. Re-declaring a name replaces the stored rule.
+fn apply_rule_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
+    let rd = v.get("rule_def").ok_or("rule line must be a rule_def")?;
+    let name = rd["name"]
+        .as_str()
+        .ok_or("rule_def.name missing")?
+        .to_string();
+    let rule = parse_conformance_rule(&rd["rule"])?;
+    schema.rules.insert(name, rule);
+    Ok(())
 }
 
 fn obj_key(v: &Value) -> DbResult<ObjKey> {

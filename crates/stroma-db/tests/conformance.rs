@@ -132,21 +132,37 @@ const FIXTURE: &str = r#"
 {"fact":{"subject":1008,"predicate":"status","object":{"text":"released"},"valid_from":6000}}
 "#;
 
-fn rule() -> serde_json::Value {
+// The rule body shared by the inline op and the stored `rule_def` (identical evaluation semantics).
+fn rule_body() -> serde_json::Value {
     json!({
-        "op": "conformance",
-        "rule": {
-            "subject_type": "Issue",
-            "scope":     { "predicate": "issue-type", "equals": "release" },
-            "required":  { "hops": [
-                { "predicate": "assigned-to" },
-                { "predicate": "member-of" },
-                { "predicate": "manager-of", "as_of": "approved-at" }
-            ] },
-            "actual":      "approved-by",
-            "absent_when": { "predicate": "status", "equals": "released" }
-        }
+        "subject_type": "Issue",
+        "scope":     { "predicate": "issue-type", "equals": "release" },
+        "required":  { "hops": [
+            { "predicate": "assigned-to" },
+            { "predicate": "member-of" },
+            { "predicate": "manager-of", "as_of": "approved-at" }
+        ] },
+        "actual":      "approved-by",
+        "absent_when": { "predicate": "status", "equals": "released" }
     })
+}
+
+fn rule() -> serde_json::Value {
+    json!({ "op": "conformance", "rule": rule_body() })
+}
+
+fn verdict_map(r: &serde_json::Value) -> BTreeMap<u64, String> {
+    r["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["subject"].as_u64().unwrap(),
+                v["verdict"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -224,6 +240,54 @@ fn conformance_verdicts_over_fixture() {
     });
     let err = db.query(&bad).unwrap_err();
     assert!(err.contains("no-such-predicate"), "unexpected error: {err}");
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+// The "author the rule once, evaluate it by name" boundary: declare the release-approval rule once as
+// a `rule_def`, then evaluate it by `rule_name` — same verdicts as the inline rule, and still so after
+// a reopen (the rule survives via rules.jsonl replay). An unknown `rule_name` is a clear error.
+#[test]
+fn conformance_by_stored_rule_name() {
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "stroma_conformance_named_test_{}",
+            std::process::id()
+        ))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(FIXTURE).unwrap();
+
+    // declare the rule once, by name (durably appended to rules.jsonl).
+    let rule_def = json!({ "rule_def": { "name": "release-approval", "rule": rule_body() } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+
+    let by_name = json!({ "op": "conformance", "rule_name": "release-approval" });
+
+    // evaluating by name yields exactly the inline verdicts.
+    let inline = verdict_map(&db.query(&rule()).unwrap());
+    let named = verdict_map(&db.query(&by_name).unwrap());
+    assert_eq!(named, inline);
+
+    // reopen: the stored rule is replayed from rules.jsonl and still evaluates by name.
+    let db = Db::open(&dir).unwrap();
+    let named_after_reopen = verdict_map(&db.query(&by_name).unwrap());
+    assert_eq!(named_after_reopen, inline);
+
+    // an unknown rule name is a clear error, not a panic.
+    let err = db
+        .query(&json!({ "op": "conformance", "rule_name": "no-such-rule" }))
+        .unwrap_err();
+    assert!(err.contains("no-such-rule"), "unexpected error: {err}");
+
+    // neither rule nor rule_name → a clear error.
+    let err = db.query(&json!({ "op": "conformance" })).unwrap_err();
+    assert!(
+        err.contains("rule") && err.contains("rule_name"),
+        "unexpected error: {err}"
+    );
 
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
