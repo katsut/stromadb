@@ -162,6 +162,38 @@
   `std::thread::scope`; list insertion stays serial. `add_batch` is order-equivalent to serial `add`.
 - **Evidence:** 200K×768 build 112s → ~10s (~11×), making the 0.5M representative build feasible.
 
+## Concurrency & rule evaluation
+
+### D19. Lock-free reads over a pinned snapshot
+- **Context:** reads and writes shared one lock, so a long write batch stalled every read.
+- **Decision:** split the database into a write authority (`Mutex<WriteState>`) and an immutable pinned
+  read view (`RwLock<Arc<ReadState>>`). A read clones the `Arc<ReadState>` under a momentary lock and then
+  runs entirely on that pinned state with no lock held; a write holds the write mutex for the ETL and, on
+  completion, swaps in a fresh read view. Node attributes ride the snapshot as a flat `Arc<FxHashMap>`
+  (O(1) clone on publish/pin; single-shot flat lookups on the read-path authz+type filter).
+- **Why:** a long write must not block reads, and a read must be snapshot-isolated against writes that land
+  after it pins.
+- **Evidence:** integrated read p99 **1.32ms** under a concurrent writer (flat with the idle number); a
+  multi-threaded concurrency + snapshot-isolation suite passes. A persistent `imbl` HAMT was measured for
+  the node maps but dropped for the flat `Arc<FxHashMap>` — it reclaimed the read-path cost while keeping
+  the O(1) publish.
+
+### D20. Conformance = a declared rule → deterministic per-subject verdict
+- **Context:** evaluating a multi-hop, as-of compliance rule (e.g. "was this approved by the manager of the
+  assignee's department *as of the approval time*") is deterministic, but a caller that re-derives it each
+  time is not: a de-risk found a mid-tier agent, handed only the read primitives, scored 0–13% perfect on
+  such an audit and dropped the timing-sensitive case even when guided.
+- **Decision:** a `conformance` op evaluates a *declared* rule — a subject type, an optional scope, a
+  required derived path (a chain of one-cardinality hops, the last optionally read *as-of* a valid-time
+  anchor), an actual predicate, and an absence condition — into a per-subject verdict
+  `OK | ABSENT | MISMATCH | NOT_APPLICABLE`, with `MISMATCH` sub-classified `stale | wrong` via a
+  valid-time history probe. Composed purely from `point_one` / `point_one_asof` — no new inference, no
+  reasoner. Post-authz, as-of-aware, deterministic (sorted output).
+- **Why:** the deterministic part of a decision should be evaluated the same way every time; the engine
+  owns the verdict, the caller orchestrates and acts on it.
+- **Evidence:** reproduces a hand-checked 8-subject fixture exactly, including the as-of *stale* case the
+  agent got wrong ~100% of the time. Follow-ups: stored/named rules and incremental (live) maintenance.
+
 ## DONE SLO (the "unchanging core" bar) — measured
 
 | leg | target | measured |
@@ -185,8 +217,10 @@ pre-production workload:
 
 - **LSM backend + compaction/checkpoint:** durability is a file-WAL today; without compaction the WAL grows
   and cold-start RTO scales with total history, not live state.
-- **Concurrency:** the engine is single-threaded; concurrent reads during writes are not yet supported
-  (all current SLO numbers are sequential).
+- **Concurrency:** reads are now lock-free over a pinned snapshot (D19), so reads run during a write; a
+  generational MVCC for many concurrent long-lived readers is still pending, and writes are single-writer
+  by design. (The 0.5M DONE-SLO numbers above were measured sequentially; D19's p99 is the concurrent
+  read-under-write figure.)
 - **Full MVCC snapshots:** `materialize` now maintains the observed snapshot incrementally (O(changed
   keys), shared via `Arc` — the per-epoch full-clone stall is gone); a generational MVCC for many
   concurrent long-lived readers is still pending.
