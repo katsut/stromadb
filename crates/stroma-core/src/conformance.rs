@@ -29,7 +29,7 @@
 //! holds the name-based rule types and the evaluator, and resolves names via the [`Catalog`].)
 
 use crate::catalog::Catalog;
-use crate::fact::NodeId;
+use crate::fact::{FieldId, NodeId};
 use crate::fold::{ObjKey, Snapshot};
 use crate::query::{point_one, point_one_asof};
 
@@ -60,12 +60,7 @@ pub struct Rule {
     pub absent_when: Option<Cond>,
 }
 
-/// The verdict outcome for one subject.
-///
-/// First cut = these four outcomes. Sub-classifying `Mismatch` into stale-authority (the actual
-/// value once held the required role at an earlier valid-time) vs wrong-authority (it never did) is
-/// an explicit follow-up: it needs a valid-time history probe on the final hop and is deliberately
-/// NOT built here.
+/// The verdict outcome for one subject. A `Mismatch` carries a [`MismatchKind`] sub-classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Ok,
@@ -86,12 +81,34 @@ impl Outcome {
     }
 }
 
+/// Sub-classification of a [`Outcome::Mismatch`] via a valid-time history probe on the final as-of hop:
+/// `Stale` = the actual value once satisfied the required derivation at an earlier valid-time (it held
+/// the role before, but not as-of the anchor); `Wrong` = it never did. A mismatch on a timeless final
+/// hop (no as-of) is always `Wrong`, since there is no earlier time at which it could have held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MismatchKind {
+    Stale,
+    Wrong,
+}
+
+impl MismatchKind {
+    /// The stable wire name of this kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MismatchKind::Stale => "stale",
+            MismatchKind::Wrong => "wrong",
+        }
+    }
+}
+
 /// A per-subject verdict. `required`/`actual` are the derived and observed values (node-valued in the
 /// first cut); `as_of` is the valid-time instant the as-of hop was read at, if the path used one.
+/// `mismatch_kind` is `Some` only when `verdict == Mismatch`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub subject: NodeId,
     pub verdict: Outcome,
+    pub mismatch_kind: Option<MismatchKind>,
     pub required: Option<ObjKey>,
     pub actual: Option<ObjKey>,
     pub as_of: Option<i64>,
@@ -165,6 +182,7 @@ fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
         return Verdict {
             subject: s,
             verdict: Outcome::NotApplicable,
+            mismatch_kind: None,
             required: None,
             actual: None,
             as_of: None,
@@ -173,11 +191,16 @@ fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
 
     // required = the derived path walked left→right from S; a hop with an as-of anchor reads the
     // valid-time value of that hop at the anchor's integer value on the ORIGINAL subject S.
+    // `final_asof_hop` remembers the (node, predicate) of the LAST hop when it was an as-of read —
+    // the site to history-probe for a stale-vs-wrong mismatch. It is `None` if the final hop was
+    // timeless (a mismatch there is always `Wrong`).
     let mut cur = Some(s);
     let mut as_of: Option<i64> = None;
+    let mut final_asof_hop: Option<(NodeId, FieldId)> = None;
     for hop in &rule.required {
         let Some(node) = cur else { break };
         let pid = cat.field_id(&hop.predicate);
+        final_asof_hop = None;
         cur = match (&hop.as_of, pid) {
             (_, None) => None,
             (None, Some(p)) => node_of(point_one(snap, node, p)),
@@ -186,6 +209,7 @@ fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
                     .field_id(anchor)
                     .and_then(|ap| int_of(point_one(snap, s, ap)));
                 as_of = t;
+                final_asof_hop = Some((node, p));
                 t.and_then(|at| node_of(point_one_asof(snap, node, p, at)))
             }
         };
@@ -221,13 +245,34 @@ fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
         }
     };
 
+    // classify a mismatch: stale if the actual value once satisfied the final as-of hop at an earlier
+    // valid-time, otherwise wrong.
+    let mismatch_kind = (outcome == Outcome::Mismatch).then(|| match (final_asof_hop, &actual) {
+        (Some((node, p)), Some(ObjKey::Node(a))) if ever_held(snap, node, p, *a) => {
+            MismatchKind::Stale
+        }
+        _ => MismatchKind::Wrong,
+    });
+
     Verdict {
         subject: s,
         verdict: outcome,
+        mismatch_kind,
         required,
         actual,
         as_of,
     }
+}
+
+/// Whether `(node, predicate)` ever held the value `Node(value)` at any valid-time — a scan of the
+/// one-cardinality valid-time history. Used to tell a stale mismatch (once valid) from a wrong one.
+fn ever_held(snap: &Snapshot, node: NodeId, predicate: FieldId, value: NodeId) -> bool {
+    snap.one_history
+        .get(&(node, predicate))
+        .is_some_and(|rows| {
+            rows.iter()
+                .any(|(_, obj, _, _)| matches!(obj, Some(ObjKey::Node(n)) if *n == value))
+        })
 }
 
 fn cond_holds(snap: &Snapshot, cat: &Catalog, s: NodeId, cond: &Cond) -> bool {
@@ -486,6 +531,16 @@ mod tests {
         assert_eq!(by[&6].required, Some(ObjKey::Node(12)));
         assert_eq!(by[&6].actual, Some(ObjKey::Node(10)));
         assert_eq!(by[&6].as_of, Some(6000));
+
+        // mismatch sub-classification via valid-time history probe:
+        //   Issue 3 = Dave(20), never a manager of the dept → wrong.
+        //   Issue 6 = Alice(10), was the dept manager before the 5000 transfer but not at 6000 → stale.
+        assert_eq!(by[&3].mismatch_kind, Some(MismatchKind::Wrong));
+        assert_eq!(by[&6].mismatch_kind, Some(MismatchKind::Stale));
+        // non-mismatch verdicts carry no kind.
+        assert_eq!(by[&1].mismatch_kind, None);
+        assert_eq!(by[&2].mismatch_kind, None);
+        assert_eq!(by[&4].mismatch_kind, None);
     }
 
     #[test]

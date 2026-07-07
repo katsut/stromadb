@@ -1084,8 +1084,9 @@ impl ReadState {
     /// Evaluate a declared conformance rule (`req["rule"]`) into deterministic per-subject verdicts.
     /// Predicate/type names are resolved against the catalog (unknown names are a clear error), then
     /// [`conformance::evaluate`] composes the existing read primitives into `OK | ABSENT | MISMATCH |
-    /// NOT_APPLICABLE` verdicts, authz-scoped by `allowed_labels` (default all). Returns
-    /// `{ "verdicts": [ { subject, verdict, required, actual, as_of }, .. ] }`.
+    /// NOT_APPLICABLE` verdicts, authz-scoped by `allowed_labels` (default all). A `MISMATCH` carries a
+    /// `kind` of `"stale"` or `"wrong"`. Returns
+    /// `{ "verdicts": [ { subject, verdict, kind, required, actual, as_of }, .. ] }`.
     fn conformance(&self, req: &Value) -> DbResult<Value> {
         let rule = parse_conformance_rule(&req["rule"])?;
         let missing = conformance::unresolved_names(&rule, &self.schema.cat);
@@ -1106,6 +1107,7 @@ impl ReadState {
                 json!({
                     "subject": v.subject,
                     "verdict": v.verdict.as_str(),
+                    "kind": v.mismatch_kind.map(|k| k.as_str()),
                     "required": v.required.map(fmt_obj),
                     "actual": v.actual.map(fmt_obj),
                     "as_of": v.as_of,
