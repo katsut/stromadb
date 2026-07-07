@@ -14,7 +14,7 @@ fn ingest_embed_query_reopen() {
     let dir = tmp();
     Db::init(&dir).unwrap();
 
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     let s = db
         .ingest_str(concat!(
             "{\"type_def\":{\"name\":\"Person\"}}\n",
@@ -60,7 +60,9 @@ fn ingest_embed_query_reopen() {
         .unwrap();
     assert_eq!(r["ids"], json!([2]));
 
-    assert_eq!(db.stats()["facts"]["durable_head"], json!(5));
+    // durable_head counts every changelog record: 6 node ops (3 nodes × {type, label}) + 4 facts + 1
+    // retract = 11 (node type/label assignments are now folded through the changelog, not a side file).
+    assert_eq!(db.stats()["facts"]["durable_head"], json!(11));
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
@@ -71,7 +73,7 @@ fn valid_to_ingest_and_asof_read() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     // A one-cardinality membership valid over [100, 200): ends at 200.
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
@@ -110,7 +112,7 @@ fn reset_clears_the_database() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
@@ -119,7 +121,8 @@ fn reset_clears_the_database() {
         "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
     ))
     .unwrap();
-    assert_eq!(db.stats()["facts"]["durable_head"], json!(1));
+    // 2 node type ops (nodes 1, 2 — no labels) + 1 fact = 3 changelog records.
+    assert_eq!(db.stats()["facts"]["durable_head"], json!(3));
 
     db.reset().unwrap();
 
@@ -157,7 +160,7 @@ fn redefining_predicate_cardinality_is_rejected() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"type_def\":{\"name\":\"Project\"}}\n",
@@ -199,7 +202,7 @@ fn edge_props_ingest_and_read() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"type_def\":{\"name\":\"Skill\"}}\n",
@@ -250,7 +253,7 @@ fn neighborhood_khop_and_authz() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     // chain 1 -> 2 -> 3 -> 4 via `knows`; node 3 is restricted (label 3)
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
@@ -313,7 +316,7 @@ fn node_detail_props_and_authz() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"type_def\":{\"name\":\"Project\"}}\n",
@@ -395,7 +398,7 @@ fn graph_all_nodes_and_authz() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     // 1 -> 2 -> 3 via `knows`; node 3 restricted (label 3)
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
@@ -464,7 +467,7 @@ fn overview_type_aggregate() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Person\"}}\n",
         "{\"type_def\":{\"name\":\"Project\"}}\n",
@@ -535,7 +538,7 @@ fn retrieve_context_current_value_chronological() {
         .join("db");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     Db::init(&dir).unwrap();
-    let mut db = Db::open(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
     db.ingest_str(concat!(
         "{\"type_def\":{\"name\":\"Doc\"}}\n",
         "{\"pred_def\":{\"name\":\"content\",\"cardinality\":\"one\",\"domain\":\"Doc\",\"range_value\":\"text\"}}\n",

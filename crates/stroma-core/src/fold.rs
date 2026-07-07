@@ -9,9 +9,11 @@
 //! (re-assertion above the floor survives).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::catalog::{Cardinality, Catalog};
 use crate::fact::{Fact, FieldId, NodeId, Object, Value};
+use crate::hash::FxHashMap;
 
 /// Orderable, hashable object identity (the value/edge target an op refers to). `Float` keeps the
 /// raw bits so it has a total order (no NaN ambiguity in the fold).
@@ -256,11 +258,13 @@ pub struct Snapshot {
     pub many: BTreeMap<(NodeId, FieldId), BTreeSet<ObjKey>>,
     /// Edge properties: `(subject, predicate)` → edge object → property key → value (LWW-resolved).
     pub edge_props: BTreeMap<(NodeId, FieldId), BTreeMap<ObjKey, BTreeMap<String, ObjKey>>>,
-    /// Node → entity type (LWW-resolved). A persistent HAMT so pinning a reader clones in O(1) and a
-    /// publish shares structure with the previous snapshot (structural sharing).
-    pub node_types: imbl::HashMap<NodeId, FieldId>,
-    /// Node → ABAC sensitivity label (LWW-resolved). Same persistent HAMT rationale as `node_types`.
-    pub node_labels: imbl::HashMap<NodeId, u8>,
+    /// Node → entity type (LWW-resolved). A flat `FxHashMap` behind an `Arc`: cloning a snapshot
+    /// (pinning a reader / refreshing on publish) is an O(1) refcount bump, while the read-path authz +
+    /// type filter — which probes this once per candidate — gets a single-shot flat lookup. Copied on
+    /// write only on the rare node-attribute change (creation-time), not on the hot fact path.
+    pub node_types: Arc<FxHashMap<NodeId, FieldId>>,
+    /// Node → ABAC sensitivity label (LWW-resolved). Same flat-`Arc` rationale as `node_types`.
+    pub node_labels: Arc<FxHashMap<NodeId, u8>>,
 }
 
 impl Fold {
@@ -587,14 +591,16 @@ impl Fold {
     /// touched nodes equals a full [`Fold::observe`]. A register with no live value leaves the node
     /// absent (mirrors observe's omission).
     pub fn observe_node_into(&self, node: NodeId, snap: &mut Snapshot) {
-        snap.node_types.remove(&node);
-        snap.node_labels.remove(&node);
+        let types = Arc::make_mut(&mut snap.node_types);
+        let labels = Arc::make_mut(&mut snap.node_labels);
+        types.remove(&node);
+        labels.remove(&node);
         if let Some(st) = self.node_attrs.get(&node) {
             if let Some((_, ty)) = st.ty {
-                snap.node_types.insert(node, ty);
+                types.insert(node, ty);
             }
             if let Some((_, label)) = st.label {
-                snap.node_labels.insert(node, label);
+                labels.insert(node, label);
             }
         }
     }

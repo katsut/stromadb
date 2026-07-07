@@ -6,7 +6,6 @@
 //! filter (per H4: a principal only ever scores authorized nodes — no shared-index post-filter leak).
 //! Every result is bounded (`max_nodes`) and stamped with the version vector.
 
-use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
 use crate::fold::{ObjKey, Snapshot};
 use crate::ivf::IvfPq;
@@ -152,9 +151,9 @@ pub enum Filter {
 }
 
 impl Filter {
-    fn keep(&self, snapshot: &Snapshot, catalog: &Catalog, n: NodeId) -> bool {
+    fn keep(&self, snapshot: &Snapshot, n: NodeId) -> bool {
         match self {
-            Filter::HasType { ty } => catalog.node_type(n) == Some(*ty),
+            Filter::HasType { ty } => snapshot.node_types.get(&n) == Some(ty),
             Filter::HasValue { predicate } => query::point_one(snapshot, n, *predicate).is_some(),
             Filter::IntCmp {
                 predicate,
@@ -193,10 +192,11 @@ pub struct Pipeline {
     pub mode: ReadMode,
 }
 
-fn authorized(catalog: &Catalog, principal: &Principal, n: NodeId) -> bool {
-    catalog
-        .node_label(n)
-        .is_none_or(|l| principal.can_see_label(l))
+fn authorized(snapshot: &Snapshot, principal: &Principal, n: NodeId) -> bool {
+    snapshot
+        .node_labels
+        .get(&n)
+        .is_none_or(|&l| principal.can_see_label(l))
 }
 
 fn cap(ids: &mut Vec<NodeId>, scores: &mut Vec<f32>, max_nodes: usize) {
@@ -207,10 +207,10 @@ fn cap(ids: &mut Vec<NodeId>, scores: &mut Vec<f32>, max_nodes: usize) {
 }
 
 /// Evaluate a pipeline one-shot over the read state. authz is enforced at the source (scoped) and on
-/// every expanded node; the result is bounded by `max_nodes` and carries `vv` as its as_of.
+/// every expanded node; the result is bounded by `max_nodes` and carries `vv` as its as_of. Node
+/// attributes (type + ABAC label) are read off the pinned `snapshot` — the lock-free read view.
 pub fn run<A: AnnBackend>(
     snapshot: &Snapshot,
-    catalog: &Catalog,
     vector: &A,
     pipeline: &Pipeline,
     principal: &Principal,
@@ -221,7 +221,7 @@ pub fn run<A: AnnBackend>(
             let ids: Vec<NodeId> = subjects
                 .iter()
                 .copied()
-                .filter(|&n| authorized(catalog, principal, n))
+                .filter(|&n| authorized(snapshot, principal, n))
                 .collect();
             let scores = vec![1.0; ids.len()];
             (ids, scores)
@@ -233,7 +233,8 @@ pub fn run<A: AnnBackend>(
                 ReadMode::Fresh => None,
             };
             let keep = |n: NodeId| {
-                authorized(catalog, principal, n) && catalog.node_type(n) == Some(*target_type)
+                authorized(snapshot, principal, n)
+                    && snapshot.node_types.get(&n) == Some(target_type)
             };
             let hits = vector.ann_search(q, *k, scope, &keep);
             let ids = hits.iter().map(|(n, _)| *n).collect();
@@ -250,7 +251,7 @@ pub fn run<A: AnnBackend>(
                 let mut next: Vec<NodeId> = Vec::new();
                 for &s in &ids {
                     for n in query::expand(snapshot, s, *predicate) {
-                        if authorized(catalog, principal, n) && !next.contains(&n) {
+                        if authorized(snapshot, principal, n) && !next.contains(&n) {
                             next.push(n);
                         }
                     }
@@ -274,7 +275,7 @@ pub fn run<A: AnnBackend>(
                 let mut ni = Vec::new();
                 let mut ns = Vec::new();
                 for (i, &n) in ids.iter().enumerate() {
-                    if f.keep(snapshot, catalog, n) {
+                    if f.keep(snapshot, n) {
                         ni.push(n);
                         ns.push(scores[i]);
                     }
@@ -295,8 +296,10 @@ pub fn run<A: AnnBackend>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::catalog::{Cardinality, Range, RelProps, ValueType};
+    use crate::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
     use crate::fold::{ObjKey, Op, OrderKey, fold};
 
     fn ok(seq: u64) -> OrderKey {
@@ -308,6 +311,8 @@ mod tests {
     }
 
     // Person(1) worked-on Project(10,11); has-skill Skill(20). Person(2) worked-on Project(10).
+    // `c` interns the type/predicate names (field ids); node type/label attributes live on the
+    // pinned `snapshot` (the lock-free read view `run` now reads from), not on the catalog.
     fn setup() -> (Snapshot, Catalog, VectorIndex) {
         let mut c = Catalog::new();
         let person = c.register_type("Person");
@@ -327,15 +332,9 @@ mod tests {
             person,
             Range::Type(skill),
         );
-        for n in [1u64, 2] {
-            c.set_node_type(n, person);
-        }
-        c.set_node_type(10, project);
-        c.set_node_type(11, project);
-        c.set_node_type(20, skill);
 
         let wo = c.field_id("worked-on").unwrap();
-        let snap = fold(&[
+        let mut snap = fold(&[
             Op::AddMany {
                 subject: 1,
                 predicate: wo,
@@ -356,6 +355,13 @@ mod tests {
             },
         ])
         .observe();
+        let nt = Arc::make_mut(&mut snap.node_types);
+        for n in [1u64, 2] {
+            nt.insert(n, person);
+        }
+        nt.insert(10, project);
+        nt.insert(11, project);
+        nt.insert(20, skill);
 
         let mut vec = VectorIndex::new(2);
         vec.insert(1, 0, vec![0.0, 0.0]); // person 1 near origin
@@ -382,11 +388,8 @@ mod tests {
             person,
             Range::Value(ValueType::Int),
         );
-        for n in [1u64, 2, 3] {
-            c.set_node_type(n, person);
-        }
         // node 5 has no type (a non-Person); node 2's age is retroactively 41 as of valid-time 100.
-        let snap = fold(&[
+        let mut snap = fold(&[
             Op::SetOne {
                 subject: 1,
                 predicate: age,
@@ -421,6 +424,10 @@ mod tests {
             },
         ])
         .observe();
+        let nt = Arc::make_mut(&mut snap.node_types);
+        for n in [1u64, 2, 3] {
+            nt.insert(n, person);
+        }
         let vec = VectorIndex::new(2);
         let ids = |transforms: Vec<Transform>| -> BTreeSet<u64> {
             let pl = Pipeline {
@@ -431,7 +438,7 @@ mod tests {
                 max_nodes: 100,
                 mode: ReadMode::Fresh,
             };
-            run(&snap, &c, &vec, &pl, &everyone(), VersionVector::new(4, 0))
+            run(&snap, &vec, &pl, &everyone(), VersionVector::new(4, 0))
                 .ids
                 .into_iter()
                 .collect()
@@ -489,7 +496,7 @@ mod tests {
             max_nodes: 100,
             mode: ReadMode::Fresh,
         };
-        let t = run(&snap, &c, &vec, &pl, &everyone(), VersionVector::new(3, 3));
+        let t = run(&snap, &vec, &pl, &everyone(), VersionVector::new(3, 3));
         // Skill(20) is nearer than Person(2) but wrong type → not a source hit; projects {10,11}.
         assert_eq!(
             t.ids
@@ -503,8 +510,8 @@ mod tests {
 
     #[test]
     fn authz_scopes_the_source() {
-        let (snap, mut c, vec) = setup();
-        c.set_node_label(2, 3); // person 2 is sensitive (label 3)
+        let (mut snap, c, vec) = setup();
+        Arc::make_mut(&mut snap.node_labels).insert(2, 3); // person 2 is sensitive (label 3)
         let person = c.field_id("Person").unwrap();
         let pl = Pipeline {
             source: Source::TypeAnn {
@@ -520,13 +527,13 @@ mod tests {
         let p_no = Principal {
             allowed_labels: 0b1,
         }; // only public (label 0)
-        let t = run(&snap, &c, &vec, &pl, &p_no, VersionVector::new(3, 3));
+        let t = run(&snap, &vec, &pl, &p_no, VersionVector::new(3, 3));
         assert!(!t.ids.contains(&2));
         // a principal WITH label 3 sees it
         let p_yes = Principal {
             allowed_labels: 0b1 | (1 << 3),
         };
-        let t2 = run(&snap, &c, &vec, &pl, &p_yes, VersionVector::new(3, 3));
+        let t2 = run(&snap, &vec, &pl, &p_yes, VersionVector::new(3, 3));
         assert!(t2.ids.contains(&2));
     }
 
@@ -563,8 +570,8 @@ mod tests {
             mode: ReadMode::Fresh,
         };
         // exact oracle vs IVF-PQ+rerank must agree on the id set through the whole pipeline
-        let exact = run(&snap, &c, &vec, &pl, &everyone(), VersionVector::new(3, 3));
-        let real = run(&snap, &c, &ivf, &pl, &everyone(), VersionVector::new(3, 3));
+        let exact = run(&snap, &vec, &pl, &everyone(), VersionVector::new(3, 3));
+        let real = run(&snap, &ivf, &pl, &everyone(), VersionVector::new(3, 3));
         let set = |t: &Traverser| {
             t.ids
                 .iter()
@@ -577,8 +584,8 @@ mod tests {
 
     #[test]
     fn ivfpq_backend_scopes_authz_at_source() {
-        let (snap, mut c, _) = setup();
-        c.set_node_label(2, 3); // person 2 sensitive
+        let (mut snap, c, _) = setup();
+        Arc::make_mut(&mut snap.node_labels).insert(2, 3); // person 2 sensitive
         let ivf = ivf_backend();
         let person = c.field_id("Person").unwrap();
         let pl = Pipeline {
@@ -595,7 +602,7 @@ mod tests {
             allowed_labels: 0b1,
         };
         assert!(
-            !run(&snap, &c, &ivf, &pl, &p_no, VersionVector::new(3, 3))
+            !run(&snap, &ivf, &pl, &p_no, VersionVector::new(3, 3))
                 .ids
                 .contains(&2)
         );
@@ -603,7 +610,7 @@ mod tests {
             allowed_labels: 0b1 | (1 << 3),
         };
         assert!(
-            run(&snap, &c, &ivf, &pl, &p_yes, VersionVector::new(3, 3))
+            run(&snap, &ivf, &pl, &p_yes, VersionVector::new(3, 3))
                 .ids
                 .contains(&2)
         );
@@ -623,7 +630,7 @@ mod tests {
             max_nodes: 1, // token budget = 1 node
             mode: ReadMode::Fresh,
         };
-        let t = run(&snap, &c, &vec, &pl, &everyone(), VersionVector::new(3, 3));
+        let t = run(&snap, &vec, &pl, &everyone(), VersionVector::new(3, 3));
         assert_eq!(t.ids.len(), 1);
         assert_eq!(t.ids[0], 1); // nearest Person to origin
     }

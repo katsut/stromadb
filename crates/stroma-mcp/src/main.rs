@@ -90,7 +90,7 @@ fn tools() -> Value {
     ])
 }
 
-fn call_tool(db: &mut Db, name: &str, args: &Value) -> Result<Value, String> {
+fn call_tool(db: &Db, name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "point" | "expand" | "search" | "retrieve_context" => {
             let mut req = args.clone();
@@ -121,7 +121,7 @@ fn rpc_result(id: &Value, result: Value) -> Value {
 }
 
 /// Handle one request; returns Some(response) for requests, None for notifications.
-fn handle(db: &mut Db, msg: &Value) -> Option<Value> {
+fn handle(db: &Db, msg: &Value) -> Option<Value> {
     let method = msg["method"].as_str().unwrap_or("");
     // Notifications have no id and expect no response (`?` returns None here).
     let id = msg.get("id").cloned()?;
@@ -174,7 +174,7 @@ fn main() {
     let n_max: usize = opt(&args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
         .parse()
         .unwrap_or(stroma_db::DEFAULT_N_MAX);
-    let mut db = match Db::open_with(std::path::Path::new(&dir), n_max) {
+    let db = match Db::open_with(std::path::Path::new(&dir), n_max) {
         Ok(db) => db,
         Err(e) => {
             eprintln!("error: {e}");
@@ -200,7 +200,7 @@ fn main() {
                 continue;
             }
         };
-        if let Some(resp) = handle(&mut db, &msg) {
+        if let Some(resp) = handle(&db, &msg) {
             if writeln!(stdout, "{resp}").is_err() {
                 break;
             }

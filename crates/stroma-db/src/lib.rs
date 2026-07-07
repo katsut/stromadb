@@ -2,11 +2,19 @@
 //! `stroma-serve` HTTP/MCP surface. Owns the on-disk layout, replay-on-open, a cached vector index,
 //! and a single JSON dispatch for queries so both frontends speak the same contract.
 //!
+//! Concurrency (lock-free reads during writes): [`Db`] splits into a write authority
+//! ([`WriteState`], behind a `Mutex`) and an immutable pinned read view ([`ReadState`], behind an
+//! `RwLock<Arc<ReadState>>`). A read clones the current `Arc<ReadState>` under a momentary lock and
+//! then runs entirely on that pinned state with no lock held; a write holds the write mutex for the
+//! whole ETL and, on completion, swaps in a fresh `Arc<ReadState>`. So a long write never blocks a
+//! read, and a read is snapshot-isolated against writes that land after it pins.
+//!
 //! Directory layout (authoritative inputs only; derived stores rebuild on open — the DR design):
-//!   wal.log          append-only changelog (facts; crash-sound, group-commit fsync)
+//!   wal.log          append-only changelog (facts + node type/label ops; crash-sound, group-commit)
 //!   schema.jsonl     type/predicate definitions, replayed in order (Field-ID interning is
 //!                    order-deterministic, so ids are stable across restarts)
-//!   nodes.jsonl      node type/label assignments, replayed
+//!   nodes.jsonl      node type/label assignments (mirrored here for counts; the authority is the WAL
+//!                    ops, which the recovered snapshot carries — nodes.jsonl is not replayed)
 //!   embeddings.bin   received embeddings, flat f32 LE; embeddings.ids = u64 LE per row
 //!   meta.json        { "dim": N }
 //!
@@ -17,12 +25,14 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::{Value, json};
 use stroma_core::calendar::Calendar;
 use stroma_core::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
 use stroma_core::changelog::WriteKind;
 use stroma_core::engine::Engine;
+use stroma_core::fact::NodeId;
 use stroma_core::fold::{ObjKey, Snapshot};
 use stroma_core::ir::{Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run};
 use stroma_core::ivf::IvfPq;
@@ -41,17 +51,52 @@ pub struct IngestStats {
     pub durable_head: u64,
 }
 
-/// A directory-backed database: durable engine + typed catalog + cached vector index.
-pub struct Db {
-    dir: PathBuf,
-    eng: Engine,
+/// The schema-level catalog authority: the interner + registered types/predicates plus each
+/// predicate's cardinality. Cloneable and `Arc`-shared into the read view; rebuilt (copy-on-write)
+/// only when a `type_def`/`pred_def` arrives, so the frequent node/fact writes never re-clone it.
+#[derive(Clone, Default)]
+struct Schema {
     cat: Catalog,
     cardinality: HashMap<String, Cardinality>,
-    emb_ids: Vec<u64>,
-    emb: Vec<f32>,
+}
+
+/// A directory-backed database. Reads are lock-free over a pinned [`ReadState`]; writes hold the
+/// `write` mutex for the ETL and then publish a fresh read view.
+pub struct Db {
+    write: Mutex<WriteState>,
+    read: RwLock<Arc<ReadState>>,
+}
+
+/// Everything mutated during a write. Held behind `Db::write`.
+struct WriteState {
+    dir: PathBuf,
+    eng: Engine,
+    /// Schema authority, `Arc`-shared with the current read view (copy-on-write on def changes).
+    schema: Arc<Schema>,
+    /// Write-side node→label map — the index-build authority (labels ride the ANN posting lists).
+    /// Node types reach readers via the snapshot's `node_types` (folded from `SetNodeType` ops).
+    node_label_w: HashMap<NodeId, u8>,
+    /// Received embeddings, `Arc`-shared with the read view; appended (copy-on-write) by `embed`.
+    emb_ids: Arc<Vec<u64>>,
+    emb: Arc<Vec<f32>>,
     dim: usize,
-    index: Option<IvfPq>,
+    index: Arc<Option<IvfPq>>,
     n_max: usize,
+}
+
+/// An immutable, pinned read view. A read clones the `Arc<ReadState>` then runs entirely on it with
+/// no lock held, so it is isolated from any write that publishes a newer view afterwards.
+pub struct ReadState {
+    /// Graph + node type/label maps, pinned at publish time (from the engine's shared snapshot).
+    snap: Arc<Snapshot>,
+    /// Schema-level catalog, `Arc`-shared; rebuilt only on `type_def`/`pred_def`.
+    schema: Arc<Schema>,
+    index: Arc<Option<IvfPq>>,
+    emb_ids: Arc<Vec<u64>>,
+    emb: Arc<Vec<f32>>,
+    dim: usize,
+    /// The durable changelog head this view was pinned at — the `as_of` for the version vector.
+    durable_head: u64,
 }
 
 impl Db {
@@ -66,8 +111,8 @@ impl Db {
         Ok(())
     }
 
-    /// Open an existing database: recover the WAL, replay the catalog, load embeddings, build the
-    /// vector index. Uses [`DEFAULT_N_MAX`] for the backlog bound.
+    /// Open an existing database: recover the WAL (facts + node ops), replay the schema catalog, load
+    /// embeddings, build the vector index. Uses [`DEFAULT_N_MAX`] for the backlog bound.
     pub fn open(dir: &Path) -> DbResult<Db> {
         Self::open_with(dir, DEFAULT_N_MAX)
     }
@@ -83,16 +128,13 @@ impl Db {
             ));
         }
         let eng = Engine::open(dir.join("wal.log"), n_max).map_err(|e| format!("open wal: {e}"))?;
-        let mut cat = Catalog::new();
-        let mut cardinality = HashMap::new();
+        let mut schema = Schema::default();
         for line in read_lines(&dir.join("schema.jsonl")) {
             let v: Value = serde_json::from_str(&line).map_err(|e| format!("schema.jsonl: {e}"))?;
-            apply_def(&mut cat, &mut cardinality, &v)?;
+            apply_def(&mut schema, &v)?;
         }
-        for line in read_lines(&dir.join("nodes.jsonl")) {
-            let v: Value = serde_json::from_str(&line).map_err(|e| format!("nodes.jsonl: {e}"))?;
-            apply_node(&mut cat, &v["node"])?;
-        }
+        // Node type/label attributes live in the WAL now (SetNodeType/SetNodeLabel ops), so the
+        // recovered snapshot already carries them — nodes.jsonl is kept only for counts, not replayed.
         let meta: Value = fs::read_to_string(dir.join("meta.json"))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -103,42 +145,27 @@ impl Db {
         if dim > 0 && emb.len() != emb_ids.len() * dim {
             return Err("embeddings.bin / embeddings.ids length mismatch".into());
         }
-        let mut db = Db {
+        // Reconstruct the write-side label map from the recovered snapshot (its single source now).
+        let snap = eng.snapshot_arc();
+        let node_label_w: HashMap<NodeId, u8> =
+            snap.node_labels.iter().map(|(&k, &v)| (k, v)).collect();
+        let mut w = WriteState {
             dir: dir.to_path_buf(),
             eng,
-            cat,
-            cardinality,
-            emb_ids,
-            emb,
+            schema: Arc::new(schema),
+            node_label_w,
+            emb_ids: Arc::new(emb_ids),
+            emb: Arc::new(emb),
             dim,
-            index: None,
+            index: Arc::new(None),
             n_max,
         };
-        db.rebuild_index();
-        Ok(db)
-    }
-
-    /// Clear the database to empty: remove the authoritative inputs (changelog, schema/node
-    /// assignments, received embeddings) and re-open a fresh engine. **Destructive** — every fact is
-    /// gone. Intended for tests and dev/demo resets; the `stroma-serve` endpoint that exposes it is
-    /// opt-in and off by default.
-    pub fn reset(&mut self) -> DbResult<()> {
-        for f in [
-            "wal.log",
-            "schema.jsonl",
-            "nodes.jsonl",
-            "embeddings.bin",
-            "embeddings.ids",
-            "meta.json",
-        ] {
-            let p = self.dir.join(f);
-            if p.exists() {
-                fs::remove_file(&p).map_err(|e| format!("reset: remove {f}: {e}"))?;
-            }
-        }
-        Self::init(&self.dir)?;
-        *self = Self::open_with(&self.dir, self.n_max)?;
-        Ok(())
+        w.rebuild_index();
+        let rs = Arc::new(w.build_read_state());
+        Ok(Db {
+            write: Mutex::new(w),
+            read: RwLock::new(rs),
+        })
     }
 
     /// Open the database, first creating an empty one if the directory has no WAL yet — the
@@ -155,6 +182,115 @@ impl Db {
         Self::open_with(dir, n_max)
     }
 
+    /// Clear the database to empty: remove the authoritative inputs (changelog, schema/node
+    /// assignments, received embeddings) and re-open a fresh engine, then publish an empty read view.
+    /// **Destructive** — every fact is gone. Intended for tests and dev/demo resets; the
+    /// `stroma-serve` endpoint that exposes it is opt-in and off by default.
+    pub fn reset(&self) -> DbResult<()> {
+        let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        for f in [
+            "wal.log",
+            "schema.jsonl",
+            "nodes.jsonl",
+            "embeddings.bin",
+            "embeddings.ids",
+            "meta.json",
+        ] {
+            let p = w.dir.join(f);
+            if p.exists() {
+                fs::remove_file(&p).map_err(|e| format!("reset: remove {f}: {e}"))?;
+            }
+        }
+        Self::init(&w.dir)?;
+        let eng = Engine::open(w.dir.join("wal.log"), w.n_max)
+            .map_err(|e| format!("reset: open: {e}"))?;
+        w.eng = eng;
+        w.schema = Arc::new(Schema::default());
+        w.node_label_w.clear();
+        w.emb_ids = Arc::new(Vec::new());
+        w.emb = Arc::new(Vec::new());
+        w.dim = 0;
+        w.index = Arc::new(None);
+        self.publish(&w);
+        Ok(())
+    }
+
+    /// Ingest a JSONL batch (type_def / pred_def / node / fact / retract). Durable on return; the
+    /// updated read view is published atomically before this returns.
+    pub fn ingest_str(&self, jsonl: &str) -> DbResult<IngestStats> {
+        let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let s = w.ingest(jsonl)?;
+        self.publish(&w);
+        Ok(s)
+    }
+
+    /// Append received embeddings ({"node":N,"vector":[...]} per line), rebuild the index, and publish.
+    pub fn embed_str(&self, jsonl: &str) -> DbResult<usize> {
+        let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let n = w.embed(jsonl)?;
+        self.publish(&w);
+        Ok(n)
+    }
+
+    /// Pin the current read view and run a JSON query on it with no lock held (lock-free read).
+    ///
+    /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T]}` → `{"one":..}` or `{"many":[..]}`
+    ///   (`valid_at` = valid-time as-of read for a One-predicate: the value in effect at instant `T`)
+    /// - `{"op":"expand","subject":N,"predicate":"name"}` → `{"nodes":[..]}`
+    /// - `{"op":"edge_props","subject":N,"predicate":"name","object":{..}}` → `{"props":{k:v,..}}`
+    ///   (properties on the edge `(subject, predicate, object)`; set at ingest via a fact's `props`)
+    /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
+    ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
+    pub fn query(&self, req: &Value) -> DbResult<Value> {
+        let rs = self.read_state();
+        rs.query(req)
+    }
+
+    /// Pin and return the current read view (an `Arc<ReadState>`). Cheap — a momentary lock + an
+    /// `Arc` clone. The returned view is stable: writes that publish afterwards do not affect it.
+    pub fn read_state(&self) -> Arc<ReadState> {
+        self.read.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Publish a fresh read view built from the (locked) write state.
+    fn publish(&self, w: &WriteState) {
+        *self.read.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(w.build_read_state());
+    }
+
+    pub fn cardinality_of(&self, predicate: &str) -> Option<Cardinality> {
+        self.read
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .schema
+            .cardinality
+            .get(predicate)
+            .copied()
+    }
+
+    /// Current durable changelog head — a cheap in-memory monotonic counter used by the console's
+    /// live-update poll to detect that the database has advanced (read off the pinned view).
+    pub fn durable_head(&self) -> u64 {
+        self.read
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .durable_head
+    }
+
+    pub fn stats(&self) -> Value {
+        let w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let wal_bytes = fs::metadata(w.dir.join("wal.log"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        json!({
+            "facts": { "durable_head": w.eng.durable_head(), "unmerged": w.eng.unmerged() },
+            "schema": { "defs": read_lines(&w.dir.join("schema.jsonl")).len(), "nodes": read_lines(&w.dir.join("nodes.jsonl")).len() },
+            "embeddings": { "count": w.emb_ids.len(), "dim": w.dim },
+            "storage": { "wal_bytes": wal_bytes, "embeddings_bytes": w.emb.len() * 4 },
+        })
+    }
+}
+
+impl WriteState {
     fn append_line(&self, file: &str, line: &str) -> DbResult<()> {
         let mut f = OpenOptions::new()
             .create(true)
@@ -166,7 +302,7 @@ impl Db {
 
     fn rebuild_index(&mut self) {
         if self.emb_ids.is_empty() || self.dim == 0 {
-            self.index = None;
+            self.index = Arc::new(None);
             return;
         }
         let vecs: Vec<Vec<f32>> = (0..self.emb_ids.len())
@@ -188,16 +324,31 @@ impl Db {
                         id,
                         i as u64,
                         v.clone(),
-                        self.cat.node_label(id).unwrap_or(0) as u32,
+                        self.node_label_w.get(&id).copied().unwrap_or(0) as u32,
                     )
                 })
                 .collect(),
         );
-        self.index = Some(idx);
+        self.index = Arc::new(Some(idx));
     }
 
-    /// Ingest a JSONL batch (type_def / pred_def / node / fact / retract). Durable on return.
-    pub fn ingest_str(&mut self, jsonl: &str) -> DbResult<IngestStats> {
+    /// Snapshot the current write state into an immutable read view.
+    fn build_read_state(&self) -> ReadState {
+        ReadState {
+            snap: self.eng.snapshot_arc(),
+            schema: Arc::clone(&self.schema),
+            index: Arc::clone(&self.index),
+            emb_ids: Arc::clone(&self.emb_ids),
+            emb: Arc::clone(&self.emb),
+            dim: self.dim,
+            durable_head: self.eng.durable_head(),
+        }
+    }
+
+    /// The write-side of ingest: parse the batch, emit ops to the engine, persist inputs, fsync,
+    /// materialize. Node type/label lines emit `SetNodeType`/`SetNodeLabel` ops through the engine so
+    /// the snapshot carries them, and mirror the label into `node_label_w` for the index build.
+    fn ingest(&mut self, jsonl: &str) -> DbResult<IngestStats> {
         let mut s = IngestStats::default();
         let mut batch: Vec<(u32, WriteKind)> = Vec::new();
         let mut touched_nodes = false;
@@ -205,11 +356,11 @@ impl Db {
             let v: Value =
                 serde_json::from_str(line).map_err(|e| format!("bad json: {e}: {line}"))?;
             if v.get("type_def").is_some() || v.get("pred_def").is_some() {
-                apply_def(&mut self.cat, &mut self.cardinality, &v)?;
+                apply_def(Arc::make_mut(&mut self.schema), &v)?;
                 self.append_line("schema.jsonl", line)?;
                 s.defs += 1;
-            } else if v.get("node").is_some() {
-                apply_node(&mut self.cat, &v["node"])?;
+            } else if let Some(n) = v.get("node") {
+                self.apply_node(n)?;
                 self.append_line("nodes.jsonl", line)?;
                 touched_nodes = true;
                 s.nodes += 1;
@@ -217,13 +368,14 @@ impl Db {
                 let subject = f["subject"].as_u64().ok_or("fact.subject missing")?;
                 let pname = f["predicate"].as_str().ok_or("fact.predicate missing")?;
                 let predicate = self
+                    .schema
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 let object = obj_key(&f["object"])?;
                 let valid_from = f["valid_from"].as_i64().unwrap_or(0);
                 let valid_to = f["valid_to"].as_i64();
-                let kind = match self.cardinality.get(pname) {
+                let kind = match self.schema.cardinality.get(pname) {
                     Some(Cardinality::One) => WriteKind::SetOne {
                         subject,
                         predicate,
@@ -262,6 +414,7 @@ impl Db {
                 let subject = r["subject"].as_u64().ok_or("retract.subject missing")?;
                 let pname = r["predicate"].as_str().ok_or("retract.predicate missing")?;
                 let predicate = self
+                    .schema
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
@@ -284,6 +437,36 @@ impl Db {
         Ok(s)
     }
 
+    /// A node record: emit its type/label as engine ops (so the snapshot carries them) and mirror the
+    /// label into the write-side index-build map.
+    fn apply_node(&mut self, n: &Value) -> DbResult<()> {
+        let id = n["id"].as_u64().ok_or("node.id missing")?;
+        if let Some(t) = n["type"].as_str() {
+            let tid = self
+                .schema
+                .cat
+                .field_id(t)
+                .ok_or(format!("unknown type: {t}"))?;
+            self.eng
+                .write(
+                    0,
+                    WriteKind::SetNodeType {
+                        node: id,
+                        type_id: tid,
+                    },
+                )
+                .map_err(|e| format!("backpressure: {e:?}"))?;
+        }
+        if let Some(l) = n["label"].as_u64() {
+            let label = l as u8;
+            self.node_label_w.insert(id, label);
+            self.eng
+                .write(0, WriteKind::SetNodeLabel { node: id, label })
+                .map_err(|e| format!("backpressure: {e:?}"))?;
+        }
+        Ok(())
+    }
+
     fn flush(&mut self, batch: &mut Vec<(u32, WriteKind)>) -> DbResult<()> {
         if batch.is_empty() {
             return Ok(());
@@ -296,9 +479,9 @@ impl Db {
         Ok(())
     }
 
-    /// Append received embeddings ({"node":N,"vector":[...]} per line) and rebuild the index.
-    pub fn embed_str(&mut self, jsonl: &str) -> DbResult<usize> {
-        let mut n = 0usize;
+    fn embed(&mut self, jsonl: &str) -> DbResult<usize> {
+        // Parse + validate the whole batch first (so a mid-batch dimension error persists nothing).
+        let mut vectors: Vec<(u64, Vec<f32>)> = Vec::new();
         for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
             let v: Value = serde_json::from_str(line).map_err(|e| format!("bad json: {e}"))?;
             let node = v["node"].as_u64().ok_or("embed.node missing")?;
@@ -323,66 +506,65 @@ impl Db {
                     vecv.len()
                 ));
             }
-            self.emb.extend_from_slice(&vecv);
-            self.emb_ids.push(node);
-            n += 1;
+            vectors.push((node, vecv));
         }
-        // persist (append)
+        let n = vectors.len();
+        if n == 0 {
+            return Ok(0);
+        }
+        // persist (append) then update the in-memory buffers (copy-on-write so readers keep their Arc)
         let mut bin = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.dir.join("embeddings.bin"))
             .map_err(|e| format!("{e}"))?;
-        let start = self.emb.len() - n * self.dim;
-        for &x in &self.emb[start..] {
-            bin.write_all(&x.to_le_bytes())
-                .map_err(|e| format!("{e}"))?;
-        }
         let mut ids = OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.dir.join("embeddings.ids"))
             .map_err(|e| format!("{e}"))?;
-        for &id in &self.emb_ids[self.emb_ids.len() - n..] {
-            ids.write_all(&id.to_le_bytes())
+        let emb = Arc::make_mut(&mut self.emb);
+        let emb_ids = Arc::make_mut(&mut self.emb_ids);
+        for (node, vecv) in &vectors {
+            for &x in vecv {
+                bin.write_all(&x.to_le_bytes())
+                    .map_err(|e| format!("{e}"))?;
+            }
+            ids.write_all(&node.to_le_bytes())
                 .map_err(|e| format!("{e}"))?;
+            emb.extend_from_slice(vecv);
+            emb_ids.push(*node);
         }
         self.rebuild_index();
         Ok(n)
     }
+}
 
-    /// Run a JSON query request and return a JSON result.
-    ///
-    /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T]}` → `{"one":..}` or `{"many":[..]}`
-    ///   (`valid_at` = valid-time as-of read for a One-predicate: the value in effect at instant `T`)
-    /// - `{"op":"expand","subject":N,"predicate":"name"}` → `{"nodes":[..]}`
-    /// - `{"op":"edge_props","subject":N,"predicate":"name","object":{..}}` → `{"props":{k:v,..}}`
-    ///   (properties on the edge `(subject, predicate, object)`; set at ingest via a fact's `props`)
-    /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
-    ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
+impl ReadState {
+    /// Run a JSON query request against this pinned read view.
     pub fn query(&self, req: &Value) -> DbResult<Value> {
-        let snap = self.eng.snapshot_arc();
         match req["op"].as_str().ok_or("missing op")? {
             "point" => {
                 let subject = req["subject"].as_u64().ok_or("point.subject missing")?;
                 let pname = req["predicate"].as_str().ok_or("point.predicate missing")?;
                 let pid = self
+                    .schema
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 // optional valid-time as-of: `"valid_at": T` returns the One-value in effect at T
                 // (respecting the [valid_from, valid_to) interval); absent = current functional value.
                 let valid_at = req["valid_at"].as_i64();
-                Ok(match self.cardinality.get(pname) {
+                Ok(match self.schema.cardinality.get(pname) {
                     Some(Cardinality::One) => {
                         let obj = match valid_at {
-                            Some(at) => query::point_one_asof(&snap, subject, pid, at),
-                            None => query::point_one(&snap, subject, pid),
+                            Some(at) => query::point_one_asof(&self.snap, subject, pid, at),
+                            None => query::point_one(&self.snap, subject, pid),
                         };
                         json!({ "one": obj.map(fmt_obj) })
                     }
                     _ => {
-                        json!({ "many": query::point_many(&snap, subject, pid).into_iter().map(fmt_obj).collect::<Vec<_>>() })
+                        json!({ "many": query::point_many(&self.snap, subject, pid).into_iter().map(fmt_obj).collect::<Vec<_>>() })
                     }
                 })
             }
@@ -392,15 +574,16 @@ impl Db {
                     .as_str()
                     .ok_or("expand.predicate missing")?;
                 let pid = self
+                    .schema
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 Ok(
-                    json!({ "nodes": query::expand(&snap, subject, pid).into_iter().collect::<Vec<_>>() }),
+                    json!({ "nodes": query::expand(&self.snap, subject, pid).into_iter().collect::<Vec<_>>() }),
                 )
             }
             "search" => {
-                let t = self.run_hybrid(req, &snap)?;
+                let t = self.run_hybrid(req)?;
                 Ok(
                     json!({ "ids": t.ids, "scores": t.scores, "as_of": { "changelog": t.as_of.changelog_seqno, "vector": t.as_of.vector_watermark } }),
                 )
@@ -413,11 +596,12 @@ impl Db {
                     .as_str()
                     .ok_or("edge_props.predicate missing")?;
                 let pid = self
+                    .schema
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 let object = obj_key(&req["object"])?;
-                let props = query::edge_props(&snap, subject, pid, &object)
+                let props = query::edge_props(&self.snap, subject, pid, &object)
                     .map(|m| {
                         m.iter()
                             .map(|(k, v)| (k.clone(), fmt_obj(v.clone())))
@@ -426,13 +610,13 @@ impl Db {
                     .unwrap_or_default();
                 Ok(json!({ "props": props }))
             }
-            "retrieve_context" => self.retrieve_context(req, &snap),
-            "neighborhood" => self.neighborhood(req, &snap),
-            "node" => self.node_detail(req, &snap),
-            "graph" => self.graph(req, &snap),
-            "overview" => self.overview(req, &snap),
-            "schema" => Ok(self.schema()),
-            "pipeline" => self.pipeline(req, &snap),
+            "retrieve_context" => self.retrieve_context(req),
+            "neighborhood" => self.neighborhood(req),
+            "node" => self.node_detail(req),
+            "graph" => self.graph(req),
+            "overview" => self.overview(req),
+            "schema" => Ok(self.schema_view()),
+            "pipeline" => self.pipeline(req),
             other => Err(format!("unknown op: {other}")),
         }
     }
@@ -441,7 +625,7 @@ impl Db {
     /// given `predicate` or *all* node-valued edges (ontology view), authz-scoped, capped at
     /// `max_nodes` (default 3000). Returns `{nodes:[{id,depth}], edges:[[a,b]]}` — the primitive the
     /// UI's "distance from a node" filter renders.
-    fn neighborhood(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+    fn neighborhood(&self, req: &Value) -> DbResult<Value> {
         let focus = req["subject"].as_u64().ok_or("subject required")?;
         let hops = req["hops"].as_u64().unwrap_or(2) as usize;
         let cap = req["max_nodes"].as_u64().unwrap_or(3000) as usize;
@@ -451,16 +635,18 @@ impl Db {
             .unwrap_or(u32::MAX);
         let pred = match req["predicate"].as_str() {
             Some(p) => Some(
-                self.cat
+                self.schema
+                    .cat
                     .field_id(p)
                     .ok_or(format!("unknown predicate: {p}"))?,
             ),
             None => None,
         };
         let visible = |n: u64| {
-            self.cat
-                .node_label(n)
-                .is_none_or(|l| (labels >> l) & 1 == 1)
+            self.snap
+                .node_labels
+                .get(&n)
+                .is_none_or(|&l| (labels >> l) & 1 == 1)
         };
 
         let mut depth: HashMap<u64, usize> = HashMap::new();
@@ -470,7 +656,7 @@ impl Db {
         }
         depth.insert(focus, 0);
         // undirected adjacency: reach both what the focus points to and what points at it.
-        let adj = query::undirected_adjacency(snap, pred);
+        let adj = query::undirected_adjacency(&self.snap, pred);
         let mut frontier = vec![focus];
         for d in 0..hops {
             if frontier.is_empty() || depth.len() >= cap {
@@ -493,9 +679,9 @@ impl Db {
         }
         let nodes: Vec<Value> = depth
             .iter()
-            .map(|(&id, &d)| json!({ "id": id, "depth": d, "name": self.display_name(snap, id) }))
+            .map(|(&id, &d)| json!({ "id": id, "depth": d, "name": self.display_name(id) }))
             .collect();
-        let strengths = query::edge_strengths(snap, pred);
+        let strengths = query::edge_strengths(&self.snap, pred);
         let edges: Vec<Value> = edges
             .iter()
             .filter(|(a, b)| depth.contains_key(a) && depth.contains_key(b))
@@ -508,34 +694,36 @@ impl Db {
     /// assertion (One current value + Many present set), predicate names resolved via the catalog.
     /// Post-authz: if `allowed_labels` is given and the node's label is not permitted, returns
     /// `{id, denied:true}` rather than leaking its properties. Powers the UI's node-inspect panel.
-    fn node_detail(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+    fn node_detail(&self, req: &Value) -> DbResult<Value> {
         let subject = req["subject"].as_u64().ok_or("subject required")?;
         let labels = req["allowed_labels"]
             .as_u64()
             .map(|m| m as u32)
             .unwrap_or(u32::MAX);
         let visible = self
-            .cat
-            .node_label(subject)
-            .is_none_or(|l| (labels >> l) & 1 == 1);
+            .snap
+            .node_labels
+            .get(&subject)
+            .is_none_or(|&l| (labels >> l) & 1 == 1);
         if !visible {
             return Ok(json!({ "id": subject, "denied": true }));
         }
-        let (ones, manys) = query::describe(snap, subject);
+        let (ones, manys) = query::describe(&self.snap, subject);
         let mut props = Vec::with_capacity(ones.len() + manys.len());
         for (p, ok) in ones {
-            let name = self.cat.name(p).unwrap_or("?");
+            let name = self.schema.cat.name(p).unwrap_or("?");
             props.push(json!({ "predicate": name, "card": "one", "value": fmt_obj(ok) }));
         }
         for (p, set) in manys {
-            let name = self.cat.name(p).unwrap_or("?");
+            let name = self.schema.cat.name(p).unwrap_or("?");
             let vals: Vec<Value> = set.into_iter().map(fmt_obj).collect();
             props.push(json!({ "predicate": name, "card": "many", "values": vals }));
         }
         let ty = self
-            .cat
-            .node_type(subject)
-            .and_then(|t| self.cat.name(t))
+            .snap
+            .node_types
+            .get(&subject)
+            .and_then(|&t| self.schema.cat.name(t))
             .map(|s| s.to_string());
         // the node's stored embedding, if any (so the console can show it carries a vector)
         let embedding: Option<Vec<f32>> = self
@@ -546,7 +734,7 @@ impl Db {
         Ok(json!({
             "id": subject,
             "type": ty,
-            "label": self.cat.node_label(subject),
+            "label": self.snap.node_labels.get(&subject).copied(),
             "props": props,
             "embedding": embedding,
             "dim": self.dim,
@@ -556,19 +744,20 @@ impl Db {
     /// The schema vocabulary: registered predicates (name, cardinality, domain/range) and the set of
     /// node labels actually in use — so a client can discover what is queryable and which sensitivity
     /// labels exist, instead of guessing predicate names or bitmask values.
-    fn schema(&self) -> Value {
+    fn schema_view(&self) -> Value {
         let mut preds: Vec<Value> = self
+            .schema
             .cat
             .predicates()
             .map(|p| {
-                let name = self.cat.name(p.id).unwrap_or("?");
+                let name = self.schema.cat.name(p.id).unwrap_or("?");
                 let card = match p.cardinality {
                     Cardinality::One => "one",
                     Cardinality::Many => "many",
                 };
-                let domain = self.cat.name(p.domain).map(|s| s.to_string());
+                let domain = self.schema.cat.name(p.domain).map(|s| s.to_string());
                 let range = match p.range {
-                    Range::Type(t) => json!({ "type": self.cat.name(t) }),
+                    Range::Type(t) => json!({ "type": self.schema.cat.name(t) }),
                     Range::Value(v) => json!({ "value": match v {
                         ValueType::Int => "int",
                         ValueType::Float => "float",
@@ -580,28 +769,27 @@ impl Db {
             })
             .collect();
         preds.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        json!({ "predicates": preds, "labels": self.cat.labels_in_use() })
+        json!({ "predicates": preds, "labels": labels_in_use(&self.snap) })
     }
 
     /// Whole-graph view: every declared node and its node-valued edges, authz-scoped and capped at
     /// `max_nodes` (default 3000). Unlike `neighborhood` there is no focal distance — the result is
     /// the entire visible graph (or a `truncated` prefix when it exceeds the cap). Same
     /// `{nodes:[{id,depth}], edges:[[a,b]]}` shape so the UI renders it identically.
-    fn graph(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+    fn graph(&self, req: &Value) -> DbResult<Value> {
         let cap = req["max_nodes"].as_u64().unwrap_or(3000) as usize;
         let labels = req["allowed_labels"]
             .as_u64()
             .map(|m| m as u32)
             .unwrap_or(u32::MAX);
         let visible = |n: u64| {
-            self.cat
-                .node_label(n)
-                .is_none_or(|l| (labels >> l) & 1 == 1)
+            self.snap
+                .node_labels
+                .get(&n)
+                .is_none_or(|&l| (labels >> l) & 1 == 1)
         };
 
-        let all: Vec<u64> = self
-            .cat
-            .node_ids()
+        let all: Vec<u64> = node_ids(&self.snap)
             .into_iter()
             .filter(|&n| visible(n))
             .collect();
@@ -610,7 +798,7 @@ impl Db {
 
         let mut edges: BTreeSet<(u64, u64)> = BTreeSet::new();
         for &u in &keep {
-            for v in query::neighbors(snap, u) {
+            for v in query::neighbors(&self.snap, u) {
                 if keep.contains(&v) {
                     edges.insert(if u < v { (u, v) } else { (v, u) });
                 }
@@ -618,9 +806,9 @@ impl Db {
         }
         let nodes: Vec<Value> = keep
             .iter()
-            .map(|&id| json!({ "id": id, "depth": 0, "name": self.display_name(snap, id) }))
+            .map(|&id| json!({ "id": id, "depth": 0, "name": self.display_name(id) }))
             .collect();
-        let strengths = query::edge_strengths(snap, None);
+        let strengths = query::edge_strengths(&self.snap, None);
         let edges: Vec<Value> = edges
             .iter()
             .map(|(a, b)| json!([a, b, strengths.get(&(*a, *b)).copied().unwrap_or(1)]))
@@ -633,22 +821,23 @@ impl Db {
     /// orientation view for graphs too large to render node-by-node; the UI sizes super-nodes by count
     /// and drills into a type by re-centring on its sample. Authz-scoped. Super-node id = the type's
     /// field id (unique within this response); `sample` carries the real node id to drill to.
-    fn overview(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+    fn overview(&self, req: &Value) -> DbResult<Value> {
         const UNTYPED: u32 = u32::MAX;
         let labels = req["allowed_labels"]
             .as_u64()
             .map(|m| m as u32)
             .unwrap_or(u32::MAX);
         let visible = |n: u64| {
-            self.cat
-                .node_label(n)
-                .is_none_or(|l| (labels >> l) & 1 == 1)
+            self.snap
+                .node_labels
+                .get(&n)
+                .is_none_or(|&l| (labels >> l) & 1 == 1)
         };
-        let type_of = |n: u64| self.cat.node_type(n).unwrap_or(UNTYPED);
+        let type_of = |n: u64| self.snap.node_types.get(&n).copied().unwrap_or(UNTYPED);
 
         let mut count: HashMap<u32, u64> = HashMap::new();
         let mut sample: HashMap<u32, u64> = HashMap::new();
-        for n in self.cat.node_ids().into_iter().filter(|&n| visible(n)) {
+        for n in node_ids(&self.snap).into_iter().filter(|&n| visible(n)) {
             let t = type_of(n);
             *count.entry(t).or_default() += 1;
             sample
@@ -669,12 +858,12 @@ impl Db {
                 *ew.entry(key).or_default() += 1;
             }
         };
-        for (&(s, _), v) in snap.one.iter() {
+        for (&(s, _), v) in self.snap.one.iter() {
             if let Some(ObjKey::Node(o)) = v {
                 bump(s, *o, &mut ew);
             }
         }
-        for (&(s, _), set) in snap.many.iter() {
+        for (&(s, _), set) in self.snap.many.iter() {
             for o in set {
                 if let ObjKey::Node(o) = o {
                     bump(s, *o, &mut ew);
@@ -688,7 +877,7 @@ impl Db {
                 let name = if t == UNTYPED {
                     "(untyped)"
                 } else {
-                    self.cat.name(t).unwrap_or("?")
+                    self.schema.cat.name(t).unwrap_or("?")
                 };
                 json!({ "id": t, "depth": 0, "name": name, "count": c, "sample": sample[&t] })
             })
@@ -699,13 +888,18 @@ impl Db {
 
     /// A node's display name — the value of its first `name`/`title`/`display_name`/`full_name`
     /// text predicate, if any. Used to label nodes in graph/neighbourhood results.
-    fn display_name(&self, snap: &Snapshot, id: u64) -> Option<String> {
+    fn display_name(&self, id: u64) -> Option<String> {
         const NAME_PREDS: [&str; 4] = ["name", "title", "display_name", "full_name"];
-        snap.one
+        self.snap
+            .one
             .range((id, u32::MIN)..=(id, u32::MAX))
             .find_map(|(&(_, p), v)| match v {
                 Some(ObjKey::Text(s))
-                    if self.cat.name(p).is_some_and(|n| NAME_PREDS.contains(&n)) =>
+                    if self
+                        .schema
+                        .cat
+                        .name(p)
+                        .is_some_and(|n| NAME_PREDS.contains(&n)) =>
                 {
                     Some(s.clone())
                 }
@@ -715,9 +909,13 @@ impl Db {
 
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,
     /// `k`, `allowed_labels`, `expand`, `mode`, `max_nodes`) and evaluates it, authz-scoped.
-    fn run_hybrid(&self, req: &Value, snap: &Snapshot) -> DbResult<Traverser> {
+    fn run_hybrid(&self, req: &Value) -> DbResult<Traverser> {
         let ty = req["type"].as_str().ok_or("type missing")?;
-        let tid = self.cat.field_id(ty).ok_or(format!("unknown type: {ty}"))?;
+        let tid = self
+            .schema
+            .cat
+            .field_id(ty)
+            .ok_or(format!("unknown type: {ty}"))?;
         let k = req["k"].as_u64().unwrap_or(10) as usize;
         let labels = req["allowed_labels"]
             .as_u64()
@@ -734,10 +932,11 @@ impl Db {
             .iter()
             .map(|x| x.as_f64().unwrap_or(0.0) as f32)
             .collect();
-        let idx = self.index.as_ref().ok_or("no embeddings ingested")?;
+        let idx = (*self.index).as_ref().ok_or("no embeddings ingested")?;
         let mut transforms = Vec::new();
         if let Some(p) = req["expand"].as_str() {
             let pid = self
+                .schema
                 .cat
                 .field_id(p)
                 .ok_or(format!("unknown predicate: {p}"))?;
@@ -755,12 +954,11 @@ impl Db {
         };
         // embeddings arrive on a separate channel (not seqno-stamped from the changelog), so clamp
         // the vector watermark to the changelog head to keep the version-vector invariant.
-        let head = self.eng.durable_head();
+        let head = self.durable_head;
         let vw = (self.emb_ids.len() as u64).min(head);
         let vv = VersionVector::new(head, vw);
         Ok(run(
-            snap,
-            &self.cat,
+            &self.snap,
             idx,
             &pipeline,
             &Principal {
@@ -775,7 +973,7 @@ impl Db {
     /// node's embedding as a type-ANN seed), or `{type_ann:{type,vector,k}}`. Steps are
     /// `{expand:"pred"}` (follow a predicate) or `{filter_type:"T"}` (keep a type). Authz-scoped.
     /// Returns `{ids, names}`.
-    fn pipeline(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+    fn pipeline(&self, req: &Value) -> DbResult<Value> {
         let labels = req["allowed_labels"]
             .as_u64()
             .map(|m| m as u32)
@@ -790,8 +988,10 @@ impl Db {
             let node = sim["node"].as_u64().ok_or("similar.node required")?;
             let k = sim["k"].as_u64().unwrap_or(10) as usize;
             let ty = self
-                .cat
-                .node_type(node)
+                .snap
+                .node_types
+                .get(&node)
+                .copied()
                 .ok_or("that node has no type to search within")?;
             let pos = self
                 .emb_ids
@@ -809,7 +1009,11 @@ impl Db {
             )
         } else if let Some(ta) = src.get("type_ann").filter(|v| !v.is_null()) {
             let ty = ta["type"].as_str().ok_or("type_ann.type required")?;
-            let tid = self.cat.field_id(ty).ok_or(format!("unknown type: {ty}"))?;
+            let tid = self
+                .schema
+                .cat
+                .field_id(ty)
+                .ok_or(format!("unknown type: {ty}"))?;
             let k = ta["k"].as_u64().unwrap_or(10) as usize;
             let q = ta["vector"]
                 .as_array()
@@ -833,12 +1037,17 @@ impl Db {
         for step in req["steps"].as_array().into_iter().flatten() {
             if let Some(p) = step["expand"].as_str() {
                 let pid = self
+                    .schema
                     .cat
                     .field_id(p)
                     .ok_or(format!("unknown predicate: {p}"))?;
                 transforms.push(Transform::Expand { predicate: pid });
             } else if let Some(t) = step["filter_type"].as_str() {
-                let tid = self.cat.field_id(t).ok_or(format!("unknown type: {t}"))?;
+                let tid = self
+                    .schema
+                    .cat
+                    .field_id(t)
+                    .ok_or(format!("unknown type: {t}"))?;
                 transforms.push(Transform::Filter(Filter::HasType { ty: tid }));
             } else {
                 return Err("step must be {expand:..} or {filter_type:..}".into());
@@ -850,22 +1059,22 @@ impl Db {
             max_nodes: req["max_nodes"].as_u64().unwrap_or(3000) as usize,
             mode: ReadMode::Fresh,
         };
-        let head = self.eng.durable_head();
+        let head = self.durable_head;
         let vw = (self.emb_ids.len() as u64).min(head);
         let vv = VersionVector::new(head, vw);
         let principal = Principal {
             allowed_labels: labels,
         };
         let t = if needs_ann {
-            let idx = self.index.as_ref().ok_or("no embeddings ingested")?;
-            run(snap, &self.cat, idx, &pipeline, &principal, vv)
+            let idx = (*self.index).as_ref().ok_or("no embeddings ingested")?;
+            run(&self.snap, idx, &pipeline, &principal, vv)
         } else {
-            run(snap, &self.cat, &NoAnn, &pipeline, &principal, vv)
+            run(&self.snap, &NoAnn, &pipeline, &principal, vv)
         };
         let nodes: Vec<Value> = t
             .ids
             .iter()
-            .map(|&id| json!({ "id": id, "name": self.display_name(snap, id) }))
+            .map(|&id| json!({ "id": id, "name": self.display_name(id) }))
             .collect();
         Ok(json!({ "ids": t.ids, "nodes": nodes }))
     }
@@ -875,8 +1084,9 @@ impl Db {
     /// relative to `as_of`, business-hours, fiscal quarter), ordered oldest→newest. An optional
     /// calendar frame (`tz_offset_min`, `business_start_min`, `business_end_min`,
     /// `fiscal_year_start_month`) shapes the stamps. Returns `{context, hits, as_of}`.
-    fn retrieve_context(&self, req: &Value, snap: &Snapshot) -> DbResult<Value> {
+    fn retrieve_context(&self, req: &Value) -> DbResult<Value> {
         let content_p = self
+            .schema
             .cat
             .field_id(
                 req["content"]
@@ -885,7 +1095,12 @@ impl Db {
             )
             .ok_or("unknown content predicate")?;
         let date_p = match req["date"].as_str() {
-            Some(d) => Some(self.cat.field_id(d).ok_or("unknown date predicate")?),
+            Some(d) => Some(
+                self.schema
+                    .cat
+                    .field_id(d)
+                    .ok_or("unknown date predicate")?,
+            ),
             None => None,
         };
         let cal = Calendar {
@@ -895,18 +1110,18 @@ impl Db {
             fiscal_year_start_month: req["fiscal_year_start_month"].as_u64().unwrap_or(1) as u32,
         };
 
-        let t = self.run_hybrid(req, snap)?;
+        let t = self.run_hybrid(req)?;
         // gather (node, score, date, content) — current values (fold LWW resolves supersession)
         let mut rows: Vec<(u64, f32, Option<i64>, String)> = t
             .ids
             .iter()
             .zip(&t.scores)
             .map(|(&n, &sc)| {
-                let content = match query::point_one(snap, n, content_p) {
+                let content = match query::point_one(&self.snap, n, content_p) {
                     Some(ObjKey::Text(s)) => s,
                     _ => String::new(),
                 };
-                let date = date_p.and_then(|dp| match query::point_one(snap, n, dp) {
+                let date = date_p.and_then(|dp| match query::point_one(&self.snap, n, dp) {
                     Some(ObjKey::Int(v)) => Some(v),
                     _ => None,
                 });
@@ -941,28 +1156,6 @@ impl Db {
         let context = format!("(excerpts oldest→newest)\n{}", lines.join("\n"));
         Ok(json!({ "context": context, "hits": hits, "as_of": as_of }))
     }
-
-    pub fn cardinality_of(&self, predicate: &str) -> Option<Cardinality> {
-        self.cardinality.get(predicate).copied()
-    }
-
-    /// Current durable changelog head — a cheap in-memory monotonic counter used by the console's
-    /// live-update poll to detect that the database has advanced.
-    pub fn durable_head(&self) -> u64 {
-        self.eng.durable_head()
-    }
-
-    pub fn stats(&self) -> Value {
-        let wal_bytes = fs::metadata(self.dir.join("wal.log"))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        json!({
-            "facts": { "durable_head": self.eng.durable_head(), "unmerged": self.eng.unmerged() },
-            "schema": { "defs": read_lines(&self.dir.join("schema.jsonl")).len(), "nodes": read_lines(&self.dir.join("nodes.jsonl")).len() },
-            "embeddings": { "count": self.emb_ids.len(), "dim": self.dim },
-            "storage": { "wal_bytes": wal_bytes, "embeddings_bytes": self.emb.len() * 4 },
-        })
-    }
 }
 
 /// Default un-merged backlog bound — the read-merge tail length before backpressure.
@@ -975,6 +1168,25 @@ fn pick_m(dim: usize) -> usize {
         }
     }
     1
+}
+
+/// All declared node ids (union of typed and labelled nodes), sorted ascending — the source for a
+/// whole-graph view. Sorted because a `HashMap`'s iteration order is unspecified, but the
+/// graph/overview views expect a stable, ordered node set.
+fn node_ids(snap: &Snapshot) -> Vec<NodeId> {
+    let mut s: BTreeSet<NodeId> = snap.node_types.keys().copied().collect();
+    s.extend(snap.node_labels.keys().copied());
+    s.into_iter().collect()
+}
+
+/// The distinct ABAC sensitivity labels actually assigned to nodes, sorted ascending.
+fn labels_in_use(snap: &Snapshot) -> Vec<u8> {
+    snap.node_labels
+        .values()
+        .copied()
+        .collect::<BTreeSet<u8>>()
+        .into_iter()
+        .collect()
 }
 
 fn read_lines(p: &Path) -> Vec<String> {
@@ -1008,13 +1220,11 @@ fn read_u64(p: &Path) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-fn apply_def(
-    cat: &mut Catalog,
-    card: &mut HashMap<String, Cardinality>,
-    v: &Value,
-) -> DbResult<()> {
+fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
     if let Some(t) = v.get("type_def") {
-        cat.register_type(t["name"].as_str().ok_or("type_def.name missing")?);
+        schema
+            .cat
+            .register_type(t["name"].as_str().ok_or("type_def.name missing")?);
         return Ok(());
     }
     if let Some(p) = v.get("pred_def") {
@@ -1027,7 +1237,7 @@ fn apply_def(
         // it. Redefining it with a different cardinality would make later writes conflict with the
         // folded state, so reject it here with a clear error rather than letting the fold panic.
         // Re-sending the same definition (same cardinality) is idempotent and allowed.
-        if let Some(&existing) = card.get(name)
+        if let Some(&existing) = schema.cardinality.get(name)
             && existing != c
         {
             return Err(format!(
@@ -1035,12 +1245,15 @@ fn apply_def(
             ));
         }
         let domain = p["domain"].as_str().ok_or("pred_def.domain missing")?;
-        let domain_id = cat
+        let domain_id = schema
+            .cat
             .field_id(domain)
             .ok_or(format!("unknown domain type: {domain}"))?;
         let range = if let Some(rt) = p["range"].as_str() {
             Range::Type(
-                cat.field_id(rt)
+                schema
+                    .cat
+                    .field_id(rt)
                     .ok_or(format!("unknown range type: {rt}"))?,
             )
         } else {
@@ -1051,22 +1264,13 @@ fn apply_def(
                 _ => Range::Value(ValueType::Text),
             }
         };
-        cat.register_predicate(name, c, RelProps::default(), domain_id, range);
-        card.insert(name.to_string(), c);
+        schema
+            .cat
+            .register_predicate(name, c, RelProps::default(), domain_id, range);
+        schema.cardinality.insert(name.to_string(), c);
         return Ok(());
     }
     Err("schema line must be type_def or pred_def".into())
-}
-
-fn apply_node(cat: &mut Catalog, n: &Value) -> DbResult<()> {
-    let id = n["id"].as_u64().ok_or("node.id missing")?;
-    if let Some(t) = n["type"].as_str() {
-        cat.set_node_type(id, cat.field_id(t).ok_or(format!("unknown type: {t}"))?);
-    }
-    if let Some(l) = n["label"].as_u64() {
-        cat.set_node_label(id, l as u8);
-    }
-    Ok(())
 }
 
 fn obj_key(v: &Value) -> DbResult<ObjKey> {

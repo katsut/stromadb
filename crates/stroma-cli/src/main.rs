@@ -92,7 +92,7 @@ fn main() {
             let file = rest
                 .first()
                 .unwrap_or_else(|| die("usage: stroma ingest <file.jsonl> --db <dir>"));
-            let mut db = Db::open(dir).unwrap_or_else(|e| die(&e));
+            let db = Db::open(dir).unwrap_or_else(|e| die(&e));
             let s = db.ingest_str(&read_file(file)).unwrap_or_else(|e| die(&e));
             println!(
                 "ingested: {} defs, {} nodes, {} facts, {} retracts (durable_head={})",
@@ -103,7 +103,7 @@ fn main() {
             let file = rest
                 .first()
                 .unwrap_or_else(|| die("usage: stroma embed <file.jsonl> --db <dir>"));
-            let mut db = Db::open(dir).unwrap_or_else(|e| die(&e));
+            let db = Db::open(dir).unwrap_or_else(|e| die(&e));
             let n = db.embed_str(&read_file(file)).unwrap_or_else(|e| die(&e));
             println!("embedded: {n} vectors");
         }
