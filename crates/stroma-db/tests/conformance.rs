@@ -202,6 +202,13 @@ fn conformance_verdicts_over_fixture() {
     let v1008 = verdicts.iter().find(|v| v["subject"] == 1008).unwrap();
     assert_eq!(v1008["as_of"], json!(1200));
 
+    // mismatch sub-classification: 1005 approver (Alice) was the dept manager before the transfer but
+    // not at approval time → stale; 1004 approver (Dave) was never a manager → wrong. OK carries no kind.
+    assert_eq!(v1005["kind"], json!("stale"));
+    let v1004 = verdicts.iter().find(|v| v["subject"] == 1004).unwrap();
+    assert_eq!(v1004["kind"], json!("wrong"));
+    assert_eq!(v1008["kind"], json!(null));
+
     // 1003 is an absence: no actual, and required could not be derived (no approval time to anchor).
     let v1003 = verdicts.iter().find(|v| v["subject"] == 1003).unwrap();
     assert_eq!(v1003["actual"], json!(null));
