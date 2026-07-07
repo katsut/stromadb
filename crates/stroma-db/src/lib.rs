@@ -36,7 +36,7 @@ use stroma_core::changelog::WriteKind;
 use stroma_core::completeness;
 use stroma_core::conformance;
 use stroma_core::engine::Engine;
-use stroma_core::fact::NodeId;
+use stroma_core::fact::{FieldId, NodeId};
 use stroma_core::fold::{ObjKey, Snapshot};
 use stroma_core::ir::{Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run};
 use stroma_core::ivf::IvfPq;
@@ -362,6 +362,27 @@ impl WriteState {
         }
     }
 
+    /// Resolve a fact's optional `source` name to the interned Field-ID stamped on the write's
+    /// `OrderKey` (its provenance). Absent source → `0`, the "unset"/unknown sentinel. A source name
+    /// is just another interned string: an already-known name (a prior source, or a type/predicate of
+    /// the same spelling) is a cheap lookup that never touches the shared schema; a genuinely new name
+    /// is interned copy-on-write (like a def — at most one Arc rebuild per batch) and persisted as a
+    /// `source_def` line so replay re-interns it in the same order and reproduces the exact id. The id
+    /// space lives entirely in `schema.jsonl`, so the numeric `source` the WAL stores stays resolvable
+    /// across a reopen.
+    fn source_id(&mut self, name: Option<&str>) -> DbResult<FieldId> {
+        let Some(n) = name else { return Ok(0) };
+        if let Some(id) = self.schema.cat.field_id(n) {
+            return Ok(id);
+        }
+        let id = Arc::make_mut(&mut self.schema).cat.intern_ref(n);
+        self.append_line(
+            "schema.jsonl",
+            &json!({ "source_def": { "name": n } }).to_string(),
+        )?;
+        Ok(id)
+    }
+
     /// The write-side of ingest: parse the batch, emit ops to the engine, persist inputs, fsync,
     /// materialize. Node type/label lines emit `SetNodeType`/`SetNodeLabel` ops through the engine so
     /// the snapshot carries them, and mirror the label into `node_label_w` for the index build.
@@ -397,6 +418,9 @@ impl WriteState {
                 let object = obj_key(&f["object"])?;
                 let valid_from = f["valid_from"].as_i64().unwrap_or(0);
                 let valid_to = f["valid_to"].as_i64();
+                // per-fact provenance: intern the optional source name to its stable Field-ID (absent
+                // → 0). Interned once and reused for this fact's edge-property writes too.
+                let source = self.source_id(f.get("source").and_then(|x| x.as_str()))?;
                 let kind = match self.schema.cardinality.get(pname) {
                     Some(Cardinality::One) => WriteKind::SetOne {
                         subject,
@@ -411,13 +435,13 @@ impl WriteState {
                         object: object.clone(),
                     },
                 };
-                batch.push((0, kind));
+                batch.push((source, kind));
                 s.facts += 1;
                 // optional edge properties on this fact's edge (subject, predicate, object)
                 if let Some(props) = f.get("props").and_then(|p| p.as_object()) {
                     for (key, val) in props {
                         batch.push((
-                            0,
+                            source,
                             WriteKind::SetEdgeProp {
                                 subject,
                                 predicate,
@@ -441,8 +465,9 @@ impl WriteState {
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 let object = obj_key(&r["object"])?;
+                let source = self.source_id(r.get("source").and_then(|x| x.as_str()))?;
                 self.eng
-                    .retract_edge(0, subject, predicate, object)
+                    .retract_edge(source, subject, predicate, object)
                     .map_err(|e| format!("backpressure: {e:?}"))?;
                 s.retracts += 1;
             } else {
@@ -583,7 +608,22 @@ impl ReadState {
                             Some(at) => query::point_one_asof(&self.snap, subject, pid, at),
                             None => query::point_one(&self.snap, subject, pid),
                         };
-                        json!({ "one": obj.map(fmt_obj) })
+                        // Provenance of the current functional value: the winning version's source
+                        // name (omitted when unset, or for an as-of/historical read). Additive — the
+                        // `one` shape is unchanged.
+                        let provenance: Option<String> = (valid_at.is_none() && obj.is_some())
+                            .then(|| {
+                                query::point_one_source(&self.snap, subject, pid)
+                                    .filter(|&src| src != 0)
+                                    .and_then(|src| self.schema.cat.name(src))
+                                    .map(str::to_string)
+                            })
+                            .flatten();
+                        let mut resp = json!({ "one": obj.map(fmt_obj) });
+                        if let Some(p) = provenance {
+                            resp["provenance"] = json!(p);
+                        }
+                        resp
                     }
                     _ => {
                         json!({ "many": query::point_many(&self.snap, subject, pid).into_iter().map(fmt_obj).collect::<Vec<_>>() })
@@ -739,7 +779,16 @@ impl ReadState {
         let mut props = Vec::with_capacity(ones.len() + manys.len());
         for (p, ok) in ones {
             let name = self.schema.cat.name(p).unwrap_or("?");
-            props.push(json!({ "predicate": name, "card": "one", "value": fmt_obj(ok) }));
+            // provenance of this One value: the winning version's source name (omitted when unset)
+            let source: Option<String> = query::point_one_source(&self.snap, subject, p)
+                .filter(|&src| src != 0)
+                .and_then(|src| self.schema.cat.name(src))
+                .map(str::to_string);
+            let mut prop = json!({ "predicate": name, "card": "one", "value": fmt_obj(ok) });
+            if let Some(src) = source {
+                prop["source"] = json!(src);
+            }
+            props.push(prop);
         }
         for (p, set) in manys {
             let name = self.schema.cat.name(p).unwrap_or("?");
@@ -1337,6 +1386,16 @@ fn read_u64(p: &Path) -> Vec<u64> {
 }
 
 fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
+    // A `source_def` records a provenance source name interned during fact ingest (never sent by a
+    // client — `WriteState::source_id` appends it). Replaying it here, interleaved with the type/pred
+    // defs in `schema.jsonl`, re-interns it in the same order so the numeric `source` the WAL stores
+    // resolves back to this name after a reopen.
+    if let Some(sd) = v.get("source_def") {
+        schema
+            .cat
+            .intern_ref(sd["name"].as_str().ok_or("source_def.name missing")?);
+        return Ok(());
+    }
     if let Some(t) = v.get("type_def") {
         schema
             .cat
@@ -1400,7 +1459,7 @@ fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
         schema.cardinality.insert(name.to_string(), c);
         return Ok(());
     }
-    Err("schema line must be type_def or pred_def".into())
+    Err("schema line must be type_def, pred_def, or source_def".into())
 }
 
 /// Register a named conformance rule from a `{"rule_def":{"name":..,"rule":{..}}}` line into the

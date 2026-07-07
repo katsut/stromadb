@@ -583,3 +583,57 @@ fn retrieve_context_current_value_chronological() {
 
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn provenance_capture_survives_reopen() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_prov_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Doc\"}}\n",
+        "{\"pred_def\":{\"name\":\"title\",\"cardinality\":\"one\",\"domain\":\"Doc\",\"range_value\":\"text\"}}\n",
+        "{\"pred_def\":{\"name\":\"note\",\"cardinality\":\"one\",\"domain\":\"Doc\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Doc\"}}\n",
+        // two competing One writes on (1, title) from different sources; the later write wins.
+        "{\"fact\":{\"subject\":1,\"predicate\":\"title\",\"object\":{\"text\":\"v1\"},\"valid_from\":10,\"source\":\"doc-A\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"title\",\"object\":{\"text\":\"v2\"},\"valid_from\":20,\"source\":\"doc-B\"}}\n",
+        // a fact with no source: provenance must be absent (unset sentinel), shape unchanged.
+        "{\"fact\":{\"subject\":1,\"predicate\":\"note\",\"object\":{\"text\":\"x\"}}}\n",
+    ))
+    .unwrap();
+
+    // point carries the winner's source as `provenance`
+    let r = db
+        .query(&json!({"op":"point","subject":1,"predicate":"title"}))
+        .unwrap();
+    assert_eq!(r["one"], json!({ "text": "v2" }));
+    assert_eq!(r["provenance"], json!("doc-B"));
+
+    // a source-less One value omits provenance entirely (additive, no shape change)
+    let r = db
+        .query(&json!({"op":"point","subject":1,"predicate":"note"}))
+        .unwrap();
+    assert_eq!(r, json!({ "one": { "text": "x" } }));
+    assert!(r.get("provenance").is_none());
+
+    // node detail carries the One value's source; the source-less One has no `source`
+    let r = db.query(&json!({"op":"node","subject":1})).unwrap();
+    let props = r["props"].as_array().unwrap();
+    let title = props.iter().find(|p| p["predicate"] == "title").unwrap();
+    assert_eq!(title["source"], json!("doc-B"));
+    let note = props.iter().find(|p| p["predicate"] == "note").unwrap();
+    assert!(note.get("source").is_none());
+
+    // reopen (WAL replay + schema/source_def re-intern): provenance must survive
+    let db = Db::open(&dir).unwrap();
+    let r = db
+        .query(&json!({"op":"point","subject":1,"predicate":"title"}))
+        .unwrap();
+    assert_eq!(r["one"], json!({ "text": "v2" }));
+    assert_eq!(r["provenance"], json!("doc-B"));
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
