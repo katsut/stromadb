@@ -153,8 +153,7 @@
   .flow{max-width:940px;margin:28px auto 0}
   .flow svg{width:100%;height:auto;display:block}
   /* CJK: wrap at phrase boundaries + kinsoku, so Japanese/Chinese don't break mid-phrase */
-  html:lang(ja) h2, html:lang(ja) .kicker, html:lang(ja) .lede, html:lang(ja) .sublead, html:lang(ja) .cap h3, html:lang(ja) .cap p, html:lang(ja) .cap .m, html:lang(ja) .stat .l, html:lang(ja) .perfnote, html:lang(ja) .fstep h4, html:lang(ja) .fstep p, html:lang(ja) .code .h, html:lang(ja) .heronote, html:lang(ja) .lic,
-  html:lang(zh) h2, html:lang(zh) .kicker, html:lang(zh) .lede, html:lang(zh) .sublead, html:lang(zh) .cap h3, html:lang(zh) .cap p, html:lang(zh) .cap .m, html:lang(zh) .stat .l, html:lang(zh) .perfnote, html:lang(zh) .fstep h4, html:lang(zh) .fstep p, html:lang(zh) .code .h, html:lang(zh) .heronote, html:lang(zh) .lic{
+  html:lang(ja) [data-i18n], html:lang(zh) [data-i18n]{
     line-break:strict; word-break:auto-phrase;
   }
 </style>
@@ -183,8 +182,8 @@
     <div class="eyebrow reveal"><span class="live"></span> real-time GraphRAG engine · optimized for LLMs</div>
     <h1 class="reveal">The knowledge graph your agents can query <span class="g">in real time</span>.</h1>
     <p class="lede reveal" data-i18n="hero.lede">StromaDB fuses <b>vectors × types × time</b> in one engine: a streaming knowledge graph where an
-      LLM agent runs type-aware hybrid search, reads any predicate <b>as-of a point in time</b>, and gets an
-      answer with its <b>provenance</b> — while the graph keeps ingesting underneath.</p>
+      LLM agent runs type-aware hybrid search, reads any stored fact <b>as it was at any past moment</b>, and gets an
+      answer that <b>shows where it came from</b> — while the graph keeps ingesting underneath.</p>
     <div class="cta reveal">
       <a class="btn primary" href="https://github.com/katsut/stromadb" data-i18n="cta.getstarted">Get started</a>
       <a class="btn ghost" href="#capabilities" data-i18n="cta.seewhat">See what it does</a>
@@ -230,7 +229,7 @@
     <div class="kicker reveal" data-i18n="kicker.how">How it works</div>
     <h2 class="reveal" data-i18n="h2.how">A stream goes in. An agent reads meaning, structure, and time back out.</h2>
     <div class="flow reveal">
-      <svg viewBox="0 0 980 210" role="img" aria-label="Data flow: a live stream of facts is folded into StromaDB — a typed graph fused with vectors and bitemporal history — which an agent reads as-of a point in time, type-aware, with provenance; summaries and facts are written back.">
+      <svg viewBox="0 0 980 210" role="img" aria-label="Data flow: a live stream of facts is folded into StromaDB — a typed graph fused with vectors and two timelines of history — which an agent reads as it was at any past moment, type-aware, with the source of each fact; summaries and facts are written back.">
         <defs>
           <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M0 0L10 5L0 10z" fill="#37D6A8"/>
@@ -244,11 +243,11 @@
         <text x="146" y="118" text-anchor="middle" fill="#6B7488" font-size="12" font-family="ui-monospace,monospace" data-i18n="svg.stream.sub">facts · out-of-order · multi-source</text>
         <rect x="356" y="36" width="268" height="134" rx="15" fill="#131824" stroke="#37D6A8" stroke-opacity="0.5"/>
         <text x="490" y="82" text-anchor="middle" fill="#E8ECF4" font-size="19" font-weight="700" font-family="system-ui,sans-serif">StromaDB</text>
-        <text x="490" y="111" text-anchor="middle" fill="#37D6A8" font-size="12.5" font-family="ui-monospace,monospace" data-i18n="svg.core.sub1">typed graph · vectors · bitemporal</text>
-        <text x="490" y="135" text-anchor="middle" fill="#6B7488" font-size="11" font-family="ui-monospace,monospace" data-i18n="svg.core.sub2">durable changelog · lock-free reads</text>
+        <text x="490" y="111" text-anchor="middle" fill="#37D6A8" font-size="12.5" font-family="ui-monospace,monospace" data-i18n="svg.core.sub1">typed graph · vectors · two timelines</text>
+        <text x="490" y="135" text-anchor="middle" fill="#6B7488" font-size="11" font-family="ui-monospace,monospace" data-i18n="svg.core.sub2">crash-safe on disk · reads never block</text>
         <rect x="704" y="44" width="260" height="118" rx="14" fill="#131824" stroke="#222A3A"/>
         <text x="834" y="90" text-anchor="middle" fill="#E8ECF4" font-size="17" font-weight="600" font-family="system-ui,sans-serif" data-i18n="svg.agent">Agent reads</text>
-        <text x="834" y="118" text-anchor="middle" fill="#6B7488" font-size="12" font-family="ui-monospace,monospace" data-i18n="svg.agent.sub">as-of · type-aware · provenance</text>
+        <text x="834" y="118" text-anchor="middle" fill="#6B7488" font-size="12" font-family="ui-monospace,monospace" data-i18n="svg.agent.sub">any past moment · type-aware · shows sources</text>
         <text x="490" y="204" text-anchor="middle" fill="#4E5666" font-size="10.5" font-family="ui-monospace,monospace" data-i18n="svg.writeback">summaries &amp; facts written back</text>
       </svg>
     </div>
@@ -263,31 +262,31 @@
       <div class="cap reveal">
         <svg class="ic" viewBox="0 0 32 32" fill="none" stroke="#37D6A8" stroke-width="1.6"><circle cx="9" cy="16" r="4"/><circle cx="23" cy="9" r="3"/><circle cx="23" cy="23" r="3"/><path d="M12.5 14 20 10M12.5 18 20 22"/></svg>
         <h3 data-i18n="cap1.h">Type-aware hybrid search</h3>
-        <p data-i18n="cap1.p">Vector search filtered by node type, graph structure, and per-user authz — so an approximate match never returns the semantically-close but wrong node. Types come from a lightweight ontology of domain/range, cardinality, and relation properties — no axioms, no reasoner.</p>
-        <div class="m" data-i18n="cap1.m">recall@10 ≈ 1.0</div>
+        <p data-i18n="cap1.p">Vector search filtered by node type, graph structure, and per-user permissions — so an approximate match never returns the semantically-close but wrong node. Types come from a lightweight ontology that says which types each relationship can connect, how many are allowed, and what extra attributes it can carry — no axioms, no reasoner.</p>
+        <div class="m" data-i18n="cap1.m">finds ~all the relevant results</div>
       </div>
       <div class="cap reveal">
         <svg class="ic" viewBox="0 0 32 32" fill="none" stroke="#37D6A8" stroke-width="1.6"><circle cx="16" cy="16" r="10"/><path d="M16 10v6l4 3"/></svg>
-        <h3 data-i18n="cap2.h">Valid-time, as-of reads</h3>
-        <p data-i18n="cap2.p">Every fact carries a validity interval. Ask for the value in effect at any instant — "who approved this, as of the approval time" — not just the latest write.</p>
-        <div class="m" data-i18n="cap2.m">bitemporal · point-in-time queries</div>
+        <h3 data-i18n="cap2.h">Read any moment in the past</h3>
+        <p data-i18n="cap2.p">Every fact records the span of time it was true. Ask for the value that was in effect at any instant — "who approved this, as things stood at approval time" — not just the latest write.</p>
+        <div class="m" data-i18n="cap2.m">two timelines · query any point in time</div>
       </div>
       <div class="cap reveal">
         <svg class="ic" viewBox="0 0 32 32" fill="none" stroke="#37D6A8" stroke-width="1.6"><path d="M4 20c4-8 8-8 12 0s8 8 12 0"/><circle cx="4" cy="20" r="1.6" fill="#37D6A8"/><circle cx="28" cy="12" r="1.6" fill="#37D6A8"/></svg>
         <h3 data-i18n="cap3.h">Real-time under writes</h3>
-        <p data-i18n="cap3.p">Lock-free reads over a pinned snapshot: a long streaming ingest never stalls a reader, and each read is snapshot-isolated.</p>
-        <div class="m" data-i18n="cap3.m">read p99 1.32ms under a concurrent writer</div>
+        <p data-i18n="cap3.p">Reads never block, even while a long streaming ingest is running — and every read sees one consistent moment of the graph.</p>
+        <div class="m" data-i18n="cap3.m">99% of reads finish within 1.32ms, even during a concurrent write</div>
       </div>
       <div class="cap reveal">
         <svg class="ic" viewBox="0 0 32 32" fill="none" stroke="#37D6A8" stroke-width="1.6"><path d="M16 4l10 5v7c0 6-4 9-10 12C10 25 6 22 6 16V9z"/><path d="M12 16l3 3 5-6"/></svg>
         <h3 data-i18n="cap4.h">Declared rules → verdicts</h3>
-        <p data-i18n="cap4.p">Evaluate a declared rule over the graph deterministically: what's expected-but-absent, and what's present-but-wrong (with an as-of derived path). No reasoner.</p>
-        <div class="m" data-i18n="cap4.m">conformance &amp; completeness ops</div>
+        <p data-i18n="cap4.p">Evaluate a rule you declare against the graph, deterministically: what's expected but missing, and what's present but wrong — traced back through the chain of relationships that led there, as it stood at the relevant past moment. No reasoner.</p>
+        <div class="m" data-i18n="cap4.m">checks correctness &amp; completeness</div>
       </div>
       <div class="cap reveal">
         <svg class="ic" viewBox="0 0 32 32" fill="none" stroke="#37D6A8" stroke-width="1.6"><rect x="5" y="6" width="22" height="9" rx="2"/><rect x="5" y="17" width="22" height="9" rx="2"/><circle cx="9.5" cy="10.5" r="1.3" fill="#37D6A8"/><circle cx="9.5" cy="21.5" r="1.3" fill="#37D6A8"/></svg>
         <h3 data-i18n="cap5.h">Durable by design</h3>
-        <p data-i18n="cap5.p">Framed write-ahead log with group-commit fsync; cold-start replays the committed prefix and drops a torn tail via checksum.</p>
+        <p data-i18n="cap5.p">Every write lands safely on disk before it counts, committed in batches. After a crash, cold-start replays everything that was committed and drops any half-written tail using a checksum — nothing committed is lost.</p>
         <div class="m" data-i18n="cap5.m">cold-start recovery 0.81s @5M facts · 0 data loss</div>
       </div>
       <div class="cap reveal">
@@ -305,8 +304,8 @@
     <h2 class="reveal" data-i18n="h2.perf">Numbers, taken under unfriendly conditions.</h2>
     <p class="sublead reveal" data-i18n="perf.sublead">Measured at representative scale on hard data.</p>
     <div class="perf reveal">
-      <div class="stat"><div class="v">&lt;2ms</div><div class="l" data-i18n="stat1.l">integrated read p99 — ANN + graph expand over the durable snapshot</div></div>
-      <div class="stat"><div class="v">~1.0</div><div class="l" data-i18n="stat2.l">filtered recall@10 on hard, overlapping-cluster data</div></div>
+      <div class="stat"><div class="v">&lt;2ms</div><div class="l" data-i18n="stat1.l">99% of combined reads finish under this — approximate vector search plus graph expansion, over the durable on-disk graph</div></div>
+      <div class="stat"><div class="v">~1.0</div><div class="l" data-i18n="stat2.l">of the relevant results come back — even on hard data where clusters overlap</div></div>
       <div class="stat"><div class="v">0.81s</div><div class="l" data-i18n="stat3.l">cold-start recovery at 5M facts — zero data loss</div></div>
       <div class="stat"><div class="v">32×</div><div class="l" data-i18n="stat4.l">vector compression with exact re-rank</div></div>
     </div>
@@ -316,7 +315,7 @@
   <section id="agents"><div class="container">
     <div class="kicker reveal" data-i18n="kicker.agents">For agents</div>
     <h2 class="reveal" data-i18n="h2.agents">Hand the deterministic part to the engine.</h2>
-    <p class="sublead reveal" data-i18n="agents.sublead">An LLM is great at orchestration and language, unreliable at exact multi-hop, as-of graph logic. So the engine evaluates declared rules and returns a deterministic verdict; the agent calls it and acts.</p>
+    <p class="sublead reveal" data-i18n="agents.sublead">An LLM is great at orchestration and language, but unreliable at exact graph logic that follows a long chain of relationships and depends on how things stood at a past moment. So the engine evaluates declared rules and returns a deterministic verdict; the agent calls it and acts.</p>
     <div class="codewrap">
       <div class="code reveal">
         <div class="h" data-i18n="code.h1">declare a rule once</div>
@@ -346,8 +345,8 @@
       </div>
     </div>
     <div class="flow reveal">
-      <div class="fstep"><div class="n" data-i18n="flow1.n">01 · ingest</div><h4 data-i18n="flow1.h">Stream facts</h4><p data-i18n="flow1.p">Multi-source events fold into a typed graph with valid-time &amp; provenance.</p><span class="ar">→</span></div>
-      <div class="fstep"><div class="n" data-i18n="flow2.n">02 · retrieve</div><h4 data-i18n="flow2.h">Type × vector × time</h4><p data-i18n="flow2.p">The agent pulls semantically + structurally relevant context, as-of any instant.</p><span class="ar">→</span></div>
+      <div class="fstep"><div class="n" data-i18n="flow1.n">01 · ingest</div><h4 data-i18n="flow1.h">Stream facts</h4><p data-i18n="flow1.p">Multi-source events fold into a typed graph, each fact tagged with when it was true and where it came from.</p><span class="ar">→</span></div>
+      <div class="fstep"><div class="n" data-i18n="flow2.n">02 · retrieve</div><h4 data-i18n="flow2.h">Type × vector × time</h4><p data-i18n="flow2.p">The agent pulls context that's relevant by meaning and by structure, as it was at any past moment.</p><span class="ar">→</span></div>
       <div class="fstep"><div class="n" data-i18n="flow3.n">03 · evaluate</div><h4 data-i18n="flow3.h">Rules → verdicts</h4><p data-i18n="flow3.p">The engine deterministically flags absent / wrong / stale — no reasoner.</p><span class="ar">→</span></div>
       <div class="fstep"><div class="n" data-i18n="flow4.n">04 · act</div><h4 data-i18n="flow4.h">Agent orchestrates</h4><p data-i18n="flow4.p">The LLM interprets verdicts and acts, holding no exact graph logic itself.</p></div>
     </div>
@@ -426,9 +425,9 @@
       zh: `Rust · 单一二进制 · Elastic License 2.0 · 原生 MCP`
     },
     "hero.lede": {
-      en: `StromaDB fuses <b>vectors × types × time</b> in one engine: a streaming knowledge graph where an LLM agent runs type-aware hybrid search, reads any predicate <b>as-of a point in time</b>, and gets an answer with its <b>provenance</b> — while the graph keeps ingesting underneath.`,
-      ja: `StromaDB は<b>ベクトル × 型 × 時間</b>をひとつのエンジンに統合します。ストリーミング型のナレッジグラフの上で、LLM エージェントが型を意識したハイブリッド検索を実行し、任意の述語を<b>ある時点の断面（as-of）</b>で読み取り、<b>出所（provenance）</b>付きの答えを得る — その裏でグラフは絶えず取り込みを続けます。`,
-      zh: `StromaDB 把<b>向量 × 类型 × 时间</b>融合进同一个引擎：一张流式知识图谱，LLM 智能体在其上运行类型感知的混合检索，按<b>某一时间点（as-of）</b>读取任意谓词，并得到附带<b>来源（provenance）</b>的答案 —— 与此同时图谱仍在底层持续摄入。`
+      en: `StromaDB fuses <b>vectors × types × time</b> in one engine: a streaming knowledge graph where an LLM agent runs type-aware hybrid search, reads any stored fact <b>as it was at any past moment</b>, and gets an answer that <b>shows where it came from</b> — while the graph keeps ingesting underneath.`,
+      ja: `StromaDB は<b>ベクトル × 型 × 時間</b>をひとつのエンジンに統合します。ストリーミング型のナレッジグラフの上で、LLM エージェントが型を意識したハイブリッド検索を実行し、記録済みの任意の事実を<b>過去のどの時点の状態でも</b>読み取り、<b>その答えがどのソースから来たか</b>まで添えて返します — その裏でグラフは絶えず取り込みを続けます。`,
+      zh: `StromaDB 把<b>向量 × 类型 × 时间</b>融合进同一个引擎：一张流式知识图谱，LLM 智能体在其上运行类型感知的混合检索，读取任意已记录事实<b>在过去某一时刻的样子</b>，并得到一个<b>标明来源出处</b>的答案 —— 与此同时图谱仍在底层持续摄入。`
     },
     "kicker.console": {
       en: `Built-in console`,
@@ -466,14 +465,14 @@
       zh: `facts · 乱序 · 多来源`
     },
     "svg.core.sub1": {
-      en: `typed graph · vectors · bitemporal`,
-      ja: `型付きグラフ · ベクトル · bitemporal`,
-      zh: `类型化图 · 向量 · 双时态`
+      en: `typed graph · vectors · two timelines`,
+      ja: `型付きグラフ · ベクトル · 2つの時間軸`,
+      zh: `类型化图 · 向量 · 两条时间线`
     },
     "svg.core.sub2": {
-      en: `durable changelog · lock-free reads`,
-      ja: `永続 changelog · ロックなし読み取り`,
-      zh: `持久 changelog · 无锁读取`
+      en: `crash-safe on disk · reads never block`,
+      ja: `ディスクに確実に記録 · 読み取りは止まらない`,
+      zh: `落盘即安全 · 读取从不阻塞`
     },
     "svg.agent": {
       en: `Agent reads`,
@@ -481,9 +480,9 @@
       zh: `智能体读取`
     },
     "svg.agent.sub": {
-      en: `as-of · type-aware · provenance`,
-      ja: `as-of · 型対応 · provenance`,
-      zh: `as-of · 类型感知 · provenance`
+      en: `any past moment · type-aware · shows sources`,
+      ja: `過去のどの時点でも · 型対応 · 出所付き`,
+      zh: `任意历史时刻 · 类型感知 · 附带来源`
     },
     "svg.writeback": {
       en: `summaries &amp; facts written back`,
@@ -511,19 +510,19 @@
       zh: `类型感知的混合检索`
     },
     "cap1.p": {
-      en: `Vector search filtered by node type, graph structure, and per-user authz — so an approximate match never returns the semantically-close but wrong node. Types come from a lightweight ontology of domain/range, cardinality, and relation properties — no axioms, no reasoner.`,
-      ja: `ベクトル検索を、ノードの型・グラフ構造・ユーザーごとの権限で絞り込みます。だから、意味は近くても種類の違うノードを取り違えて返すことがありません。型は domain/range・多重度・関係プロパティからなる軽量なオントロジーで宣言します — 公理も推論器もありません。`,
-      zh: `按节点类型、图结构以及每个用户的权限来过滤向量检索——因此近似匹配绝不会返回语义相近却类型错误的节点。类型在一个由 domain/range、基数与关系属性构成的轻量本体中声明——没有公理，也没有推理器。`
+      en: `Vector search filtered by node type, graph structure, and per-user permissions — so an approximate match never returns the semantically-close but wrong node. Types come from a lightweight ontology that says which types each relationship can connect, how many are allowed, and what extra attributes it can carry — no axioms, no reasoner.`,
+      ja: `ベクトル検索を、ノードの型・グラフ構造・ユーザーごとの権限で絞り込みます。だから、意味は近くても種類の違うノードを取り違えて返すことがありません。型は軽量なオントロジーで宣言します。各関係がどの型どうしをつなげるか、いくつまで許すか、どんな付加属性を持てるかを決めるものです — 公理も推論器もありません。`,
+      zh: `按节点类型、图结构以及每个用户的权限来过滤向量检索——因此近似匹配绝不会返回语义相近却类型错误的节点。类型在一个轻量本体中声明，它规定每种关系能连接哪些类型、最多允许多少条、以及能携带哪些附加属性——没有公理，也没有推理器。`
     },
     "cap2.h": {
-      en: `Valid-time, as-of reads`,
-      ja: `有効時間での“ある時点”の読み取り`,
-      zh: `有效时间的“某一时刻”读取`
+      en: `Read any moment in the past`,
+      ja: `過去のどの時点でもそのまま読む`,
+      zh: `读取历史上的任意时刻`
     },
     "cap2.p": {
-      en: `Every fact carries a validity interval. Ask for the value in effect at any instant — "who approved this, as of the approval time" — not just the latest write.`,
-      ja: `すべての事実に有効期間が付きます。最新の書き込みだけでなく、任意の時点で有効だった値を問い合わせられます — たとえば「承認された時点で、承認権限を持っていたのは誰か」。`,
-      zh: `每条事实都带有一个有效期区间。你可以查询任意时刻当时生效的值 ——「在审批发生的那一刻，是谁批准了它」—— 而不只是最新一次写入。`
+      en: `Every fact records the span of time it was true. Ask for the value that was in effect at any instant — "who approved this, as things stood at approval time" — not just the latest write.`,
+      ja: `すべての事実に、それが真だった期間が記録されます。最新の書き込みだけでなく、任意の時点で有効だった値を問い合わせられます — たとえば「承認された時点で、承認権限を持っていたのは誰か」。`,
+      zh: `每条事实都记录了它为真的时间区间。你可以查询任意时刻当时生效的值 ——「在审批发生的那一刻，是谁批准了它」—— 而不只是最新一次写入。`
     },
     "cap3.h": {
       en: `Real-time under writes`,
@@ -531,9 +530,9 @@
       zh: `写入进行时依然实时`
     },
     "cap3.p": {
-      en: `Lock-free reads over a pinned snapshot: a long streaming ingest never stalls a reader, and each read is snapshot-isolated.`,
-      ja: `固定したスナップショットの上を、ロックなしで読み取ります。長時間のストリーミング取り込みが走っていても読み手を止めず、各読み取りはスナップショット分離されています。`,
-      zh: `在固定的快照之上进行无锁读取：长时间的流式摄入绝不会阻塞读取方，而且每次读取都是快照隔离的。`
+      en: `Reads never block, even while a long streaming ingest is running — and every read sees one consistent moment of the graph.`,
+      ja: `長時間のストリーミング取り込みが走っていても、読み取りは止まりません。そして各読み取りは、グラフの一貫したひとつの瞬間だけを見ます。`,
+      zh: `即使一次长时间的流式摄入正在进行，读取也从不阻塞——而且每次读取看到的都是图谱在某一个一致时刻的样子。`
     },
     "cap4.h": {
       en: `Declared rules → verdicts`,
@@ -541,9 +540,9 @@
       zh: `声明规则 → 判定`
     },
     "cap4.p": {
-      en: `Evaluate a declared rule over the graph deterministically: what's expected-but-absent, and what's present-but-wrong (with an as-of derived path). No reasoner.`,
-      ja: `宣言したルールをグラフ上で決定論的に評価します。「あるはずなのに無い」ものと「あるが間違っている」もの（ある時点まで遡った導出パス付き）を洗い出します。推論器は使いません。`,
-      zh: `在图谱上以确定性的方式评估已声明的规则：找出「本应存在却缺失」的，以及「存在却错误」的（并附上一条 as-of 推导路径）。不使用推理器。`
+      en: `Evaluate a rule you declare against the graph, deterministically: what's expected but missing, and what's present but wrong — traced back through the chain of relationships that led there, as it stood at the relevant past moment. No reasoner.`,
+      ja: `宣言したルールをグラフ上で決定論的に評価します。「あるはずなのに無い」ものと「あるが間違っている」ものを洗い出し、そこに至った関係の連なりを、該当する過去の時点の状態までさかのぼって示します。推論器は使いません。`,
+      zh: `在图谱上以确定性的方式评估你声明的规则：找出「本应存在却缺失」的，以及「存在却错误」的——并沿着导向它的那条关系链，按相关过去时刻的状态一路回溯。不使用推理器。`
     },
     "cap5.h": {
       en: `Durable by design`,
@@ -551,9 +550,9 @@
       zh: `从设计上就持久`
     },
     "cap5.p": {
-      en: `Framed write-ahead log with group-commit fsync; cold-start replays the committed prefix and drops a torn tail via checksum.`,
-      ja: `フレーム化したログ先行書き込み（WAL）と、まとめて fsync するグループコミット。コールドスタート時にはコミット済みの範囲を再生し、途中で切れた末尾はチェックサムで切り捨てます。`,
-      zh: `分帧的预写日志（WAL），配合成组提交的 fsync；冷启动时重放已提交的前缀，并借助校验和丢弃被截断的尾部。`
+      en: `Every write lands safely on disk before it counts, committed in batches. After a crash, cold-start replays everything that was committed and drops any half-written tail using a checksum — nothing committed is lost.`,
+      ja: `どの書き込みも、確定として数える前に必ずディスクへ記録し、まとめてコミットします。クラッシュ後のコールドスタートでは、コミット済みのものをすべて再生し、途中で切れた末尾はチェックサムで切り捨てます — コミット済みのデータは失われません。`,
+      zh: `每一次写入在被计入之前都会先安全落盘，并成批提交。崩溃后的冷启动会重放所有已提交的内容，并借助校验和丢弃任何写到一半的尾部——已提交的数据不会丢失。`
     },
     "cap6.h": {
       en: `Agent-native (MCP)`,
@@ -566,24 +565,24 @@
       zh: `内置一个 Model Context Protocol 服务器：LLM 发现 schema，把图谱当作一组工具来调用 —— schema、point、expand、search、conformance —— 全部通过 stdio。`
     },
     "cap1.m": {
-      en: `recall@10 ≈ 1.0`,
-      ja: `recall@10 ≈ 1.0`,
-      zh: `recall@10 ≈ 1.0`
+      en: `finds ~all the relevant results`,
+      ja: `関連する結果をほぼ取りこぼさない`,
+      zh: `几乎不漏掉相关结果`
     },
     "cap2.m": {
-      en: `bitemporal · point-in-time queries`,
-      ja: `バイテンポラル · ある時点のクエリ`,
-      zh: `双时态 · 时间点查询`
+      en: `two timelines · query any point in time`,
+      ja: `2つの時間軸 · ある時点を問い合わせ`,
+      zh: `两条时间线 · 查询任意时间点`
     },
     "cap3.m": {
-      en: `read p99 1.32ms under a concurrent writer`,
-      ja: `書き込みと並行しても read p99 は 1.32ms`,
-      zh: `并发写入下 read p99 为 1.32ms`
+      en: `99% of reads finish within 1.32ms, even during a concurrent write`,
+      ja: `書き込みと並行しても、読み取りの99%が1.32ms以内`,
+      zh: `即使有并发写入，99% 的读取也在 1.32ms 内完成`
     },
     "cap4.m": {
-      en: `conformance &amp; completeness ops`,
-      ja: `適合性と完全性のチェック`,
-      zh: `一致性与完整性检查`
+      en: `checks correctness &amp; completeness`,
+      ja: `正しさと網羅性のチェック`,
+      zh: `正确性与完整性检查`
     },
     "cap5.m": {
       en: `cold-start recovery 0.81s @5M facts · 0 data loss`,
@@ -611,14 +610,14 @@
       zh: `在代表性规模的高难度数据上实测。`
     },
     "stat1.l": {
-      en: `integrated read p99 — ANN + graph expand over the durable snapshot`,
-      ja: `統合 read の p99 — ANN とグラフ展開を、永続スナップショット上で`,
-      zh: `集成 read 的 p99 —— ANN 加图展开，在持久快照之上`
+      en: `99% of combined reads finish under this — approximate vector search plus graph expansion, over the durable on-disk graph`,
+      ja: `統合された読み取りの99%がこの時間以内 — 近似ベクトル検索とグラフ展開を、ディスク上の永続データに対して`,
+      zh: `99% 的组合读取都在此时间内完成 —— 近似向量检索加图展开，作用于持久化的磁盘图谱`
     },
     "stat2.l": {
-      en: `filtered recall@10 on hard, overlapping-cluster data`,
-      ja: `重なり合うクラスタの厳しいデータでの filtered recall@10`,
-      zh: `在聚簇彼此重叠的高难度数据上的 filtered recall@10`
+      en: `of the relevant results come back — even on hard data where clusters overlap`,
+      ja: `関連する結果のうち返ってくる割合 — クラスタが重なり合う厳しいデータでも`,
+      zh: `应返回的相关结果中被找回的比例 —— 即便在聚簇彼此重叠的高难度数据上`
     },
     "stat3.l": {
       en: `cold-start recovery at 5M facts — zero data loss`,
@@ -641,9 +640,9 @@
       zh: `把确定性的部分交给引擎。`
     },
     "agents.sublead": {
-      en: `An LLM is great at orchestration and language, unreliable at exact multi-hop, as-of graph logic. So the engine evaluates declared rules and returns a deterministic verdict; the agent calls it and acts.`,
-      ja: `LLM はオーケストレーションと言語には強い一方、厳密なマルチホップや「ある時点」を条件にしたグラフのロジックは苦手です。そこでエンジンが宣言済みのルールを評価して決定論的な判定を返し、エージェントはそれを呼び出して行動します。`,
-      zh: `LLM 擅长编排与语言，却在精确的多跳、按「某一时间点」判定的图逻辑上并不可靠。于是引擎负责评估已声明的规则并返回确定性的判定，智能体调用它并据此行动。`
+      en: `An LLM is great at orchestration and language, but unreliable at exact graph logic that follows a long chain of relationships and depends on how things stood at a past moment. So the engine evaluates declared rules and returns a deterministic verdict; the agent calls it and acts.`,
+      ja: `LLM はオーケストレーションと言語には強い一方、長い関係の連なりをたどり、過去の時点の状態に左右される厳密なグラフのロジックは苦手です。そこでエンジンが宣言済みのルールを評価して決定論的な判定を返し、エージェントはそれを呼び出して行動します。`,
+      zh: `LLM 擅长编排与语言，却在需要沿着长长的关系链、并取决于过去某一时刻状态的精确图逻辑上并不可靠。于是引擎负责评估已声明的规则并返回确定性的判定，智能体调用它并据此行动。`
     },
     "code.h1": {
       en: `declare a rule once`,
@@ -666,9 +665,9 @@
       zh: `流式写入事实`
     },
     "flow1.p": {
-      en: `Multi-source events fold into a typed graph with valid-time &amp; provenance.`,
-      ja: `複数ソースのイベントを、有効時間と出所付きで型付きグラフに畳み込みます。`,
-      zh: `多来源事件被折叠进带有有效时间与来源的类型化图谱。`
+      en: `Multi-source events fold into a typed graph, each fact tagged with when it was true and where it came from.`,
+      ja: `複数ソースのイベントを、いつ有効だったか・どのソースから来たかを添えて型付きグラフに畳み込みます。`,
+      zh: `多来源事件被折叠进类型化图谱，每条都标注了它何时有效、来自哪个来源。`
     },
     "flow2.n": {
       en: `02 · retrieve`,
@@ -681,9 +680,9 @@
       zh: `类型 × 向量 × 时间`
     },
     "flow2.p": {
-      en: `The agent pulls semantically + structurally relevant context, as-of any instant.`,
-      ja: `エージェントが、意味と構造の両面で関連する文脈を、任意の時点の断面で引き出します。`,
-      zh: `智能体按任意时刻的切面，拉取语义上与结构上都相关的上下文。`
+      en: `The agent pulls context that's relevant by meaning and by structure, as it was at any past moment.`,
+      ja: `エージェントが、意味と構造の両面で関連する文脈を、過去のどの時点のものでも引き出します。`,
+      zh: `智能体拉取语义上与结构上都相关的上下文，且可取任意历史时刻的样子。`
     },
     "flow3.n": {
       en: `03 · evaluate`,
