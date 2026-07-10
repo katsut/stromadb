@@ -176,11 +176,12 @@ fn close_ends_a_one_value() {
     // reopen so the close is served from the replayed WAL (durability round-trip)
     let db = Db::open(&dir).unwrap();
 
-    // head: the close is the latest write, so the current value is absent
+    // head: the close is the latest write, so the current value is absent; the response carries
+    // the close boundary so a caller can tell "ended" apart from "never written"
     assert_eq!(
         db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to"}))
             .unwrap(),
-        json!({ "one": null })
+        json!({ "one": null, "closed_from": 200 })
     );
     let asof = |at: i64| {
         db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to","valid_at":at}))
@@ -191,6 +192,92 @@ fn close_ends_a_one_value() {
     assert_eq!(asof(199), json!({ "one": { "node": 9 } })); // still in effect
     assert_eq!(asof(200), json!({ "one": null })); // closed at 200
     assert_eq!(asof(250), json!({ "one": null })); // stays closed (no successor)
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn point_closed_value_carries_closed_from() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_closed_from_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // assigned-to closed at 200 (subject 1); status superseded-not-closed (subject 1).
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"status\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"assigned-to\",\"object\":{\"node\":9},\"valid_from\":100}}\n",
+        "{\"close\":{\"subject\":1,\"predicate\":\"assigned-to\",\"valid_from\":200}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"open\"},\"valid_from\":100}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"active\"},\"valid_from\":150}}\n",
+    ))
+    .unwrap();
+
+    // closed key: the response is exactly {"one": null, "closed_from": T} — no confidence/valid_from
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to"}))
+            .unwrap(),
+        json!({ "one": null, "closed_from": 200 })
+    );
+    // never-written key: exactly {"one": null} — the shape is unchanged
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":2,"predicate":"assigned-to"}))
+            .unwrap(),
+        json!({ "one": null })
+    );
+    // superseded-not-closed key: a live current value carries valid_from, never closed_from
+    let cur = db
+        .query(&json!({"op":"point","subject":1,"predicate":"status"}))
+        .unwrap();
+    assert_eq!(cur["one"], json!({ "text": "active" }));
+    assert_eq!(cur["valid_from"], json!(150));
+    assert!(cur.get("closed_from").is_none());
+    // as-of read inside the closed period: the as-of shape is unchanged (no closed_from)
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to","valid_at":250}))
+            .unwrap(),
+        json!({ "one": null })
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn point_closed_from_absent_when_a_late_fact_takes_head() {
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "stroma_closed_from_rev_test_{}",
+            std::process::id()
+        ))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // Reversed arrival: the close arrives first, then a fact with an *older* valid_from. The head
+    // is arrival-ordered (LWW order key), so the late fact wins head and the ended value is
+    // resurrected — `closed_from` must NOT appear (the winner is a live value, not the close).
+    // This is exactly the state a writer-side late-arrival guard detects and repairs.
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+        "{\"close\":{\"subject\":1,\"predicate\":\"assigned-to\",\"valid_from\":200}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"assigned-to\",\"object\":{\"node\":9},\"valid_from\":100}}\n",
+    ))
+    .unwrap();
+
+    let cur = db
+        .query(&json!({"op":"point","subject":1,"predicate":"assigned-to"}))
+        .unwrap();
+    assert_eq!(cur["one"], json!({ "node": 9 })); // the late fact took head
+    assert_eq!(cur["valid_from"], json!(100)); // older than the close — the guard's signal
+    assert!(cur.get("closed_from").is_none()); // the winner is live, not the close
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
@@ -245,11 +332,12 @@ fn close_with_no_prior_fact() {
     ))
     .unwrap();
 
-    // a close with nothing to close: head absent, and no instant resolves to a value
+    // a close with nothing to close: head absent (the close is still the winner, so the boundary
+    // is reported), and no instant resolves to a value
     assert_eq!(
         db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to"}))
             .unwrap(),
-        json!({ "one": null })
+        json!({ "one": null, "closed_from": 200 })
     );
     let asof = |at: i64| {
         db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to","valid_at":at}))

@@ -172,6 +172,19 @@ caller can apply its own policy. `age` appears only when `now` is supplied; `val
 `valid_from` lets a writer compare an incoming event's timestamp against the current winner before
 writing (late-arrival detection).
 
+- For a **current** `one`-read whose winning version is a `close`, the response additively carries
+  the close boundary:
+
+```jsonc
+{"one": null, "closed_from": 1704067200}
+```
+
+`closed_from` is the close's `valid_from` and appears only when the current winner is a close —
+never for an as-of (`valid_at`) read, and never for a never-written key, whose response stays
+exactly `{"one": null}`; when omitted the shape is unchanged. It distinguishes "ended by a close"
+from "never written", so a writer can defend the close during late-arrival repair: a late fact
+older than the close must not silently resurrect the ended value.
+
 ### `expand`
 
 One-or-multi-hop neighbourhood via a predicate, honouring its relationship properties.

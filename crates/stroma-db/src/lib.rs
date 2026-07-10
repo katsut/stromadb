@@ -257,6 +257,8 @@ impl Db {
     ///   `"valid_from"` and an additive `"confidence"` `{tier, corroboration, sources[, age]}` — a
     ///   coarse tier plus its raw signals; both omitted for an as-of / absent read. `now`/`max_age`
     ///   supply the freshness reference (`age = now - valid_from`; stale when `age > max_age`).
+    ///   A current One answer whose winning version is a *close* carries `"closed_from"` (the
+    ///   close's `valid_from`) next to `"one": null`; never for an as-of read or a never-written key.
     /// - `{"op":"expand","subject":N,"predicate":"name"[,"max_depth":D]}` → `{"nodes":[..]}`
     ///   (honors the predicate's declared props — symmetric / inverse / transitive; `max_depth`
     ///   bounds the transitive closure, default 16)
@@ -673,6 +675,9 @@ impl ReadState {
                         // A *current* One value (not an as-of read, value present) carries the
                         // additive confidence signals below; `obj` is consumed building `resp`.
                         let is_current = valid_at.is_none() && obj.is_some();
+                        // A current read that came back absent — the only case that may carry
+                        // `closed_from` below.
+                        let is_current_absent = valid_at.is_none() && obj.is_none();
                         let mut resp = json!({ "one": obj.map(fmt_obj) });
                         if let Some(p) = provenance {
                             resp["provenance"] = json!(p);
@@ -684,6 +689,15 @@ impl ReadState {
                             && let Some(vf) = query::point_one_valid_from(&self.snap, subject, pid)
                         {
                             resp["valid_from"] = json!(vf);
+                        }
+                        // The close boundary when the winning version is a close (additive; a
+                        // current absent value only — never for an as-of read, and a never-written
+                        // key stays exactly `{"one": null}`). Distinguishes "ended" from "never
+                        // written" so a writer can defend the close during late-arrival repair.
+                        if is_current_absent
+                            && let Some(vf) = query::point_one_closed_from(&self.snap, subject, pid)
+                        {
+                            resp["closed_from"] = json!(vf);
                         }
                         // Coarse confidence for a *current* One value (additive; omitted for an
                         // as-of / absent read, so the shape is then identical to before). The raw
