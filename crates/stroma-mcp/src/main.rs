@@ -98,7 +98,7 @@ fn tools() -> Value {
         },
         {
             "name": "ingest",
-            "description": "Ingest a JSONL batch (type_def / pred_def / node / fact / retract records, one per line). Durable on return.",
+            "description": "Ingest a JSONL batch (type_def / pred_def / node / fact / retract / close records, one per line). Durable on return.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "jsonl": { "type": "string", "description": "newline-delimited records" } },
@@ -122,7 +122,7 @@ fn call_tool(db: &Db, name: &str, args: &Value) -> Result<Value, String> {
                 .ok_or("ingest requires a `jsonl` string")?;
             let s = db.ingest_str(jsonl)?;
             Ok(
-                json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "durable_head": s.durable_head }),
+                json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "durable_head": s.durable_head }),
             )
         }
         other => Err(format!("unknown tool: {other}")),

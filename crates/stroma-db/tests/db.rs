@@ -106,6 +106,228 @@ fn valid_to_ingest_and_asof_read() {
 }
 
 #[test]
+fn close_ends_a_one_value() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_close_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // assigned-to = project 9 from valid-time 100, then closed (no successor) at 200.
+    let s = db
+        .ingest_str(concat!(
+            "{\"type_def\":{\"name\":\"Person\"}}\n",
+            "{\"type_def\":{\"name\":\"Project\"}}\n",
+            "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+            "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+            "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+            "{\"fact\":{\"subject\":1,\"predicate\":\"assigned-to\",\"object\":{\"node\":9},\"valid_from\":100}}\n",
+            "{\"close\":{\"subject\":1,\"predicate\":\"assigned-to\",\"valid_from\":200,\"source\":\"hr\"}}\n",
+        ))
+        .unwrap();
+    assert_eq!((s.facts, s.closes), (1, 1));
+
+    // reopen so the close is served from the replayed WAL (durability round-trip)
+    let db = Db::open(&dir).unwrap();
+
+    // head: the close is the latest write, so the current value is absent
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to"}))
+            .unwrap(),
+        json!({ "one": null })
+    );
+    let asof = |at: i64| {
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to","valid_at":at}))
+            .unwrap()
+    };
+    assert_eq!(asof(50), json!({ "one": null })); // before the fact
+    assert_eq!(asof(100), json!({ "one": { "node": 9 } })); // fact valid_from inclusive
+    assert_eq!(asof(199), json!({ "one": { "node": 9 } })); // still in effect
+    assert_eq!(asof(200), json!({ "one": null })); // closed at 200
+    assert_eq!(asof(250), json!({ "one": null })); // stays closed (no successor)
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn close_asof_is_arrival_order_independent() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_close_rev_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // same two records as `close_ends_a_one_value`, arriving in reverse: close first, fact second.
+    // As-of reads resolve by valid-time among covering rows, so they must not change with arrival
+    // order. (The head is arrival-ordered by design — LWW order key — so it is not asserted here.)
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+        "{\"close\":{\"subject\":1,\"predicate\":\"assigned-to\",\"valid_from\":200}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"assigned-to\",\"object\":{\"node\":9},\"valid_from\":100}}\n",
+    ))
+    .unwrap();
+
+    let asof = |at: i64| {
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to","valid_at":at}))
+            .unwrap()
+    };
+    assert_eq!(asof(50), json!({ "one": null }));
+    assert_eq!(asof(100), json!({ "one": { "node": 9 } }));
+    assert_eq!(asof(199), json!({ "one": { "node": 9 } }));
+    assert_eq!(asof(200), json!({ "one": null }));
+    assert_eq!(asof(250), json!({ "one": null }));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn close_with_no_prior_fact() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_close_bare_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"close\":{\"subject\":1,\"predicate\":\"assigned-to\",\"valid_from\":200}}\n",
+    ))
+    .unwrap();
+
+    // a close with nothing to close: head absent, and no instant resolves to a value
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to"}))
+            .unwrap(),
+        json!({ "one": null })
+    );
+    let asof = |at: i64| {
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to","valid_at":at}))
+            .unwrap()
+    };
+    assert_eq!(asof(100), json!({ "one": null })); // before the close's valid_from
+    assert_eq!(asof(200), json!({ "one": null }));
+    assert_eq!(asof(300), json!({ "one": null }));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn retract_on_one_predicate_is_an_error() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_retract_one_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"assigned-to\",\"object\":{\"node\":9}}}\n",
+    ))
+    .unwrap();
+
+    // retract resolves OR-Set tags (many-only), so on a one-predicate it is rejected, not a no-op
+    let err = db
+        .ingest_str(
+            "{\"retract\":{\"subject\":1,\"predicate\":\"assigned-to\",\"object\":{\"node\":9}}}\n",
+        )
+        .unwrap_err();
+    assert!(
+        err.contains("close") && err.contains("cardinality-one"),
+        "error must point at the close record: {err}"
+    );
+    // the value is untouched by the rejected retract
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to"}))
+            .unwrap()["one"],
+        json!({ "node": 9 })
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn close_validation_errors() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_close_val_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"works-on\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+    ))
+    .unwrap();
+
+    // close on a many-predicate is rejected (use retract for a many-edge)
+    let err = db
+        .ingest_str("{\"close\":{\"subject\":1,\"predicate\":\"works-on\"}}\n")
+        .unwrap_err();
+    assert!(
+        err.contains("cardinality-many") && err.contains("retract"),
+        "unexpected error: {err}"
+    );
+    // close on an undeclared predicate is rejected
+    let err = db
+        .ingest_str("{\"close\":{\"subject\":1,\"predicate\":\"nope\"}}\n")
+        .unwrap_err();
+    assert!(err.contains("unknown predicate"), "unexpected error: {err}");
+    // a name that is interned but not a predicate (a type) is rejected the same way
+    let err = db
+        .ingest_str("{\"close\":{\"subject\":1,\"predicate\":\"Person\"}}\n")
+        .unwrap_err();
+    assert!(err.contains("unknown predicate"), "unexpected error: {err}");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn absent_edge_retract_is_not_counted() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_retract_noop_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"works-on\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+    ))
+    .unwrap();
+
+    // retracting an edge that was never asserted is a no-op and must not count as a retract
+    let s = db
+        .ingest_str(
+            "{\"retract\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":9}}}\n",
+        )
+        .unwrap();
+    assert_eq!(s.retracts, 0);
+
+    // a retract that removes a present edge still counts
+    db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":9}}}\n",
+    )
+    .unwrap();
+    let s = db
+        .ingest_str(
+            "{\"retract\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":9}}}\n",
+        )
+        .unwrap();
+    assert_eq!(s.retracts, 1);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn reset_clears_the_database() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_reset_test_{}", std::process::id()))
