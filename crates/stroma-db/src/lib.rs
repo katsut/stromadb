@@ -253,10 +253,10 @@ impl Db {
     ///
     /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T][,"now":T,"max_age":A]}` →
     ///   `{"one":..}` or `{"many":[..]}` (`valid_at` = valid-time as-of read for a One-predicate: the
-    ///   value in effect at instant `T`). A *current* One answer also carries an additive
-    ///   `"confidence"` `{tier, corroboration, sources[, age]}` — a coarse tier plus its raw signals;
-    ///   omitted for an as-of / absent read. `now`/`max_age` supply the freshness reference
-    ///   (`age = now - valid_from`; stale when `age > max_age`).
+    ///   value in effect at instant `T`). A *current* One answer also carries the winning version's
+    ///   `"valid_from"` and an additive `"confidence"` `{tier, corroboration, sources[, age]}` — a
+    ///   coarse tier plus its raw signals; both omitted for an as-of / absent read. `now`/`max_age`
+    ///   supply the freshness reference (`age = now - valid_from`; stale when `age > max_age`).
     /// - `{"op":"expand","subject":N,"predicate":"name"[,"max_depth":D]}` → `{"nodes":[..]}`
     ///   (honors the predicate's declared props — symmetric / inverse / transitive; `max_depth`
     ///   bounds the transitive closure, default 16)
@@ -676,6 +676,14 @@ impl ReadState {
                         let mut resp = json!({ "one": obj.map(fmt_obj) });
                         if let Some(p) = provenance {
                             resp["provenance"] = json!(p);
+                        }
+                        // The winning version's valid_from (additive; a current value only — an
+                        // ingest guard compares it against an incoming event's valid_from to detect
+                        // late arrivals before writing).
+                        if is_current
+                            && let Some(vf) = query::point_one_valid_from(&self.snap, subject, pid)
+                        {
+                            resp["valid_from"] = json!(vf);
                         }
                         // Coarse confidence for a *current* One value (additive; omitted for an
                         // as-of / absent read, so the shape is then identical to before). The raw
