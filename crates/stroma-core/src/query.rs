@@ -49,6 +49,16 @@ pub fn point_one_source(snap: &Snapshot, subject: NodeId, predicate: FieldId) ->
         .map(|(ok, _obj, _vf, _vt)| ok.source)
 }
 
+/// The `valid_from` of the current functional value's winning version — the same row
+/// [`point_one_source`] reads (greatest-`OrderKey` live row = last entry of the ascending
+/// `one_history`). `None` when the key has no history.
+pub fn point_one_valid_from(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<i64> {
+    snap.one_history
+        .get(&(subject, predicate))?
+        .last()
+        .map(|(_ok, _obj, vf, _vt)| *vf)
+}
+
 /// A coarse, deterministic confidence tier for a `point` answer — see [`confidence_signals`].
 /// Deliberately three buckets, not a continuous score: the engine reports only what it can observe
 /// from provenance and valid-time, and leaves calibration to a policy layer.

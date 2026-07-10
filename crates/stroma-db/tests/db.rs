@@ -106,6 +106,52 @@ fn valid_to_ingest_and_asof_read() {
 }
 
 #[test]
+fn point_current_value_carries_valid_from() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_point_vf_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Issue\"}}\n",
+        "{\"pred_def\":{\"name\":\"status\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Issue\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"open\"},\"valid_from\":100,\"source\":\"tracker\"}}\n",
+    ))
+    .unwrap();
+
+    // a current one-value carries its winning version's valid_from
+    let cur = db
+        .query(&json!({"op":"point","subject":1,"predicate":"status"}))
+        .unwrap();
+    assert_eq!(cur["one"], json!({ "text": "open" }));
+    assert_eq!(cur["valid_from"], json!(100));
+
+    // superseding write moves it to the new winner's valid_from
+    db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"closed\"},\"valid_from\":150,\"source\":\"tracker\"}}\n",
+    )
+    .unwrap();
+    let cur = db
+        .query(&json!({"op":"point","subject":1,"predicate":"status"}))
+        .unwrap();
+    assert_eq!(cur["valid_from"], json!(150));
+
+    // omitted for an as-of read and for an absent key (shape unchanged)
+    let asof = db
+        .query(&json!({"op":"point","subject":1,"predicate":"status","valid_at":120}))
+        .unwrap();
+    assert_eq!(asof["one"], json!({ "text": "open" }));
+    assert!(asof.get("valid_from").is_none());
+    let absent = db
+        .query(&json!({"op":"point","subject":2,"predicate":"status"}))
+        .unwrap();
+    assert_eq!(absent, json!({ "one": null }));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn close_ends_a_one_value() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_close_test_{}", std::process::id()))

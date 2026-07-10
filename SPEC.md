@@ -155,18 +155,22 @@ Read the value(s) of a `(subject, predicate)`.
 
 - A `one`-predicate returns `{"one": <value>}`; a `many`-predicate returns `{"many": [<value>, …]}`.
 - `valid_at` reads the value **in effect at instant T** (valid-time as-of) rather than the latest write.
-- For a **current** `one`-value, the response additively carries provenance and a coarse confidence:
+- For a **current** `one`-value, the response additively carries the winning version's `valid_from`,
+  provenance, and a coarse confidence:
 
 ```jsonc
 {"one": 2,
+ "valid_from": 1704067200,
  "provenance": "hr",
  "confidence": {"tier": "high|medium|low", "corroboration": 2, "sources": 2, "age": 120}}
 ```
 
 `tier` is `low` if the value has no source or is stale (`age > max_age`), else `high` if corroborated
 by ≥ 2 distinct sources, else `medium`. `corroboration` / `sources` / `age` are the raw signals, so a
-caller can apply its own policy. `age` appears only when `now` is supplied; `confidence` is **omitted**
-for an as-of (`valid_at`) or absent read, leaving the shape unchanged.
+caller can apply its own policy. `age` appears only when `now` is supplied; `valid_from` and
+`confidence` are **omitted** for an as-of (`valid_at`) or absent read, leaving the shape unchanged.
+`valid_from` lets a writer compare an incoming event's timestamp against the current winner before
+writing (late-arrival detection).
 
 ### `expand`
 
