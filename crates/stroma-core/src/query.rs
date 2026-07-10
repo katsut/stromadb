@@ -59,6 +59,18 @@ pub fn point_one_valid_from(snap: &Snapshot, subject: NodeId, predicate: FieldId
         .map(|(_ok, _obj, vf, _vt)| *vf)
 }
 
+/// The `valid_from` of the winning version *when that version is a close* — the same row
+/// [`point_one_valid_from`] reads (greatest-`OrderKey` live row = last entry of the ascending
+/// `one_history`), but `Some` only when that row carries no object. `None` for a live winner and
+/// for a key with no history at all, so a caller can tell "ended by a close at `vf`" apart from
+/// "never written".
+pub fn point_one_closed_from(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<i64> {
+    snap.one_history
+        .get(&(subject, predicate))?
+        .last()
+        .and_then(|(_ok, obj, vf, _vt)| obj.is_none().then_some(*vf))
+}
+
 /// A coarse, deterministic confidence tier for a `point` answer — see [`confidence_signals`].
 /// Deliberately three buckets, not a continuous score: the engine reports only what it can observe
 /// from provenance and valid-time, and leaves calibration to a policy layer.
@@ -664,6 +676,45 @@ mod tests {
         let s = fold(&ops).observe();
         assert_eq!(point_one_source(&s, 1, 5), Some(0)); // 0 = unset sentinel
         assert_eq!(point_one_source(&s, 1, 999), None); // absent key
+    }
+
+    #[test]
+    fn point_one_closed_from_reports_a_close_winner_only() {
+        // (1, 5): fact then close — the close wins, so its valid_from is reported.
+        let ops = vec![
+            Op::SetOne {
+                subject: 1,
+                predicate: 5,
+                object: ObjKey::Node(100),
+                valid_from: 100,
+                valid_to: None,
+                ok: ok(0),
+            },
+            Op::CloseOne {
+                subject: 1,
+                predicate: 5,
+                valid_from: 200,
+                ok: ok(1),
+            },
+        ];
+        let s = fold(&ops).observe();
+        assert_eq!(point_one(&s, 1, 5), None); // closed → no current value
+        assert_eq!(point_one_closed_from(&s, 1, 5), Some(200));
+        assert_eq!(point_one_closed_from(&s, 1, 999), None); // never written
+
+        // A live winner (fact written after the close) is not a close.
+        let mut ops = ops;
+        ops.push(Op::SetOne {
+            subject: 1,
+            predicate: 5,
+            object: ObjKey::Node(300),
+            valid_from: 300,
+            valid_to: None,
+            ok: ok(2),
+        });
+        let s = fold(&ops).observe();
+        assert_eq!(point_one(&s, 1, 5), Some(ObjKey::Node(300)));
+        assert_eq!(point_one_closed_from(&s, 1, 5), None);
     }
 
     #[test]
