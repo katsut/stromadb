@@ -19,7 +19,7 @@
 //!   embeddings.bin   received embeddings, flat f32 LE; embeddings.ids = u64 LE per row
 //!   meta.json        { "dim": N }
 //!
-//! Record formats (JSONL) — ingest: type_def / pred_def / rule_def / node / fact / retract;
+//! Record formats (JSONL) — ingest: type_def / pred_def / rule_def / node / fact / retract / close;
 //! embed: {node,vector}.
 //! Query request (JSON): {"op":"point"|"expand"|"search", ...} — see [`Db::query`].
 
@@ -45,13 +45,15 @@ use stroma_core::version::{ReadMode, VersionVector};
 
 pub type DbResult<T> = Result<T, String>;
 
-/// Counts from an ingest batch.
+/// Counts from an ingest batch. `retracts` counts only retracts that removed a present edge (an
+/// absent-edge retract is a no-op); `closes` counts `close` records (each is a changelog write).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IngestStats {
     pub defs: u64,
     pub nodes: u64,
     pub facts: u64,
     pub retracts: u64,
+    pub closes: u64,
     pub durable_head: u64,
 }
 
@@ -230,8 +232,8 @@ impl Db {
         Ok(())
     }
 
-    /// Ingest a JSONL batch (type_def / pred_def / rule_def / node / fact / retract). Durable on
-    /// return; the updated read view is published atomically before this returns.
+    /// Ingest a JSONL batch (type_def / pred_def / rule_def / node / fact / retract / close).
+    /// Durable on return; the updated read view is published atomically before this returns.
     pub fn ingest_str(&self, jsonl: &str) -> DbResult<IngestStats> {
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         let s = w.ingest(jsonl)?;
@@ -459,6 +461,40 @@ impl WriteState {
                 if batch.len() >= 10_000 {
                     self.flush(&mut batch)?;
                 }
+            } else if let Some(c) = v.get("close") {
+                // Close a cardinality-one value: no successor — the head becomes absent and as-of
+                // reads at or after `valid_from` return nothing. Maps to `CloseOne` in the changelog
+                // (a versioned row with no object), so it replays and merges like any other write.
+                let subject = c["subject"].as_u64().ok_or("close.subject missing")?;
+                let pname = c["predicate"].as_str().ok_or("close.predicate missing")?;
+                let predicate = self
+                    .schema
+                    .cat
+                    .field_id(pname)
+                    .ok_or(format!("unknown predicate: {pname}"))?;
+                match self.schema.cardinality.get(pname) {
+                    Some(Cardinality::One) => {}
+                    Some(Cardinality::Many) => {
+                        return Err(format!(
+                            "cannot close '{pname}' (cardinality-many): use a retract record to remove an edge"
+                        ));
+                    }
+                    None => return Err(format!("unknown predicate: {pname}")),
+                }
+                let valid_from = c["valid_from"].as_i64().unwrap_or(0);
+                let source = self.source_id(c.get("source").and_then(|x| x.as_str()))?;
+                batch.push((
+                    source,
+                    WriteKind::CloseOne {
+                        subject,
+                        predicate,
+                        valid_from,
+                    },
+                ));
+                s.closes += 1;
+                if batch.len() >= 10_000 {
+                    self.flush(&mut batch)?;
+                }
             } else if let Some(r) = v.get("retract") {
                 self.flush(&mut batch)?; // retract must observe prior writes
                 let subject = r["subject"].as_u64().ok_or("retract.subject missing")?;
@@ -468,12 +504,23 @@ impl WriteState {
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
+                // Retract resolves OR-Set observed tags — a many-only mechanism. A one-predicate has
+                // no tags, so a retract on it would be a silent no-op: reject it and point at `close`.
+                if self.schema.cardinality.get(pname) == Some(&Cardinality::One) {
+                    return Err(format!(
+                        "cannot retract '{pname}' (cardinality-one): use a close record to end its value"
+                    ));
+                }
                 let object = obj_key(&r["object"])?;
                 let source = self.source_id(r.get("source").and_then(|x| x.as_str()))?;
-                self.eng
+                let removed = self
+                    .eng
                     .retract_edge(source, subject, predicate, object)
                     .map_err(|e| format!("backpressure: {e:?}"))?;
-                s.retracts += 1;
+                // count only retracts that removed a present edge (absent edge → no-op, not counted)
+                if removed.is_some() {
+                    s.retracts += 1;
+                }
             } else {
                 return Err(format!("unrecognized record: {line}"));
             }

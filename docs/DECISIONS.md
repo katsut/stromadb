@@ -63,6 +63,22 @@
 - **Evidence (`examples/durability_slo.rs`, 5M facts):** write+fsync 0.71s; cold-start recovery (RTO)
   **0.81s** (< 10s target); **0 data loss** on torn-write.
 
+### D21. Ending a one-value is an explicit `close` record, not a retract or a bounded rewrite
+- **Context:** the ingest surface had no way to express cessation of a cardinality-one value (a value
+  ending with no successor, e.g. an assignee removed). `retract` resolves OR-Set observed tags — a
+  many-only mechanism — so on a one-predicate it was a silent no-op; re-writing the old value with a
+  bounded `valid_to` also fails, because the original open-interval row still covers later instants and
+  wins as-of among covering rows.
+- **Decision:** a `close` ingest record maps to the changelog's `CloseOne` — a versioned row with no
+  object. The head becomes absent and as-of reads at/after its `valid_from` return nothing, independent
+  of arrival order (same fold semantics as any competing one-write). `retract` on a one-predicate is an
+  explicit error naming `close`; a retract of an absent many-edge stays a no-op and is no longer counted.
+- **Why:** cessation is a fact like any other, so it must be a first-class versioned write (replayable,
+  as-of-correct, order-independent) rather than a mutation trick; one write kind per cardinality keeps
+  the fold unambiguous.
+- **Evidence:** ingest close tests in `crates/stroma-db/tests/db.rs` (head absent, as-of before/after
+  the close boundary, reversed arrival order).
+
 ## Read path
 
 ### D6. Read-merge: materialized base ∪ bounded tail

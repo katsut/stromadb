@@ -85,6 +85,7 @@ Ingest is a batch of **newline-delimited JSON records**, one per line, applied i
           "valid_from": 1704067200, "source": "hr"}}
 {"fact": {"subject": 1, "predicate": "member-of",  "object": {"node": 10}, "props": {"role": {"text": "lead"}}}}
 {"retract": {"subject": 1, "predicate": "member-of", "object": {"node": 10}}}
+{"close": {"subject": 1, "predicate": "reports-to", "valid_from": 1704067200, "source": "hr"}}
 ```
 
 - `node` — `id` (required); optional `type` (a declared type) and `label` (a `u64` ABAC bitmask, §5).
@@ -92,7 +93,12 @@ Ingest is a batch of **newline-delimited JSON records**, one per line, applied i
   `valid_from` / `valid_to` (epoch seconds; the valid-time interval, default `[0, ∞)`), `source` (a
   provenance name), and `props` (edge properties, a map of name → typed value).
 - `retract` — end a `many`-predicate membership (`subject, predicate, object`; optional `source`).
-  A `one`-predicate is superseded by asserting a new value, not retracted.
+  Retracting an edge that is not present is a no-op (not counted). A `retract` on a `one`-predicate
+  is an error: supersede the value by asserting a new one, or end it with `close`.
+- `close` — end a `one`-predicate's value with no successor (`subject, predicate`; optional
+  `valid_from`, default `0`, and `source`). The current value becomes absent, and an as-of read at or
+  after `valid_from` returns nothing (reads before it still see the prior value) — regardless of
+  arrival order. Errors on a `many`-predicate (use `retract`).
 
 ### Object / literal encoding
 
@@ -258,7 +264,8 @@ Read the properties on a specific edge.
 
 - `{"op": "stats"}` → engine counters: durable changelog head, schema/embedding counts, storage bytes.
 - Ingest (§2) is submitted as a JSONL batch and returns
-  `{"defs": D, "nodes": N, "facts": F, "retracts": R, "durable_head": H}`, durable on return.
+  `{"defs": D, "nodes": N, "facts": F, "retracts": R, "closes": C, "durable_head": H}`, durable on
+  return. `retracts` counts only retracts that removed a present edge.
 
 ---
 
