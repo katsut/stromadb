@@ -23,7 +23,7 @@
 //! embed: {node,vector}.
 //! Query request (JSON): {"op":"point"|"expand"|"search", ...} — see [`Db::query`].
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -779,6 +779,7 @@ impl ReadState {
                 Ok(json!({ "props": props }))
             }
             "retrieve_context" => self.retrieve_context(req),
+            "find" => self.find(req),
             "neighborhood" => self.neighborhood(req),
             "node" => self.node_detail(req),
             "graph" => self.graph(req),
@@ -1087,6 +1088,72 @@ impl ReadState {
             }
         }
         fallback
+    }
+
+    /// Free-word node search: case-insensitive substring over every text property value (one- and
+    /// many-cardinality), post-authz scoped (a masked node is absent), deduped per node in
+    /// ascending-id order. Returns the carrying node, its display name, and where the hit was —
+    /// the "just find the node for X" read the numeric-id ops don't cover.
+    fn find(&self, req: &Value) -> DbResult<Value> {
+        let needle = req["text"]
+            .as_str()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .ok_or("text required")?;
+        let limit = req["limit"].as_u64().unwrap_or(20) as usize;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let visible = |n: u64| {
+            self.snap
+                .node_labels
+                .get(&n)
+                .is_none_or(|&l| (labels >> l) & 1 == 1)
+        };
+        // First hit per node (iteration order is deterministic: one values, then many values,
+        // ascending (node, predicate)); collected fully, then cut to `limit` in id order.
+        let mut hits: BTreeMap<u64, (FieldId, String)> = BTreeMap::new();
+        for (&(n, p), v) in &self.snap.one {
+            if let Some(ObjKey::Text(s)) = v
+                && !hits.contains_key(&n)
+                && visible(n)
+                && s.to_lowercase().contains(&needle)
+            {
+                hits.insert(n, (p, excerpt(s, &needle)));
+            }
+        }
+        for (&(n, p), set) in &self.snap.many {
+            if hits.contains_key(&n) || !visible(n) {
+                continue;
+            }
+            for o in set {
+                if let ObjKey::Text(s) = o
+                    && s.to_lowercase().contains(&needle)
+                {
+                    hits.insert(n, (p, excerpt(s, &needle)));
+                    break;
+                }
+            }
+        }
+        let nodes: Vec<Value> = hits
+            .iter()
+            .take(limit)
+            .map(|(&n, (p, s))| {
+                let ty = self
+                    .snap
+                    .node_types
+                    .get(&n)
+                    .and_then(|&t| self.schema.cat.name(t));
+                json!({
+                    "id": n,
+                    "name": self.display_name(n),
+                    "type": ty,
+                    "matched": { "predicate": self.schema.cat.name(*p).unwrap_or("?"), "value": s },
+                })
+            })
+            .collect();
+        Ok(json!({ "nodes": nodes, "truncated": hits.len() > limit }))
     }
 
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,
@@ -1444,6 +1511,29 @@ fn pick_m(dim: usize) -> usize {
 /// All declared node ids (union of typed and labelled nodes), sorted ascending — the source for a
 /// whole-graph view. Sorted because a `HashMap`'s iteration order is unspecified, but the
 /// graph/overview views expect a stable, ordered node set.
+/// A short window around the first (case-insensitive) occurrence of `needle_lc` in `s`, so a hit
+/// inside a long text value (a rule body, a document excerpt) stays readable in a result list.
+/// Char-based slicing — the window may drift slightly for case-folds that change length, but it
+/// never panics and always contains readable context.
+fn excerpt(s: &str, needle_lc: &str) -> String {
+    const CTX: usize = 80;
+    let total = s.chars().count();
+    if total <= 2 * CTX {
+        return s.to_string();
+    }
+    let at = s.to_lowercase().find(needle_lc).unwrap_or(0);
+    let match_char = s.to_lowercase()[..at].chars().count();
+    let start = match_char.saturating_sub(CTX);
+    let end = (match_char + needle_lc.chars().count() + CTX).min(total);
+    let body: String = s.chars().skip(start).take(end - start).collect();
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        body,
+        if end < total { "…" } else { "" }
+    )
+}
+
 fn node_ids(snap: &Snapshot) -> Vec<NodeId> {
     let mut s: BTreeSet<NodeId> = snap.node_types.keys().copied().collect();
     s.extend(snap.node_labels.keys().copied());
