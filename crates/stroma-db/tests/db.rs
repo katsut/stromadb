@@ -1137,3 +1137,52 @@ fn display_flagged_predicate_labels_nodes() {
     assert_eq!(name_of(&db), json!(null));
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn find_free_word_search() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_find_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Ticket\"}}\n",
+        "{\"pred_def\":{\"name\":\"summary\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\",\"display\":true}}\n",
+        "{\"pred_def\":{\"name\":\"status\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Ticket\",\"label\":0}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Ticket\",\"label\":3}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"summary\",\"object\":{\"text\":\"Fix the Widget renderer\"}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"released\"}}}\n",
+        "{\"fact\":{\"subject\":2,\"predicate\":\"summary\",\"object\":{\"text\":\"widget budget review\"}}}\n",
+    ))
+    .unwrap();
+
+    // case-insensitive, both nodes, ascending ids, display name + matched site reported
+    let r = db.query(&json!({"op":"find","text":"WIDGET"})).unwrap();
+    assert_eq!(r["nodes"][0]["id"], json!(1));
+    assert_eq!(r["nodes"][0]["name"], json!("Fix the Widget renderer"));
+    assert_eq!(r["nodes"][0]["type"], json!("Ticket"));
+    assert_eq!(r["nodes"][1]["id"], json!(2));
+    assert_eq!(r["truncated"], json!(false));
+
+    // free-word: a hit inside a NON-display text value still finds the node
+    let r = db.query(&json!({"op":"find","text":"releas"})).unwrap();
+    assert_eq!(r["nodes"][0]["matched"]["predicate"], json!("status"));
+    assert_eq!(r["nodes"].as_array().unwrap().len(), 1);
+
+    // post-authz: label 3 masked out ⇒ node 2 is absent, not redacted
+    let r = db
+        .query(&json!({"op":"find","text":"widget","allowed_labels":1}))
+        .unwrap();
+    assert_eq!(r["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(r["nodes"][0]["id"], json!(1));
+
+    // limit cuts in id order and reports the cut
+    let r = db
+        .query(&json!({"op":"find","text":"widget","limit":1}))
+        .unwrap();
+    assert_eq!(r["nodes"].as_array().unwrap().len(), 1);
+    assert_eq!(r["truncated"], json!(true));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
