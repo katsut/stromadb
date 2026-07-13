@@ -1092,3 +1092,48 @@ fn stats_schema_reports_catalog_size_not_lines_processed() {
     assert_eq!(db.stats()["schema"], expect);
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn display_flagged_predicate_labels_nodes() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_display_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+
+    // `summary` starts unflagged: the node renders with no name (not in the hardcoded fallback list).
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Ticket\"}}\n",
+        "{\"pred_def\":{\"name\":\"summary\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Ticket\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"summary\",\"object\":{\"text\":\"fix the widget\"}}}\n",
+    ))
+    .unwrap();
+    let name_of = |db: &Db| db.query(&json!({"op":"graph"})).unwrap()["nodes"][0]["name"].clone();
+    assert_eq!(name_of(&db), json!(null));
+
+    // Re-sending the def with the display flag upgrades the existing graph — no re-ingest.
+    db.ingest_str(
+        "{\"pred_def\":{\"name\":\"summary\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\",\"display\":true}}\n",
+    )
+    .unwrap();
+    assert_eq!(name_of(&db), json!("fix the widget"));
+    assert_eq!(
+        db.query(&json!({"op":"schema"})).unwrap()["predicates"][0]["display"],
+        json!(true)
+    );
+
+    // The flag survives a reopen (replayed from schema.jsonl in declaration order).
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(name_of(&db), json!("fix the widget"));
+
+    // A later def line without the flag turns it back off (latest declaration wins).
+    db.ingest_str(
+        "{\"pred_def\":{\"name\":\"summary\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\"}}\n",
+    )
+    .unwrap();
+    assert_eq!(name_of(&db), json!(null));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
