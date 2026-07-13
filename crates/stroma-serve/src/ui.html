@@ -279,7 +279,26 @@ let liveHead=0, liveOn=true, lastReq=null, pollStarted=false;   // live update s
 // live=true keeps existing nodes where they are (position-preserving update) and doesn't re-fit —
 // used by the live poll so the graph flexes instead of teleporting. Fresh draws seed nodes on
 // concentric rings by hop depth, close to where the force layout settles, so the opening barely moves.
+// A live reload whose node-id set and edge set match what is already on screen must not re-arm the
+// settle window: under a streaming source the head advances continuously, and re-settling on every
+// tick keeps the layout trembling for as long as the stream runs.
+function sameTopology(nodes, edges) {
+  if (nodes.length !== N) return false;
+  for (const nd of nodes) if (!idx.has(nd.id)) return false;
+  const cur = new Set(); for (let e=0;e<ePairs.length;e+=2) cur.add(ePairs[e]+':'+ePairs[e+1]);
+  const seen = new Set();
+  for (const [a,b] of edges) { const i=idx.get(a), j=idx.get(b); if(i===undefined||j===undefined) return false;
+    const k=i+':'+j; if(!cur.has(k)) return false; seen.add(k); }
+  return seen.size === cur.size;
+}
 function loadGraph(nodes, edges, live) {
+  if (live && sameTopology(nodes, edges)) {
+    // refresh what a tick can change without moving anything: labels, counts, edge weights
+    nodes.forEach(nd => { const i=idx.get(nd.id); depth[i]=nd.depth; names[i]=nd.name||null; counts[i]=(nd.count!=null?nd.count:null); });
+    ePairs = []; eW = []; for (const [a,b,w] of edges) { const i=idx.get(a), j=idx.get(b); ePairs.push(i,j); eW.push(w||1); }
+    updateNodeCandidates(); buildBuffers();
+    return;
+  }
   const prev = live ? new Map() : null;
   const pinnedIds = live ? [...pinned].map(i=>ids[i]) : [];
   if (live) for (let i=0;i<N;i++) prev.set(ids[i], [px[i],py[i],vx[i],vy[i]]);
@@ -386,15 +405,21 @@ let posBuf, edgeBuf, edgeHiBuf;
 let settle=0, autoFit=false;
 function step() {
   if(!N) return;
-  const REP=2600, SPRING=0.02, LEN=64, CENTER=0.9, DAMP=0.84, CELL=90;
+  // Damping is applied once at integration (after ALL force contributions, springs included) and
+  // per-step speed is clamped: a high-degree hub collects hundreds of spring impulses per step, and
+  // undamped/unbounded velocity diverges to NaN on tree-shaped graphs (see the folder-tree case).
+  const REP=2600, SPRING=0.02, LEN=64, CENTER=0.9, DAMP=0.84, CELL=90, VMAX=30;
   const grid=new Map(); const key=(cx,cy)=>cx*99991+cy;
   for(let i=0;i<N;i++){ const cx=Math.floor(px[i]/CELL), cy=Math.floor(py[i]/CELL); const k=key(cx,cy); (grid.get(k)||grid.set(k,[]).get(k)).push(i); }
   for(let i=0;i<N;i++){ let fx=-px[i]*CENTER*0.006, fy=-py[i]*CENTER*0.006; const cx=Math.floor(px[i]/CELL), cy=Math.floor(py[i]/CELL);
     for(let gx=-1;gx<=1;gx++)for(let gy=-1;gy<=1;gy++){ const b=grid.get(key(cx+gx,cy+gy)); if(!b)continue;
       for(const j of b){ if(j===i)continue; let dx=px[i]-px[j], dy=py[i]-py[j]; let d2=dx*dx+dy*dy+0.01; if(d2>CELL*CELL*4)continue; const f=REP/d2; fx+=dx*f; fy+=dy*f; } }
-    vx[i]=(vx[i]+fx*0.0006)*DAMP; vy[i]=(vy[i]+fy*0.0006)*DAMP; }
+    vx[i]+=fx*0.0006; vy[i]+=fy*0.0006; }
   for(let e=0;e<ePairs.length;e+=2){ const i=ePairs[e], j=ePairs[e+1]; let dx=px[j]-px[i], dy=py[j]-py[i]; const d=Math.hypot(dx,dy)||1; const f=(d-LEN)*SPRING; dx/=d; dy/=d; vx[i]+=dx*f; vy[i]+=dy*f; vx[j]-=dx*f; vy[j]-=dy*f; }
-  for(let i=0;i<N;i++){ if(i===dragIdx||pinned.has(i)){ vx[i]=0; vy[i]=0; continue; } px[i]+=vx[i]; py[i]+=vy[i]; }
+  for(let i=0;i<N;i++){ if(i===dragIdx||pinned.has(i)){ vx[i]=0; vy[i]=0; continue; }
+    vx[i]*=DAMP; vy[i]*=DAMP;
+    const sp=Math.hypot(vx[i],vy[i]); if(sp>VMAX){ vx[i]*=VMAX/sp; vy[i]*=VMAX/sp; }
+    px[i]+=vx[i]; py[i]+=vy[i]; }
 }
 
 function draw() {
@@ -559,6 +584,22 @@ async function overviewDraw(){ pushView(snap('ov')); const btn=$('map'); btn.dis
 $('map').onclick=overviewDraw;
 
 // ---------- live updates: long-poll /events, re-query the current slice on change ----------
+// Head ticks are coalesced: the slice is re-queried at most every LIVE_MIN_MS (trailing refresh),
+// so a bulk load neither hammers the query endpoint once per group-commit nor re-settles the layout
+// faster than it can rest.
+const LIVE_MIN_MS = 2500;
+let liveLastQ = 0, liveQueued = false;
+async function liveRefresh(){
+  if(liveQueued) return; liveQueued = true;
+  const wait = liveLastQ + LIVE_MIN_MS - performance.now();
+  if(wait > 0) await new Promise(z=>setTimeout(z, wait));
+  liveQueued = false; liveLastQ = performance.now();
+  if(!(liveOn && lastReq)) return;
+  try{ const res=await api('/query', lastReq); if(!res.error){
+    let nodes=res.nodes;
+    if(lastReq.op==='overview'){ overviewSamples=new Map(res.nodes.map(n=>[n.id,n.sample])); nodes=res.nodes.map(n=>({id:n.id,depth:0,name:`${n.name} ×${n.count}`,count:n.count})); }
+    loadGraph(nodes, res.edges, true); toast(t('tLive')); } }catch(x){}
+}
 async function startPoll(){ if(pollStarted) return; pollStarted=true;
   try{ const s=await api('/stats'); liveHead = s.facts?.durable_head ?? 0; }catch(x){}
   while(true){
@@ -567,10 +608,7 @@ async function startPoll(){ if(pollStarted) return; pollStarted=true;
     catch(x){ await new Promise(z=>setTimeout(z,2000)); continue; }
     if(head===liveHead) continue;      // timeout tick, no change
     liveHead=head; setLivePill(); stats();   // refresh header counters too
-    if(liveOn && lastReq){ try{ const res=await api('/query', lastReq); if(!res.error){
-      let nodes=res.nodes;
-      if(lastReq.op==='overview'){ overviewSamples=new Map(res.nodes.map(n=>[n.id,n.sample])); nodes=res.nodes.map(n=>({id:n.id,depth:0,name:`${n.name} ×${n.count}`,count:n.count})); }
-      loadGraph(nodes, res.edges, true); toast(t('tLive')); } }catch(x){} }
+    if(liveOn && lastReq) liveRefresh();
   }
 }
 function setLivePill(){ const b=$('livePill'); if(!b) return; b.classList.toggle('on', liveOn); b.title = liveOn ? t('liveOn') : t('livePaused'); b.innerHTML = `<span class="dot"></span>${liveOn ? t('live') : t('paused')}`; }
