@@ -1058,3 +1058,37 @@ fn coarse_confidence_from_provenance() {
 
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn stats_schema_reports_catalog_size_not_lines_processed() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_stats_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+
+    // A connector shipping its schema with every self-contained batch (a supported pattern):
+    // the same defs and node declarations arrive three times, plus a per-fact source name
+    // (which persists a source_def line into schema.jsonl).
+    let batch = concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"works-on\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Project\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":2},\"source\":\"hr\"}}\n",
+    );
+    for _ in 0..3 {
+        db.ingest_str(batch).unwrap();
+    }
+
+    let expect = json!({ "types": 2, "predicates": 1, "nodes": 2, "rules": 0 });
+    assert_eq!(db.stats()["schema"], expect);
+
+    // and the counts survive a reopen (replay must not change them)
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(db.stats()["schema"], expect);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}

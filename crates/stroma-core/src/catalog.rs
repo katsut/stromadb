@@ -167,6 +167,11 @@ impl Catalog {
         self.predicates.values()
     }
 
+    /// Number of registered entity types.
+    pub fn types_len(&self) -> usize {
+        self.types.len()
+    }
+
     /// The distinct ABAC sensitivity labels actually assigned to nodes, sorted ascending — so a
     /// client can show which labels exist in the data instead of guessing bitmask values.
     pub fn labels_in_use(&self) -> Vec<u8> {

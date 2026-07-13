@@ -14,8 +14,8 @@
 //!   schema.jsonl     type/predicate definitions, replayed in order (Field-ID interning is
 //!                    order-deterministic, so ids are stable across restarts)
 //!   rules.jsonl      named conformance rules (`rule_def`), replayed in order into the rule registry
-//!   nodes.jsonl      node type/label assignments (mirrored here for counts; the authority is the WAL
-//!                    ops, which the recovered snapshot carries — nodes.jsonl is not replayed)
+//!   nodes.jsonl      node type/label assignments (audit mirror of what was ingested; the authority
+//!                    is the WAL ops, which the recovered snapshot carries — not replayed)
 //!   embeddings.bin   received embeddings, flat f32 LE; embeddings.ids = u64 LE per row
 //!   meta.json        { "dim": N }
 //!
@@ -308,7 +308,15 @@ impl Db {
             .unwrap_or(0);
         json!({
             "facts": { "durable_head": w.eng.durable_head(), "unmerged": w.eng.unmerged() },
-            "schema": { "defs": read_lines(&w.dir.join("schema.jsonl")).len(), "nodes": read_lines(&w.dir.join("nodes.jsonl")).len(), "rules": read_lines(&w.dir.join("rules.jsonl")).len() },
+            // Catalog size, not lines processed: connectors legitimately re-send their schema with
+            // every self-contained batch, so counting the persisted def/node lines reads as
+            // unbounded growth on a dashboard while the catalog holds a few dozen entries.
+            "schema": {
+                "types": w.schema.cat.types_len(),
+                "predicates": w.schema.cat.predicates().count(),
+                "nodes": node_ids(&w.eng.snapshot_arc()).len(),
+                "rules": w.schema.rules.len(),
+            },
             "embeddings": { "count": w.emb_ids.len(), "dim": w.dim },
             "storage": { "wal_bytes": wal_bytes, "embeddings_bytes": w.emb.len() * 4 },
         })
