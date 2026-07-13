@@ -944,7 +944,7 @@ impl ReadState {
                         ValueType::Bool => "bool",
                     } }),
                 };
-                json!({ "name": name, "card": card, "domain": domain, "range": range })
+                json!({ "name": name, "card": card, "domain": domain, "range": range, "display": p.display })
             })
             .collect();
         preds.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -1065,25 +1065,28 @@ impl ReadState {
         Ok(json!({ "nodes": nodes, "edges": edges, "overview": true }))
     }
 
-    /// A node's display name — the value of its first `name`/`title`/`display_name`/`full_name`
-    /// text predicate, if any. Used to label nodes in graph/neighbourhood results.
+    /// A node's display name — the value of a predicate the schema flags with `display: true`,
+    /// falling back to the first `name`/`title`/`display_name`/`full_name` text predicate when no
+    /// flagged predicate covers the node. Used to label nodes in graph/neighbourhood results.
     fn display_name(&self, id: u64) -> Option<String> {
         const NAME_PREDS: [&str; 4] = ["name", "title", "display_name", "full_name"];
-        self.snap
-            .one
-            .range((id, u32::MIN)..=(id, u32::MAX))
-            .find_map(|(&(_, p), v)| match v {
-                Some(ObjKey::Text(s))
-                    if self
-                        .schema
-                        .cat
-                        .name(p)
-                        .is_some_and(|n| NAME_PREDS.contains(&n)) =>
-                {
-                    Some(s.clone())
-                }
-                _ => None,
-            })
+        let mut fallback: Option<String> = None;
+        for (&(_, p), v) in self.snap.one.range((id, u32::MIN)..=(id, u32::MAX)) {
+            let Some(ObjKey::Text(s)) = v else { continue };
+            if self.schema.cat.predicate(p).is_some_and(|d| d.display) {
+                return Some(s.clone());
+            }
+            if fallback.is_none()
+                && self
+                    .schema
+                    .cat
+                    .name(p)
+                    .is_some_and(|n| NAME_PREDS.contains(&n))
+            {
+                fallback = Some(s.clone());
+            }
+        }
+        fallback
     }
 
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,
@@ -1556,9 +1559,15 @@ fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
             transitive,
             inverse,
         };
-        schema
+        let pid = schema
             .cat
             .register_predicate(name, c, props, domain_id, range);
+        // Optional display flag: this predicate's text value labels its subject node in graph views.
+        // Presentation metadata, not a constraint — unlike cardinality, a re-sent def may change it
+        // (register_predicate rebuilds the def from this line, so the latest declaration wins).
+        schema
+            .cat
+            .set_display(pid, p["display"].as_bool().unwrap_or(false));
         schema.cardinality.insert(name.to_string(), c);
         return Ok(());
     }

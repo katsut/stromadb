@@ -50,6 +50,9 @@ pub struct PredicateDef {
     pub props: RelProps,
     pub domain: FieldId, // subject entity type
     pub range: Range,
+    /// This predicate's text value labels its subject node in graph views (declared per schema;
+    /// presentation metadata, not a constraint — re-declaring a predicate may change it).
+    pub display: bool,
 }
 
 /// Errors from minimal constraint validation.
@@ -137,9 +140,17 @@ impl Catalog {
                 props,
                 domain,
                 range,
+                display: false,
             },
         );
         id
+    }
+
+    /// Mark (or unmark) a predicate as its subject's display name. No-op for unknown ids.
+    pub fn set_display(&mut self, pred: FieldId, display: bool) {
+        if let Some(def) = self.predicates.get_mut(&pred) {
+            def.display = display;
+        }
     }
 
     /// Assign an entity type to a node (used by domain/range validation and type-aware search).
