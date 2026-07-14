@@ -273,7 +273,6 @@ let idx = new Map();         // node id -> index
 let depth = [];              // index -> hop depth
 let names = [];              // index -> display name (may be null)
 let counts = [];             // index -> aggregate member count (overview only; null otherwise)
-let hasFocus = false;        // neighbourhood (show hop distance) vs whole-graph
 let labelsOn = true;         // on-graph label visibility (HUD toggle)
 let overviewMode = false;    // type-aggregate map: clicking a super-node drills to its sample
 let overviewSamples = new Map(); // super-node id -> a real member node id to drill into
@@ -481,8 +480,8 @@ function drawLabels(){
   for(let i=0;i<N;i++){
     const sx=(px[i]+cam.x)*cam.z + W/2, sy=(py[i]+cam.y)*cam.z + H/2;
     if(sx<-60||sx>W+8||sy<-12||sy>H+12) continue;
-    let t = names[i] || ('#'+ids[i]);
-    if(hasFocus && depth[i]>0) t += ' ·'+depth[i];
+    let t = (names[i] || ('#'+ids[i])).replace(/\s+/g,' ');
+    if(t.length>44) t = t.slice(0,43)+'…';
     const x = sx + Math.max(6, 6*cam.z), y = sy;
     lctx.strokeText(t,x,y); lctx.fillText(t,x,y);
   }
@@ -582,7 +581,7 @@ $('back').onclick=()=>{ if(!viewStack.length) return; applyView(viewStack.pop())
 // ---------- data ----------
 function toast(m,err){ const t=$('toast'); t.textContent=m; t.className='toast'+(err?' err':''); t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'),2800); }
 async function go(){ if($('focus').value.trim()===''){ toast(t('enterFocus'),true); return; }
-  pushView(snap('nb')); const btn=$('go'); btn.disabled=true; hasFocus=true; overviewMode=false; $('inspect').classList.add('hidden');
+  pushView(snap('nb')); const btn=$('go'); btn.disabled=true; overviewMode=false; $('inspect').classList.add('hidden');
   try{ const req={ op:'neighborhood', subject:+$('focus').value, hops:+$('hops').value, max_nodes:+$('cap').value||3000 };
     if($('pred').value) req.predicate=$('pred').value; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
@@ -606,13 +605,13 @@ async function runFind(){
   }catch(x){ box.classList.add('hidden'); }
 }
 $('find').oninput=()=>{ clearTimeout(findTimer); findTimer=setTimeout(runFind, 250); };
-async function drawAll(){ pushView(snap('all')); const btn=$('all'); btn.disabled=true; hasFocus=false; overviewMode=false; $('focus').value=''; $('inspect').classList.add('hidden');
+async function drawAll(){ pushView(snap('all')); const btn=$('all'); btn.disabled=true; overviewMode=false; $('focus').value=''; $('inspect').classList.add('hidden');
   try{ const req={ op:'graph', max_nodes:+$('cap').value||3000 }; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     lastReq=req; loadGraph(r.nodes, r.edges); toast(t('tWhole',{n:r.nodes.length,e:r.edges.length,cap:r.truncated?t('capped'):''})); fit(); startPoll();
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('all').onclick=drawAll;
-async function overviewDraw(){ pushView(snap('ov')); const btn=$('map'); btn.disabled=true; hasFocus=false; $('focus').value=''; $('inspect').classList.add('hidden');
+async function overviewDraw(){ pushView(snap('ov')); const btn=$('map'); btn.disabled=true; $('focus').value=''; $('inspect').classList.add('hidden');
   try{ const req={ op:'overview' }; const mask=scopeMask(); if(mask!==null) req.allowed_labels=mask;
     const r=await api('/query',req); if(r.error){ toast(r.error,true); return; }
     overviewSamples = new Map(r.nodes.map(n=>[n.id, n.sample]));
@@ -702,7 +701,7 @@ async function runCompose(){ compose.ran=true; renderCompose();
       if(el) el.textContent = r.error ? '!' : (r.ids?r.ids.length:0);
       if(i===compose.steps.length-1){ // final: draw it
         if(r.error){ $('qresult2').innerHTML=`<div class="qerr">${esc(r.error)}</div>`; return; }
-        lastReq=req; hasFocus=false; overviewMode=false;
+        lastReq=req; overviewMode=false;
         loadGraph(r.nodes.map(n=>({id:n.id,depth:0,name:n.name})), []); fit(); startPoll();
         const chips = r.ids.length ? `<div class="qchips">${r.ids.slice(0,40).map(id=>`<span class="qchip" onclick="recenter(${id})">${t('detNode')} ${id}</span>`).join('')}</div>` : `<div class="qsum">${t('noLinked')}</div>`;
         $('qresult2').innerHTML=chips;
