@@ -98,6 +98,9 @@ struct WriteState {
     /// Write-side node→label map — the index-build authority (labels ride the ANN posting lists).
     /// Node types reach readers via the snapshot's `node_types` (folded from `SetNodeType` ops).
     node_label_w: HashMap<NodeId, u8>,
+    /// Write-side node→type mirror, kept solely so a re-sent node record with unchanged type and
+    /// label can be suppressed without consulting the (possibly stale) read snapshot.
+    node_type_w: HashMap<NodeId, FieldId>,
     /// Received embeddings, `Arc`-shared with the read view; appended (copy-on-write) by `embed`.
     emb_ids: Arc<Vec<u64>>,
     emb: Arc<Vec<f32>>,
@@ -178,11 +181,14 @@ impl Db {
         let snap = eng.snapshot_arc();
         let node_label_w: HashMap<NodeId, u8> =
             snap.node_labels.iter().map(|(&k, &v)| (k, v)).collect();
+        let node_type_w: HashMap<NodeId, FieldId> =
+            snap.node_types.iter().map(|(&k, &v)| (k, v)).collect();
         let mut w = WriteState {
             dir: dir.to_path_buf(),
             eng,
             schema: Arc::new(schema),
             node_label_w,
+            node_type_w,
             emb_ids: Arc::new(emb_ids),
             emb: Arc::new(emb),
             dim,
@@ -237,6 +243,7 @@ impl Db {
         w.eng = eng;
         w.schema = Arc::new(Schema::default());
         w.node_label_w.clear();
+        w.node_type_w.clear();
         w.emb_ids = Arc::new(Vec::new());
         w.emb = Arc::new(Vec::new());
         w.dim = 0;
@@ -471,10 +478,13 @@ impl WriteState {
                 apply_rule_def(Arc::make_mut(&mut self.schema), &v)?;
                 self.append_line("rules.jsonl", line)?;
             } else if let Some(n) = v.get("node") {
-                self.apply_node(n)?;
-                self.append_line("nodes.jsonl", line)?;
-                touched_nodes = true;
-                s.nodes += 1;
+                if self.apply_node(n)? {
+                    self.append_line("nodes.jsonl", line)?;
+                    touched_nodes = true;
+                    s.nodes += 1;
+                } else {
+                    s.suppressed += 1;
+                }
             } else if let Some(f) = v.get("fact") {
                 let subject = f["subject"].as_u64().ok_or("fact.subject missing")?;
                 let pname = f["predicate"].as_str().ok_or("fact.predicate missing")?;
@@ -661,32 +671,42 @@ impl WriteState {
 
     /// A node record: emit its type/label as engine ops (so the snapshot carries them) and mirror the
     /// label into the write-side index-build map.
-    fn apply_node(&mut self, n: &Value) -> DbResult<()> {
+    /// Returns whether anything was written — a re-sent record whose type and label both match
+    /// the write-side mirrors is a no-op the caller suppresses (no changelog write, no jsonl line).
+    fn apply_node(&mut self, n: &Value) -> DbResult<bool> {
         let id = n["id"].as_u64().ok_or("node.id missing")?;
+        let mut wrote = false;
         if let Some(t) = n["type"].as_str() {
             let tid = self
                 .schema
                 .cat
                 .field_id(t)
                 .ok_or(format!("unknown type: {t}"))?;
-            self.eng
-                .write(
-                    0,
-                    WriteKind::SetNodeType {
-                        node: id,
-                        type_id: tid,
-                    },
-                )
-                .map_err(|e| format!("backpressure: {e:?}"))?;
+            if self.node_type_w.get(&id) != Some(&tid) {
+                self.node_type_w.insert(id, tid);
+                self.eng
+                    .write(
+                        0,
+                        WriteKind::SetNodeType {
+                            node: id,
+                            type_id: tid,
+                        },
+                    )
+                    .map_err(|e| format!("backpressure: {e:?}"))?;
+                wrote = true;
+            }
         }
         if let Some(l) = n["label"].as_u64() {
             let label = l as u8;
-            self.node_label_w.insert(id, label);
-            self.eng
-                .write(0, WriteKind::SetNodeLabel { node: id, label })
-                .map_err(|e| format!("backpressure: {e:?}"))?;
+            if self.node_label_w.get(&id) != Some(&label) {
+                self.node_label_w.insert(id, label);
+                self.eng
+                    .write(0, WriteKind::SetNodeLabel { node: id, label })
+                    .map_err(|e| format!("backpressure: {e:?}"))?;
+                wrote = true;
+            }
         }
-        Ok(())
+        Ok(wrote)
     }
 
     fn flush(&mut self, batch: &mut Vec<(u32, WriteKind)>) -> DbResult<()> {

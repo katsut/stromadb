@@ -1403,3 +1403,38 @@ fn unchanged_edge_prop_is_suppressed_changed_prop_appends() {
     );
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn resend_identical_node_is_suppressed() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_noop_node_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str("{\"type_def\":{\"name\":\"Ticket\"}}\n")
+        .unwrap();
+    let node = "{\"node\":{\"id\":1,\"type\":\"Ticket\",\"label\":2}}\n";
+    let s = db.ingest_str(node).unwrap();
+    assert_eq!((s.nodes, s.suppressed), (1, 0));
+    let head = s.durable_head;
+
+    // identical re-send: suppressed, nothing appended
+    let s = db.ingest_str(node).unwrap();
+    assert_eq!((s.nodes, s.suppressed), (0, 1));
+    assert_eq!(s.durable_head, head);
+
+    // changed label: applied (and only the label op appends)
+    let s = db
+        .ingest_str("{\"node\":{\"id\":1,\"type\":\"Ticket\",\"label\":3}}\n")
+        .unwrap();
+    assert_eq!((s.nodes, s.suppressed), (1, 0));
+    assert_eq!(s.durable_head, head + 1);
+
+    // label-omitted re-send with same type: suppressed (absent label means "leave as is")
+    let s = db
+        .ingest_str("{\"node\":{\"id\":1,\"type\":\"Ticket\"}}\n")
+        .unwrap();
+    assert_eq!((s.nodes, s.suppressed), (0, 1));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}

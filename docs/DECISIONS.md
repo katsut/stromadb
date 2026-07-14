@@ -91,7 +91,8 @@
   changed prop appends just the prop); a close iff the head is already a close at the same `valid_from`.
   A same-value fact from a *different* source always appends: distinct agreeing sources are per-row
   corroboration evidence. Cost: one head read per incoming fact against the materialized state (the same
-  head the point read resolves), no new lookup structure.
+  head the point read resolves), no new lookup structure. Node records follow the same rule: a re-send
+  whose type and label both match the write-side mirrors is suppressed (no engine op, no jsonl line).
 - **Why:** the changelog is the version authority *for change*; observation frequency is not information
   the fold can use (the re-assertion folds to the identical state), so recording it only inflates the log,
   replay, and the read-merge history. Suppression at the boundary leaves fold/changelog semantics
