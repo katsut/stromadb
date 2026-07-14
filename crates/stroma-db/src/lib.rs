@@ -934,6 +934,10 @@ impl ReadState {
             if let Some(src) = source {
                 prop["source"] = json!(src);
             }
+            // coarse confidence tier (no reference time here, so freshness never downgrades it) —
+            // the belief-strength companion to the provenance chip
+            let conf = query::confidence_signals(&self.snap, subject, p, None, None);
+            prop["confidence"] = json!(conf.tier.as_str());
             props.push(prop);
         }
         for (p, set) in manys {
