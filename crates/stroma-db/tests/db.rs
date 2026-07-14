@@ -1086,10 +1086,18 @@ fn stats_schema_reports_catalog_size_not_lines_processed() {
     let expect = json!({ "types": 2, "predicates": 1, "nodes": 2, "rules": 0 });
     assert_eq!(db.stats()["schema"], expect);
 
+    // system info: server identity, provenance inventory (deduped), label distribution
+    let s = db.stats();
+    assert!(!s["server"]["version"].as_str().unwrap().is_empty());
+    assert!(s["server"]["uptime_seconds"].is_u64());
+    assert_eq!(s["sources"], json!(["hr"]));
+    assert_eq!(s["labels"], json!({})); // no node carries a label in this fixture
+
     // and the counts survive a reopen (replay must not change them)
     drop(db);
     let db = Db::open(&dir).unwrap();
     assert_eq!(db.stats()["schema"], expect);
+    assert_eq!(db.stats()["sources"], json!(["hr"])); // source inventory replays from source_def lines
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
