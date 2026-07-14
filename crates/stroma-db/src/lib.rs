@@ -23,7 +23,7 @@
 //! embed: {node,vector}.
 //! Query request (JSON): {"op":"point"|"expand"|"search", ...} — see [`Db::query`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -50,8 +50,11 @@ use stroma_core::version::{ReadMode, VersionVector};
 
 pub type DbResult<T> = Result<T, String>;
 
-/// Counts from an ingest batch. `retracts` counts only retracts that removed a present edge (an
-/// absent-edge retract is a no-op); `closes` counts `close` records (each is a changelog write).
+/// Counts from an ingest batch. `facts` counts fact writes actually appended — a re-assertion
+/// identical to current state is skipped and counted in `suppressed` instead. `retracts` counts
+/// only retracts that removed a present edge (an absent-edge retract is a no-op); `closes` counts
+/// `close` records appended (a duplicate close is suppressed); `suppressed` counts incoming writes
+/// (facts, closes, edge-prop sets) skipped as no-ops.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IngestStats {
     pub defs: u64,
@@ -59,6 +62,7 @@ pub struct IngestStats {
     pub facts: u64,
     pub retracts: u64,
     pub closes: u64,
+    pub suppressed: u64,
     pub durable_head: u64,
 }
 
@@ -448,6 +452,12 @@ impl WriteState {
         let mut s = IngestStats::default();
         let mut batch: Vec<(u32, WriteKind)> = Vec::new();
         let mut touched_nodes = false;
+        // Keys this call has written (pending batch entries + un-materialized retracts). The no-op
+        // suppression below compares an incoming write against the engine's materialized state,
+        // which is current for a key exactly when the key is NOT in this set — `flush` materializes
+        // everything appended so far, so the set is cleared at every flush. A dirty key skips
+        // suppression and appends (the pre-suppression behavior, always safe).
+        let mut dirty: HashSet<(NodeId, FieldId)> = HashSet::new();
         for line in jsonl.lines().filter(|l| !l.trim().is_empty()) {
             let v: Value =
                 serde_json::from_str(line).map_err(|e| format!("bad json: {e}: {line}"))?;
@@ -479,25 +489,71 @@ impl WriteState {
                 // per-fact provenance: intern the optional source name to its stable Field-ID (absent
                 // → 0). Interned once and reused for this fact's edge-property writes too.
                 let source = self.source_id(f.get("source").and_then(|x| x.as_str()))?;
+                // No-op suppression (append-on-change): a re-assertion identical to current state is
+                // skipped, so the changelog grows with change, not with observation frequency (a
+                // connector re-sync re-emits unchanged facts wholesale). One head read per incoming
+                // fact against the materialized state — trusted only for a clean key (see `dirty`).
+                // A same-value fact from a DIFFERENT source always appends: distinct agreeing
+                // sources are per-row corroboration evidence.
+                let clean = !dirty.contains(&(subject, predicate));
+                let snap = self.eng.snapshot_arc();
                 let kind = match self.schema.cardinality.get(pname) {
-                    Some(Cardinality::One) => WriteKind::SetOne {
-                        subject,
-                        predicate,
-                        object: object.clone(),
-                        valid_from,
-                        valid_to,
-                    },
-                    _ => WriteKind::AddMany {
-                        subject,
-                        predicate,
-                        object: object.clone(),
-                    },
+                    Some(Cardinality::One) => {
+                        // Suppress iff the CURRENT HEAD row matches on object, valid interval, and
+                        // source. Head-only comparison keeps arrival-order semantics intact: a
+                        // re-send equal to an OLDER row still appends — it legitimately moves the
+                        // head, which the upstream late-arrival guard relies on.
+                        let dup = clean
+                            && query::point_one_head(&snap, subject, predicate).is_some_and(
+                                |(ok, obj, vf, vt)| {
+                                    obj.as_ref() == Some(&object)
+                                        && *vf == valid_from
+                                        && *vt == valid_to
+                                        && ok.source == source
+                                },
+                            );
+                        (!dup).then(|| WriteKind::SetOne {
+                            subject,
+                            predicate,
+                            object: object.clone(),
+                            valid_from,
+                            valid_to,
+                        })
+                    }
+                    _ => {
+                        // Suppress iff an identical (object, source) element is already live.
+                        let dup = clean
+                            && self
+                                .eng
+                                .many_has_live_source(subject, predicate, &object, source);
+                        (!dup).then(|| WriteKind::AddMany {
+                            subject,
+                            predicate,
+                            object: object.clone(),
+                        })
+                    }
                 };
-                batch.push((source, kind));
-                s.facts += 1;
-                // optional edge properties on this fact's edge (subject, predicate, object)
+                match kind {
+                    Some(kind) => {
+                        batch.push((source, kind));
+                        dirty.insert((subject, predicate));
+                        s.facts += 1; // appended fact writes only — a suppressed no-op is not a fact
+                    }
+                    None => s.suppressed += 1,
+                }
+                // optional edge properties on this fact's edge (subject, predicate, object); each
+                // prop equal to its current value is skipped independently — a suppressed fact body
+                // with a changed prop still appends just the prop.
                 if let Some(props) = f.get("props").and_then(|p| p.as_object()) {
                     for (key, val) in props {
+                        let value = value_key(val)?;
+                        if clean
+                            && query::edge_prop(&snap, subject, predicate, &object, key).as_ref()
+                                == Some(&value)
+                        {
+                            s.suppressed += 1;
+                            continue;
+                        }
                         batch.push((
                             source,
                             WriteKind::SetEdgeProp {
@@ -505,13 +561,15 @@ impl WriteState {
                                 predicate,
                                 object: object.clone(),
                                 key: key.clone(),
-                                value: value_key(val)?,
+                                value,
                             },
                         ));
+                        dirty.insert((subject, predicate));
                     }
                 }
                 if batch.len() >= 10_000 {
                     self.flush(&mut batch)?;
+                    dirty.clear();
                 }
             } else if let Some(c) = v.get("close") {
                 // Close a cardinality-one value: no successor — the head becomes absent and as-of
@@ -535,20 +593,31 @@ impl WriteState {
                 }
                 let valid_from = c["valid_from"].as_i64().unwrap_or(0);
                 let source = self.source_id(c.get("source").and_then(|x| x.as_str()))?;
-                batch.push((
-                    source,
-                    WriteKind::CloseOne {
-                        subject,
-                        predicate,
-                        valid_from,
-                    },
-                ));
-                s.closes += 1;
+                // No-op suppression: the head is already a close at the same boundary.
+                if !dirty.contains(&(subject, predicate))
+                    && query::point_one_closed_from(&self.eng.snapshot_arc(), subject, predicate)
+                        == Some(valid_from)
+                {
+                    s.suppressed += 1;
+                } else {
+                    batch.push((
+                        source,
+                        WriteKind::CloseOne {
+                            subject,
+                            predicate,
+                            valid_from,
+                        },
+                    ));
+                    dirty.insert((subject, predicate));
+                    s.closes += 1;
+                }
                 if batch.len() >= 10_000 {
                     self.flush(&mut batch)?;
+                    dirty.clear();
                 }
             } else if let Some(r) = v.get("retract") {
                 self.flush(&mut batch)?; // retract must observe prior writes
+                dirty.clear();
                 let subject = r["subject"].as_u64().ok_or("retract.subject missing")?;
                 let pname = r["predicate"].as_str().ok_or("retract.predicate missing")?;
                 let predicate = self
@@ -572,6 +641,9 @@ impl WriteState {
                 // count only retracts that removed a present edge (absent edge → no-op, not counted)
                 if removed.is_some() {
                     s.retracts += 1;
+                    // the remove sits in the un-materialized tail until the next flush, so the
+                    // materialized state is stale for this key — mark it dirty
+                    dirty.insert((subject, predicate));
                 }
             } else {
                 return Err(format!("unrecognized record: {line}"));

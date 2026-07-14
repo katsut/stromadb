@@ -79,6 +79,27 @@
 - **Evidence:** ingest close tests in `crates/stroma-db/tests/db.rs` (head absent, as-of before/after
   the close boundary, reversed arrival order).
 
+### D22. Ingest suppresses no-op re-assertions (append-on-change, not append-always)
+- **Context:** a connector re-sync re-emits facts whose values are unchanged; appending every one made
+  changelog growth (and cold-start replay time) proportional to observation frequency, not to real change.
+- **Decision:** at the ingest boundary an incoming write identical to current state is skipped and
+  reported in a `suppressed` ingest counter (`facts`/`closes` count appended writes only). A one-fact is
+  suppressed iff the *current head* row matches on object, valid interval, and source — head-only, so a
+  re-send equal to an older row still appends and legitimately moves the head under arrival order (the
+  late-arrival guard depends on that); a many-fact iff the same `(object, source)` element is already
+  live; an edge-prop set iff the value is unchanged (checked per prop — a suppressed fact body with a
+  changed prop appends just the prop); a close iff the head is already a close at the same `valid_from`.
+  A same-value fact from a *different* source always appends: distinct agreeing sources are per-row
+  corroboration evidence. Cost: one head read per incoming fact against the materialized state (the same
+  head the point read resolves), no new lookup structure.
+- **Why:** the changelog is the version authority *for change*; observation frequency is not information
+  the fold can use (the re-assertion folds to the identical state), so recording it only inflates the log,
+  replay, and the read-merge history. Suppression at the boundary leaves fold/changelog semantics
+  untouched — whatever is appended folds exactly as before.
+- **Evidence:** suppression tests in `crates/stroma-db/tests/db.rs` (identical re-send suppressed with
+  `durable_head` unchanged; different source / different `valid_from` / older-value re-send still append;
+  duplicate close suppressed).
+
 ## Read path
 
 ### D6. Read-merge: materialized base ∪ bounded tail
