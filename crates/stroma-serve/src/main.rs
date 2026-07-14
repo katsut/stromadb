@@ -10,7 +10,7 @@
 //!   GET  /events?since=N  → long-poll; returns {"head": M} when the durable head advances (or ~20s)
 //!   GET  /stats           → engine/schema/embedding/storage counters
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stroma_db::Db::query)
-//!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,durable_head}
+//!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
 //!   POST /reset           → clears the whole database (opt-in: only when started with --allow-reset)
 //!
@@ -203,7 +203,7 @@ fn handle(db: &SharedDb, req: &mut Request) -> (u16, Value) {
             match db.ingest_str(&body) {
                 Ok(s) => (
                     200,
-                    json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "durable_head": s.durable_head }),
+                    json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "suppressed": s.suppressed, "durable_head": s.durable_head }),
                 ),
                 Err(e) => (400, json!({ "error": e })),
             }

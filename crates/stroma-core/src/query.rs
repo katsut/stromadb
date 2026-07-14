@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
-use crate::fold::{ObjKey, Snapshot};
+use crate::fold::{ObjKey, Snapshot, VersionRow};
 
 /// Current functional value of a cardinality-One `(subject, predicate)` (None if absent or closed).
 pub fn point_one(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<ObjKey> {
@@ -37,37 +37,34 @@ pub fn point_one_asof(
         .and_then(|(_ok, obj, _vf, _vt)| obj.clone())
 }
 
+/// The winning version row of a cardinality-One `(subject, predicate)` — the greatest-`OrderKey`
+/// live row, which is the last entry of the ascending `one_history`. `None` when the key has no
+/// history. This is the head every current-value read resolves; the ingest boundary also compares
+/// an incoming re-assertion against it to suppress no-op writes.
+pub fn point_one_head(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<&VersionRow> {
+    snap.one_history.get(&(subject, predicate))?.last()
+}
+
 /// The interned `source` of the current functional value's winning version — the provenance of the
-/// value [`point_one`] returns. The winner is the greatest-`OrderKey` live row, which is the last
-/// entry of the ascending `one_history`, so this reads that row's `OrderKey.source`. `None` when the
+/// value [`point_one`] returns (the [`point_one_head`] row's `OrderKey.source`). `None` when the
 /// key has no history; a `source` of `0` is the "unset"/unknown sentinel (callers decide how to
 /// surface it — typically by omitting provenance).
 pub fn point_one_source(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<FieldId> {
-    snap.one_history
-        .get(&(subject, predicate))?
-        .last()
-        .map(|(ok, _obj, _vf, _vt)| ok.source)
+    point_one_head(snap, subject, predicate).map(|(ok, _obj, _vf, _vt)| ok.source)
 }
 
-/// The `valid_from` of the current functional value's winning version — the same row
-/// [`point_one_source`] reads (greatest-`OrderKey` live row = last entry of the ascending
-/// `one_history`). `None` when the key has no history.
+/// The `valid_from` of the current functional value's winning version — the [`point_one_head`]
+/// row. `None` when the key has no history.
 pub fn point_one_valid_from(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<i64> {
-    snap.one_history
-        .get(&(subject, predicate))?
-        .last()
-        .map(|(_ok, _obj, vf, _vt)| *vf)
+    point_one_head(snap, subject, predicate).map(|(_ok, _obj, vf, _vt)| *vf)
 }
 
-/// The `valid_from` of the winning version *when that version is a close* — the same row
-/// [`point_one_valid_from`] reads (greatest-`OrderKey` live row = last entry of the ascending
-/// `one_history`), but `Some` only when that row carries no object. `None` for a live winner and
-/// for a key with no history at all, so a caller can tell "ended by a close at `vf`" apart from
-/// "never written".
+/// The `valid_from` of the winning version *when that version is a close* — the
+/// [`point_one_head`] row, but `Some` only when that row carries no object. `None` for a live
+/// winner and for a key with no history at all, so a caller can tell "ended by a close at `vf`"
+/// apart from "never written".
 pub fn point_one_closed_from(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<i64> {
-    snap.one_history
-        .get(&(subject, predicate))?
-        .last()
+    point_one_head(snap, subject, predicate)
         .and_then(|(_ok, obj, vf, _vt)| obj.is_none().then_some(*vf))
 }
 

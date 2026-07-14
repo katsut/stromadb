@@ -1194,3 +1194,212 @@ fn find_free_word_search() {
     assert_eq!(r["truncated"], json!(true));
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn resend_identical_one_fact_is_suppressed() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_noop_one_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Ticket\"}}\n",
+        "{\"pred_def\":{\"name\":\"status\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Ticket\"}}\n",
+    ))
+    .unwrap();
+    let fact = "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"open\"},\"valid_from\":100,\"source\":\"tracker\"}}\n";
+    let s = db.ingest_str(fact).unwrap();
+    assert_eq!((s.facts, s.suppressed), (1, 0));
+    let head = s.durable_head;
+
+    // (a) identical re-send: suppressed, durable_head unchanged, value/valid_from unchanged
+    let s = db.ingest_str(fact).unwrap();
+    assert_eq!((s.facts, s.suppressed), (0, 1));
+    assert_eq!(s.durable_head, head);
+    let cur = db
+        .query(&json!({"op":"point","subject":1,"predicate":"status"}))
+        .unwrap();
+    assert_eq!(cur["one"], json!({ "text": "open" }));
+    assert_eq!(cur["valid_from"], json!(100));
+
+    // (b) same value from a DIFFERENT source appends — corroboration evidence stays per-row
+    let s = db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"open\"},\"valid_from\":100,\"source\":\"mirror\"}}\n",
+    )
+    .unwrap();
+    assert_eq!((s.facts, s.suppressed), (1, 0));
+    assert_eq!(s.durable_head, head + 1);
+    let cur = db
+        .query(&json!({"op":"point","subject":1,"predicate":"status"}))
+        .unwrap();
+    assert_eq!(cur["confidence"]["corroboration"], json!(2));
+
+    // (c) same value + source but a different valid_from appends
+    let s = db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"open\"},\"valid_from\":200,\"source\":\"mirror\"}}\n",
+    )
+    .unwrap();
+    assert_eq!((s.facts, s.suppressed), (1, 0));
+
+    // (d) a re-send equal to an OLDER row (not the head) appends and moves the head —
+    // arrival-order semantics the late-arrival guard relies on (regression of prior behavior)
+    db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"closed\"},\"valid_from\":300,\"source\":\"tracker\"}}\n",
+    )
+    .unwrap();
+    let s = db.ingest_str(fact).unwrap(); // "open"@100/tracker again — equals an old row, not the head
+    assert_eq!((s.facts, s.suppressed), (1, 0));
+    let cur = db
+        .query(&json!({"op":"point","subject":1,"predicate":"status"}))
+        .unwrap();
+    assert_eq!(cur["one"], json!({ "text": "open" }));
+    assert_eq!(cur["valid_from"], json!(100));
+
+    // valid_to participates in the head comparison: same row with a bounded interval appends
+    let s = db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"status\",\"object\":{\"text\":\"open\"},\"valid_from\":100,\"valid_to\":500,\"source\":\"tracker\"}}\n",
+    )
+    .unwrap();
+    assert_eq!((s.facts, s.suppressed), (1, 0));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn resend_identical_many_fact_is_suppressed() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_noop_many_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"works-on\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+    ))
+    .unwrap();
+    let fact = "{\"fact\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":9},\"source\":\"hr\"}}\n";
+    let s = db.ingest_str(fact).unwrap();
+    assert_eq!((s.facts, s.suppressed), (1, 0));
+    let head = s.durable_head;
+
+    // (e) an identical (object, source) re-send is suppressed …
+    let s = db.ingest_str(fact).unwrap();
+    assert_eq!((s.facts, s.suppressed), (0, 1));
+    assert_eq!(s.durable_head, head);
+    // … while the same object from a different source appends (per-row corroboration)
+    let s = db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":9},\"source\":\"crm\"}}\n",
+    )
+    .unwrap();
+    assert_eq!((s.facts, s.suppressed), (1, 0));
+    assert_eq!(
+        db.query(&json!({"op":"expand","subject":1,"predicate":"works-on"}))
+            .unwrap(),
+        json!({"nodes":[9]})
+    );
+
+    // retract + re-add in ONE batch: the re-add must append (the key is dirty in this batch, so
+    // the stale materialized state must not suppress it) — the edge ends up present, not absent
+    let s = db.ingest_str(concat!(
+        "{\"retract\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":9}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":9},\"source\":\"hr\"}}\n",
+    ))
+    .unwrap();
+    assert_eq!((s.retracts, s.facts, s.suppressed), (1, 1, 0));
+    assert_eq!(
+        db.query(&json!({"op":"expand","subject":1,"predicate":"works-on"}))
+            .unwrap(),
+        json!({"nodes":[9]})
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn duplicate_close_is_suppressed() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_noop_close_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"assigned-to\",\"object\":{\"node\":9},\"valid_from\":100}}\n",
+    ))
+    .unwrap();
+    let close = "{\"close\":{\"subject\":1,\"predicate\":\"assigned-to\",\"valid_from\":200}}\n";
+    let s = db.ingest_str(close).unwrap();
+    assert_eq!((s.closes, s.suppressed), (1, 0));
+    let head = s.durable_head;
+
+    // (f) a duplicate close (same boundary) is suppressed; the closed state is unchanged
+    let s = db.ingest_str(close).unwrap();
+    assert_eq!((s.closes, s.suppressed), (0, 1));
+    assert_eq!(s.durable_head, head);
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"assigned-to"}))
+            .unwrap(),
+        json!({ "one": null, "closed_from": 200 })
+    );
+
+    // a close at a DIFFERENT boundary is a real change and appends
+    let s = db
+        .ingest_str(
+            "{\"close\":{\"subject\":1,\"predicate\":\"assigned-to\",\"valid_from\":250}}\n",
+        )
+        .unwrap();
+    assert_eq!((s.closes, s.suppressed), (1, 0));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn unchanged_edge_prop_is_suppressed_changed_prop_appends() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_noop_props_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Skill\"}}\n",
+        "{\"pred_def\":{\"name\":\"has-skill\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Skill\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":20,\"type\":\"Skill\"}}\n",
+    ))
+    .unwrap();
+    let fact = "{\"fact\":{\"subject\":1,\"predicate\":\"has-skill\",\"object\":{\"node\":20},\"source\":\"hr\",\"props\":{\"level\":5}}}\n";
+    let s = db.ingest_str(fact).unwrap();
+    assert_eq!((s.facts, s.suppressed), (1, 0));
+    let head = s.durable_head;
+
+    // fully identical re-send: fact body AND the unchanged prop are both suppressed
+    let s = db.ingest_str(fact).unwrap();
+    assert_eq!((s.facts, s.suppressed), (0, 2));
+    assert_eq!(s.durable_head, head);
+
+    // same fact body, changed prop: only the prop write appends (one changelog record)
+    let s = db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"has-skill\",\"object\":{\"node\":20},\"source\":\"hr\",\"props\":{\"level\":4}}}\n",
+    )
+    .unwrap();
+    assert_eq!((s.facts, s.suppressed), (0, 1));
+    assert_eq!(s.durable_head, head + 1);
+    assert_eq!(
+        db.query(
+            &json!({"op":"edge_props","subject":1,"predicate":"has-skill","object":{"node":20}})
+        )
+        .unwrap(),
+        json!({"props":{"level":{"int":4}}})
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}

@@ -95,8 +95,8 @@ fn main() {
             let db = Db::open(dir).unwrap_or_else(|e| die(&e));
             let s = db.ingest_str(&read_file(file)).unwrap_or_else(|e| die(&e));
             println!(
-                "ingested: {} defs, {} nodes, {} facts, {} retracts, {} closes (durable_head={})",
-                s.defs, s.nodes, s.facts, s.retracts, s.closes, s.durable_head
+                "ingested: {} defs, {} nodes, {} facts, {} retracts, {} closes, {} suppressed (durable_head={})",
+                s.defs, s.nodes, s.facts, s.retracts, s.closes, s.suppressed, s.durable_head
             );
         }
         "embed" => {
