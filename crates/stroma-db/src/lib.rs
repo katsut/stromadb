@@ -27,7 +27,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::Instant;
+
+/// Process-lifetime anchor for `/stats` uptime — touched on the first `Db::open` so uptime tracks
+/// how long the database has been serving, not when stats was first asked.
+static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 use serde_json::{Value, json};
 use stroma_core::calendar::Calendar;
@@ -68,6 +73,9 @@ struct Schema {
     /// Named conformance rules declared once (`rule_def`) and evaluated by `rule_name`. Parsed at
     /// declaration; names are resolved against the catalog only at evaluation.
     rules: HashMap<String, conformance::Rule>,
+    /// Provenance source ids registered via `source_def` — the inventory of writers that have ever
+    /// stamped facts (surfaced by `/stats`; the interner alone cannot tell sources from other names).
+    sources: BTreeSet<FieldId>,
 }
 
 /// A directory-backed database. Reads are lock-free over a pinned [`ReadState`]; writes hold the
@@ -137,6 +145,7 @@ impl Db {
                 dir.display()
             ));
         }
+        LazyLock::force(&START); // anchor /stats uptime at first open
         let eng = Engine::open(dir.join("wal.log"), n_max).map_err(|e| format!("open wal: {e}"))?;
         let mut schema = Schema::default();
         for line in read_lines(&dir.join("schema.jsonl")) {
@@ -306,7 +315,27 @@ impl Db {
         let wal_bytes = fs::metadata(w.dir.join("wal.log"))
             .map(|m| m.len())
             .unwrap_or(0);
+        let snap = w.eng.snapshot_arc();
+        // ABAC label distribution: one pass over the snapshot's node-label map — the graph's
+        // sensitivity-tier composition, keyed by label value.
+        let mut labels: BTreeMap<u8, u64> = BTreeMap::new();
+        for &l in snap.node_labels.values() {
+            *labels.entry(l).or_insert(0) += 1;
+        }
+        let labels: serde_json::Map<String, Value> = labels
+            .into_iter()
+            .map(|(l, n)| (l.to_string(), json!(n)))
+            .collect();
+        // Provenance inventory: every source name that has ever stamped a fact, sorted by name.
+        let mut sources: Vec<&str> = w
+            .schema
+            .sources
+            .iter()
+            .filter_map(|&s| w.schema.cat.name(s))
+            .collect();
+        sources.sort_unstable();
         json!({
+            "server": { "version": env!("CARGO_PKG_VERSION"), "uptime_seconds": START.elapsed().as_secs() },
             "facts": { "durable_head": w.eng.durable_head(), "unmerged": w.eng.unmerged() },
             // Catalog size, not lines processed: connectors legitimately re-send their schema with
             // every self-contained batch, so counting the persisted def/node lines reads as
@@ -314,9 +343,11 @@ impl Db {
             "schema": {
                 "types": w.schema.cat.types_len(),
                 "predicates": w.schema.cat.predicates().count(),
-                "nodes": node_ids(&w.eng.snapshot_arc()).len(),
+                "nodes": node_ids(&snap).len(),
                 "rules": w.schema.rules.len(),
             },
+            "labels": labels,
+            "sources": sources,
             "embeddings": { "count": w.emb_ids.len(), "dim": w.dim },
             "storage": { "wal_bytes": wal_bytes, "embeddings_bytes": w.emb.len() * 4 },
         })
@@ -389,9 +420,20 @@ impl WriteState {
     fn source_id(&mut self, name: Option<&str>) -> DbResult<FieldId> {
         let Some(n) = name else { return Ok(0) };
         if let Some(id) = self.schema.cat.field_id(n) {
+            // an already-known name may still be NEW as a source (e.g. it was first interned as a
+            // type or predicate); record it in the inventory and persist the source_def once
+            if !self.schema.sources.contains(&id) {
+                Arc::make_mut(&mut self.schema).sources.insert(id);
+                self.append_line(
+                    "schema.jsonl",
+                    &json!({ "source_def": { "name": n } }).to_string(),
+                )?;
+            }
             return Ok(id);
         }
-        let id = Arc::make_mut(&mut self.schema).cat.intern_ref(n);
+        let schema = Arc::make_mut(&mut self.schema);
+        let id = schema.cat.intern_ref(n);
+        schema.sources.insert(id);
         self.append_line(
             "schema.jsonl",
             &json!({ "source_def": { "name": n } }).to_string(),
@@ -1587,9 +1629,10 @@ fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
     // defs in `schema.jsonl`, re-interns it in the same order so the numeric `source` the WAL stores
     // resolves back to this name after a reopen.
     if let Some(sd) = v.get("source_def") {
-        schema
+        let id = schema
             .cat
             .intern_ref(sd["name"].as_str().ok_or("source_def.name missing")?);
+        schema.sources.insert(id);
         return Ok(());
     }
     if let Some(t) = v.get("type_def") {
