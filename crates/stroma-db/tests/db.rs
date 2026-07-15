@@ -1423,6 +1423,8 @@ fn resend_identical_node_is_suppressed() {
     let s = db.ingest_str(node).unwrap();
     assert_eq!((s.nodes, s.suppressed), (0, 1));
     assert_eq!(s.durable_head, head);
+    // and the since-boot aggregate surfaces in /stats
+    assert_eq!(db.stats()["facts"]["suppressed_since_boot"], json!(1));
 
     // changed label: applied (and only the label op appends)
     let s = db
