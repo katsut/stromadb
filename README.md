@@ -1,6 +1,6 @@
 # StromaDB
 
-**StromaDB** is an open-source, Rust **real-time GraphRAG engine optimized for LLMs**:
+**StromaDB** is a source-available, Rust **real-time GraphRAG engine optimized for LLMs**:
 it fuses **meaning (vectors) × structure (typed graph) × time (bitemporal)** so an LLM can retrieve
 relevant, structurally-correct context in low-ms — over a graph that is updated by a live stream.
 
