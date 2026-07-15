@@ -101,6 +101,8 @@ struct WriteState {
     /// Write-side node→type mirror, kept solely so a re-sent node record with unchanged type and
     /// label can be suppressed without consulting the (possibly stale) read snapshot.
     node_type_w: HashMap<NodeId, FieldId>,
+    /// Since-boot total of suppressed no-op writes (facts, closes, props, nodes) — /stats observability.
+    suppressed_total: u64,
     /// Received embeddings, `Arc`-shared with the read view; appended (copy-on-write) by `embed`.
     emb_ids: Arc<Vec<u64>>,
     emb: Arc<Vec<f32>>,
@@ -189,6 +191,7 @@ impl Db {
             schema: Arc::new(schema),
             node_label_w,
             node_type_w,
+            suppressed_total: 0,
             emb_ids: Arc::new(emb_ids),
             emb: Arc::new(emb),
             dim,
@@ -347,7 +350,9 @@ impl Db {
         sources.sort_unstable();
         json!({
             "server": { "version": env!("CARGO_PKG_VERSION"), "uptime_seconds": START.elapsed().as_secs() },
-            "facts": { "durable_head": w.eng.durable_head(), "unmerged": w.eng.unmerged() },
+            // suppressed_since_boot is process-lifetime observability (like uptime), not durable
+            // state: how much observation noise the ingest boundary has absorbed.
+            "facts": { "durable_head": w.eng.durable_head(), "unmerged": w.eng.unmerged(), "suppressed_since_boot": w.suppressed_total },
             // Catalog size, not lines processed: connectors legitimately re-send their schema with
             // every self-contained batch, so counting the persisted def/node lines reads as
             // unbounded growth on a dashboard while the catalog holds a few dozen entries.
@@ -663,6 +668,7 @@ impl WriteState {
         self.eng.sync().map_err(|e| format!("fsync: {e}"))?;
         self.eng.materialize();
         s.durable_head = self.eng.durable_head();
+        self.suppressed_total += s.suppressed;
         if touched_nodes {
             self.rebuild_index();
         }
