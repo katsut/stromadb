@@ -50,6 +50,9 @@ use stroma_core::ivf::IvfPq;
 use stroma_core::query;
 use stroma_core::version::{ReadMode, VersionVector};
 
+/// Shared MCP tool schemas + JSON-RPC dispatch (used by the stdio binary and the serve endpoint).
+pub mod mcp;
+
 pub type DbResult<T> = Result<T, String>;
 
 /// Counts from an ingest batch. `facts` counts fact writes actually appended — a re-assertion
