@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 keywords = ["graph", "database", "cli", "knowledge-graph", "graphrag"]
 categories = ["command-line-utilities", "database"]
 description = "StromaDB command-line interface (`stroma` binary): init, ingest, embed, query, stats."
@@ -14,5 +15,5 @@ name = "stroma"
 path = "src/main.rs"
 
 [dependencies]
-stroma-db = { path = "../stroma-db", version = "0.1.0" }
+stromadb-store = { path = "../stroma-db", version = "0.1.0" }
 serde_json = "1"

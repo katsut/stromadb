@@ -319,7 +319,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "stroma-core"
+name = "stromadb"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "stromadb-store",
+]
+
+[[package]]
+name = "stromadb-core"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -327,36 +335,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "stroma-db"
+name = "stromadb-mcp"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "stroma-core",
+ "stromadb-store",
 ]
 
 [[package]]
-name = "stroma-mcp"
+name = "stromadb-serve"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "stroma-db",
-]
-
-[[package]]
-name = "stroma-serve"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "stroma-db",
+ "stromadb-store",
  "tiny_http",
 ]
 
 [[package]]
-name = "stromadb"
+name = "stromadb-store"
 version = "0.1.0"
 dependencies = [
  "serde_json",
- "stroma-db",
+ "stromadb-core",
 ]
 
 [[package]]

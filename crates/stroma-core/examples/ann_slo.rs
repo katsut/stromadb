@@ -3,11 +3,11 @@
 //! and authz-on warm hybrid p99 < 2ms. Also reports PQ compression (the A1 RAM load-bearing claim)
 //! and recall-completeness with a bounded tail (H2).
 //!
-//! Run: `cargo run --release --example ann_slo -p stroma-core`
+//! Run: `cargo run --release --example ann_slo -p stromadb-core`
 
 use std::time::Instant;
-use stroma_core::ivf::IvfPq;
-use stroma_core::vector::sqdist;
+use stromadb_core::ivf::IvfPq;
+use stromadb_core::vector::sqdist;
 
 const N: usize = 200_000;
 const DIM: usize = 768;

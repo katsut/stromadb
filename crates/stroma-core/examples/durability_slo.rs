@@ -2,10 +2,10 @@
 //! point (~5M facts) through `Engine::open` → `write_batch` → `sync` (group commit), then cold-restart
 //! and measure recovery. Checks the locked DONE SLO: 0 data loss + cold-start replay < 10s @5M.
 //!
-//! Run: `cargo run --release --example durability_slo -p stroma-core`
+//! Run: `cargo run --release --example durability_slo -p stromadb-core`
 
 use std::time::Instant;
-use stroma_core::{Engine, ObjKey, WriteKind};
+use stromadb_core::{Engine, ObjKey, WriteKind};
 
 const FACTS: u64 = 5_000_000;
 const SUBJECTS: u64 = 625_000; // avg degree 8 (A1)

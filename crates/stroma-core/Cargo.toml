@@ -1,10 +1,11 @@
 [package]
-name = "stroma-core"
+name = "stromadb-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
 keywords = ["graph", "database", "vector-search", "knowledge-graph", "graphrag"]
 categories = ["database-implementations", "data-structures"]
 description = "StromaDB core engine: Fact model, type catalog, fold, and query."

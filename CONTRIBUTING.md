@@ -5,7 +5,7 @@ Thanks for your interest. StromaDB is pre-1.0 and moving fast; issues and focuse
 ## Build & test
 
 ```bash
-cargo build                       # workspace (stroma-core, stroma-db, stromadb, stroma-serve, stroma-mcp)
+cargo build                       # workspace (stromadb-core, stromadb-store, stromadb, stromadb-serve, stromadb-mcp)
 cargo test                        # unit + integration tests
 cargo fmt --all                   # format (rustfmt)
 cargo clippy --all-targets -- -D warnings   # lints (must be clean)
@@ -14,8 +14,8 @@ cargo clippy --all-targets -- -D warnings   # lints (must be clean)
 Examples are runnable probes that double as reproducible benchmarks:
 
 ```bash
-cargo run --release --example c2b_integrated -p stroma-core   # integrated read p99
-cargo run --release --example durability_slo -p stroma-core   # RTO / data-loss / ingest
+cargo run --release --example c2b_integrated -p stromadb-core   # integrated read p99
+cargo run --release --example durability_slo -p stromadb-core   # RTO / data-loss / ingest
 ```
 
 CI runs `fmt`, `clippy -D warnings`, and the test suite; a PR must be green before merge.
@@ -30,7 +30,7 @@ CI runs `fmt`, `clippy -D warnings`, and the test suite; a PR must be green befo
 - **Docs are part of the change.** Component contracts live in each crate's module docs (rustdoc) —
   keep them accurate; if you change *why*, add a line to `docs/DECISIONS.md`. Capability claims in
   `README.md` must match implemented code — no target-state described as done.
-- Keep dependencies minimal (`stroma-core` has no runtime deps by design).
+- Keep dependencies minimal (`stromadb-core` has no runtime deps by design).
 
 ## License of contributions
 

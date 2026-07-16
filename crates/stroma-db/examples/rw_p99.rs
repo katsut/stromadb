@@ -7,17 +7,18 @@
 //! runs with no lock held, the write storm must not inflate the read tail — the two columns should
 //! read essentially flat.
 //!
-//! Run: `cargo run --release --example rw_p99 -p stroma-db`
+//! Run: `cargo run --release --example rw_p99 -p stromadb-store`
 //!
-//! NOTE: this lives under `stroma-db/examples/` (not `stroma-core/examples/`) because it drives the
-//! `Db` API, which is defined in `stroma-db`; `stroma-core` cannot depend on `stroma-db`.
+//! NOTE: this lives under `crates/stroma-db/examples/` (not `crates/stroma-core/examples/`) because
+//! it drives the `Db` API, which is defined in `stromadb-store`; `stromadb-core` cannot depend on
+//! `stromadb-store`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use serde_json::{Value, json};
-use stroma_db::Db;
+use stromadb_store::Db;
 
 const N: u64 = 4_000; // warm graph size (Docs)
 const DIM: usize = 64;

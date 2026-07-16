@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
-use stroma_db::Db;
+use stromadb_store::Db;
 
 // A tiny issue-tracker graph. `status`/`assigned-to`/`reviewers` are the required predicates the op
 // checks for. Issue 1004 is hidden behind sensitivity label 1 (the post-authz case).

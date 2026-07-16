@@ -2,7 +2,7 @@
 //! can call directly. Transport: newline-delimited JSON-RPC 2.0 over stdio (the MCP stdio transport).
 //!
 //! Tools: `schema`, `point`, `expand`, `search` (authz-scoped hybrid), `conformance` (declared-rule
-//! per-subject verdicts), `stats`, `ingest`. Read tools map to `stroma_db::Db::query`; `ingest` writes
+//! per-subject verdicts), `stats`, `ingest`. Read tools map to `stromadb_store::Db::query`; `ingest` writes
 //! facts. Requests are handled sequentially (single writer).
 //!
 //! Usage: stroma-mcp --db <dir>   (spoken to by an MCP client over stdin/stdout)
@@ -10,7 +10,7 @@
 use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
-use stroma_db::Db;
+use stromadb_store::Db;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -192,7 +192,7 @@ fn main() {
     let dir = opt(&args, "--db", "STROMA_DB", ".");
     let n_max: usize = opt(&args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
         .parse()
-        .unwrap_or(stroma_db::DEFAULT_N_MAX);
+        .unwrap_or(stromadb_store::DEFAULT_N_MAX);
     let db = match Db::open_with(std::path::Path::new(&dir), n_max) {
         Ok(db) => db,
         Err(e) => {

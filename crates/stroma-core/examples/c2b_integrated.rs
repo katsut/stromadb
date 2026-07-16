@@ -6,18 +6,18 @@
 //! Each epoch performs a durable write chunk (append + fsync) + incremental embeddings + materialize +
 //! snapshot + live-query re-eval (the "stall"), then serves a batch of hybrid reads. Read latency is
 //! charged against a fixed arrival schedule, so stalls that delay reads show up in the tail (no
-//! coordinated omission). Run: `cargo run --release --example c2b_integrated -p stroma-core`
+//! coordinated omission). Run: `cargo run --release --example c2b_integrated -p stromadb-core`
 
 use std::time::Instant;
-use stroma_core::catalog::{Cardinality, Catalog, Range, RelProps};
-use stroma_core::changelog::WriteKind;
-use stroma_core::engine::Engine;
-use stroma_core::fold::ObjKey;
-use stroma_core::ir::{Pipeline, Principal, Source, Transform, run};
-use stroma_core::ivf::IvfPq;
-use stroma_core::live::LiveQueries;
-use stroma_core::query;
-use stroma_core::version::{ReadMode, VersionVector};
+use stromadb_core::catalog::{Cardinality, Catalog, Range, RelProps};
+use stromadb_core::changelog::WriteKind;
+use stromadb_core::engine::Engine;
+use stromadb_core::fold::ObjKey;
+use stromadb_core::ir::{Pipeline, Principal, Source, Transform, run};
+use stromadb_core::ivf::IvfPq;
+use stromadb_core::live::LiveQueries;
+use stromadb_core::query;
+use stromadb_core::version::{ReadMode, VersionVector};
 
 const N: usize = 100_000; // set higher (e.g. 500_000) for the A1 representative-scale re-measure
 const DIM: usize = 768;

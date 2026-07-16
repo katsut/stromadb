@@ -35,18 +35,18 @@ use std::time::Instant;
 static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 use serde_json::{Value, json};
-use stroma_core::calendar::Calendar;
-use stroma_core::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
-use stroma_core::changelog::WriteKind;
-use stroma_core::completeness;
-use stroma_core::conformance;
-use stroma_core::engine::Engine;
-use stroma_core::fact::{FieldId, NodeId};
-use stroma_core::fold::{ObjKey, Snapshot};
-use stroma_core::ir::{Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run};
-use stroma_core::ivf::IvfPq;
-use stroma_core::query;
-use stroma_core::version::{ReadMode, VersionVector};
+use stromadb_core::calendar::Calendar;
+use stromadb_core::catalog::{Cardinality, Catalog, Range, RelProps, ValueType};
+use stromadb_core::changelog::WriteKind;
+use stromadb_core::completeness;
+use stromadb_core::conformance;
+use stromadb_core::engine::Engine;
+use stromadb_core::fact::{FieldId, NodeId};
+use stromadb_core::fold::{ObjKey, Snapshot};
+use stromadb_core::ir::{Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run};
+use stromadb_core::ivf::IvfPq;
+use stromadb_core::query;
+use stromadb_core::version::{ReadMode, VersionVector};
 
 pub type DbResult<T> = Result<T, String>;
 

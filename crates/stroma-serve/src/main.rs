@@ -9,7 +9,7 @@
 //!   GET  /me              → {"user": name}
 //!   GET  /events?since=N  → long-poll; returns {"head": M} when the durable head advances (or ~20s)
 //!   GET  /stats           → engine/schema/embedding/storage counters
-//!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stroma_db::Db::query)
+//!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
 //!   POST /reset           → clears the whole database (opt-in: only when started with --allow-reset)
@@ -36,7 +36,7 @@ use std::process::exit;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use stroma_db::Db;
+use stromadb_store::Db;
 use tiny_http::{Header, Method, Request, Response, Server};
 
 type SharedDb = Arc<Db>;
@@ -225,7 +225,7 @@ fn main() {
     let addr = opt(&args, "--addr", "STROMA_ADDR", "127.0.0.1:7687");
     let n_max: usize = opt(&args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
         .parse()
-        .unwrap_or(stroma_db::DEFAULT_N_MAX);
+        .unwrap_or(stromadb_store::DEFAULT_N_MAX);
     let auth = Arc::new(Auth {
         user: opt(&args, "--admin-user", "STROMA_ADMIN_USER", "admin"),
         pass: opt(

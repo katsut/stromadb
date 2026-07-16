@@ -6,14 +6,14 @@
 //!   3. raw on file, UNCACHED (fcntl F_NOCACHE — macOS O_DIRECT-equivalent, reads hit the device)
 //!
 //! Candidate generation is always the hot PQ path (IvfPq::search); only the re-rank read source varies.
-//! Run: `cargo run --release --example ann_ssd_p99 -p stroma-core`
+//! Run: `cargo run --release --example ann_ssd_p99 -p stromadb-core`
 
 use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::FileExt;
 use std::time::Instant;
-use stroma_core::ivf::IvfPq;
-use stroma_core::vector::sqdist;
+use stromadb_core::ivf::IvfPq;
+use stromadb_core::vector::sqdist;
 
 /// Bypass the OS buffer cache for this fd so reads hit the device (macOS `F_NOCACHE` = O_DIRECT-equiv).
 /// Returns false on platforms without it (the uncached measurement is then skipped).

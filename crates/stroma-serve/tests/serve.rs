@@ -5,7 +5,7 @@ use std::net::TcpStream;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use stroma_db::Db;
+use stromadb_store::Db;
 
 /// Minimal HTTP/1.1 client: returns (status, set-cookie token if any, body). An optional session
 /// cookie is sent on the request.
