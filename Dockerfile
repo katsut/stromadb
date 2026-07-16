@@ -1,5 +1,7 @@
 # --- build ---
 FROM rust:1.88-slim AS build
+# .cargo/config.toml links x86_64-linux with clang + mold; the slim image ships neither.
+RUN apt-get update && apt-get install -y --no-install-recommends clang mold && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 RUN cargo build --release --bin stroma-serve --bin stroma --bin stroma-mcp
