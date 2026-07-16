@@ -12,6 +12,10 @@
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
+//!   POST /mcp     <json-rpc> → MCP streamable HTTP transport: one JSON-RPC message per request;
+//!                 a request gets its JSON-RPC response (200), a notification gets 202 with an
+//!                 empty body. Stateless (no session ids); GET /mcp is 405 (no server stream).
+//!                 Same tool set as `stroma-mcp` (shared `stromadb_store::mcp` dispatch).
 //!   POST /reset           → clears the whole database (opt-in: only when started with --allow-reset)
 //!
 //! Auth: every endpoint except `/health` and the login page/POST requires either a valid session
@@ -368,6 +372,41 @@ fn main() {
                         head = head_now();
                     }
                     let _ = req.respond(json_response(200, &json!({ "head": head })));
+                } else if path == "/mcp" {
+                    // MCP streamable HTTP transport, stateless: one JSON-RPC message per POST,
+                    // no session ids, no server-initiated stream. Same auth as the other endpoints
+                    // (the gate above). Reads run lock-free on a pinned view; a `tools/call ingest`
+                    // serializes on the database's internal write mutex exactly like POST /ingest.
+                    if method == Method::Post {
+                        let body = read_body(&mut req);
+                        match serde_json::from_str::<Value>(&body) {
+                            // a request (has an id) → its JSON-RPC response
+                            Ok(msg) => match stromadb_store::mcp::handle_message(&db, &msg) {
+                                Some(resp) => {
+                                    let _ = req.respond(json_response(200, &resp));
+                                }
+                                // a notification → accepted, empty body
+                                None => {
+                                    let _ = req.respond(Response::empty(202));
+                                }
+                            },
+                            Err(e) => {
+                                let _ = req.respond(json_response(
+                                    400,
+                                    &stromadb_store::mcp::rpc_error(
+                                        &Value::Null,
+                                        -32700,
+                                        &format!("parse error: {e}"),
+                                    ),
+                                ));
+                            }
+                        }
+                    } else {
+                        let _ = req.respond(json_response(
+                            405,
+                            &json!({ "error": "method not allowed: POST one JSON-RPC message to /mcp" }),
+                        ));
+                    }
                 } else if method == Method::Get && (path == "/" || path == "/ui") {
                     let _ = req.respond(html_response());
                 } else {

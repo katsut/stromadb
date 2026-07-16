@@ -35,6 +35,7 @@ fn ingest_embed_query_reopen() {
     db.embed_str("{\"node\":1,\"vector\":[1,0,0,0]}\n{\"node\":2,\"vector\":[0.9,0.1,0,0]}\n{\"node\":3,\"vector\":[0,1,0,0]}\n").unwrap();
 
     // reopen: catalog replay + embedding reload must reconstruct the same state
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
 
     // LWW: later valid_from wins (a current One read now also carries additive `confidence`)
@@ -86,6 +87,7 @@ fn valid_to_ingest_and_asof_read() {
     .unwrap();
 
     // reopen so the read is served from the replayed WAL (exercises valid_to durability round-trip)
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
 
     let asof = |at: i64| {
@@ -174,6 +176,7 @@ fn close_ends_a_one_value() {
     assert_eq!((s.facts, s.closes), (1, 1));
 
     // reopen so the close is served from the replayed WAL (durability round-trip)
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
 
     // head: the close is the latest write, so the current value is absent; the response carries
@@ -500,6 +503,7 @@ fn reset_clears_the_database() {
         "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
     ))
     .unwrap();
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
     assert_eq!(
         db.query(&json!({"op":"point","subject":1,"predicate":"knows"}))
@@ -575,6 +579,7 @@ fn edge_props_ingest_and_read() {
     .unwrap();
 
     // reopen: the edge properties must survive the WAL round-trip (replayed, not derived from schema)
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
 
     // the skill edge still expands
@@ -986,6 +991,7 @@ fn provenance_capture_survives_reopen() {
     assert!(note.get("source").is_none());
 
     // reopen (WAL replay + schema/source_def re-intern): provenance must survive
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
     let r = db
         .query(&json!({"op":"point","subject":1,"predicate":"title"}))

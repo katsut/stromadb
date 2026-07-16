@@ -67,6 +67,7 @@ fn completeness_over_fixture() {
 
     // reopen so the read is served from the replayed WAL (the assertions survive the durability
     // round-trip).
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
 
     let req = json!({

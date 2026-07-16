@@ -52,6 +52,7 @@ fn expand_op_honors_declared_rel_props() {
 
     // reopen so the read is served from the replayed schema + WAL (props survive the round-trip, and
     // the forward-referenced inverse resolves the same way on replay).
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
 
     // symmetric: expanding `knows` on 1 is undirected — the forward edge (1→2) and the reverse (3→1).

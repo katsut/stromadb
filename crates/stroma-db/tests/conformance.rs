@@ -177,6 +177,7 @@ fn conformance_verdicts_over_fixture() {
 
     // reopen so the read is served from the replayed WAL — the as-of hop depends on the manager-of
     // valid-time history surviving the durability round-trip.
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
 
     let r = db.query(&rule()).unwrap();
@@ -272,6 +273,7 @@ fn conformance_by_stored_rule_name() {
     assert_eq!(named, inline);
 
     // reopen: the stored rule is replayed from rules.jsonl and still evaluates by name.
+    drop(db); // release the directory lock
     let db = Db::open(&dir).unwrap();
     let named_after_reopen = verdict_map(&db.query(&by_name).unwrap());
     assert_eq!(named_after_reopen, inline);

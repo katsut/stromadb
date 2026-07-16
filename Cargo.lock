@@ -355,6 +355,7 @@ dependencies = [
 name = "stromadb-store"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde_json",
  "stromadb-core",
 ]

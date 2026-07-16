@@ -169,6 +169,11 @@ stroma-mcp --db ./mydb          # newline-delimited JSON-RPC 2.0 over stdin/stdo
 Point an MCP client at that command; `tools/list` returns the schemas, `tools/call` runs a tool and
 returns the JSON result as text content.
 
+The same tools are also served over HTTP by `stroma-serve` at `POST /mcp` (MCP streamable HTTP
+transport, stateless: one JSON-RPC message per request), so an MCP agent and the web console can
+work against the same live database through one process. The endpoint honors the same auth as the
+other serve endpoints (session cookie or `Authorization: Bearer <api-token>`).
+
 ## Performance (measured, reproducible)
 
 Single node, single thread, in-process. Synthetic clustered 768-d vectors (bge-class distribution),
