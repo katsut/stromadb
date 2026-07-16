@@ -10,3 +10,6 @@ description = "StromaDB directory-backed database: open, ingest, embed, query ov
 [dependencies]
 stroma-core = { path = "../stroma-core" }
 serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2" # flock(LOCK_EX | LOCK_NB) on the data directory's LOCK file (std try_lock needs 1.89)
