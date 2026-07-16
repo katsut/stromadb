@@ -1,10 +1,12 @@
 [package]
 name = "stroma-mcp"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["mcp", "llm", "agent", "graph", "database"]
+categories = ["database", "command-line-utilities"]
 description = "StromaDB MCP server: expose the database as tools an LLM agent can call over stdio."
 
 [[bin]]
@@ -12,5 +14,5 @@ name = "stroma-mcp"
 path = "src/main.rs"
 
 [dependencies]
-stroma-db = { path = "../stroma-db" }
+stroma-db = { path = "../stroma-db", version = "0.1.0" }
 serde_json = "1"

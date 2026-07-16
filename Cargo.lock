@@ -319,14 +319,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stroma-cli"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "stroma-db",
-]
-
-[[package]]
 name = "stroma-core"
 version = "0.1.0"
 dependencies = [
@@ -357,6 +349,14 @@ dependencies = [
  "serde_json",
  "stroma-db",
  "tiny_http",
+]
+
+[[package]]
+name = "stromadb"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "stroma-db",
 ]
 
 [[package]]

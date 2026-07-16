@@ -5,7 +5,7 @@ Thanks for your interest. StromaDB is pre-1.0 and moving fast; issues and focuse
 ## Build & test
 
 ```bash
-cargo build                       # workspace (stroma-core, stroma-cli)
+cargo build                       # workspace (stroma-core, stroma-db, stromadb, stroma-serve, stroma-mcp)
 cargo test                        # unit + integration tests
 cargo fmt --all                   # format (rustfmt)
 cargo clippy --all-targets -- -D warnings   # lints (must be clean)
