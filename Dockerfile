@@ -8,6 +8,10 @@ RUN cargo build --release --bin stroma-serve --bin stroma --bin stroma-mcp
 
 # --- runtime ---
 FROM debian:bookworm-slim
+LABEL org.opencontainers.image.source="https://github.com/katsut/stromadb" \
+      org.opencontainers.image.url="https://stromadb.com" \
+      org.opencontainers.image.description="Real-time GraphRAG engine for LLMs — typed graph x vectors x bitemporal time. Source-available." \
+      org.opencontainers.image.licenses="Elastic-2.0"
 RUN useradd -u 10001 -m stroma && mkdir -p /data && chown stroma /data
 COPY --from=build /src/target/release/stroma-serve /usr/local/bin/
 COPY --from=build /src/target/release/stroma       /usr/local/bin/
