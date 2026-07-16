@@ -11,7 +11,7 @@ categories = ["database-implementations", "database"]
 description = "StromaDB directory-backed database: open, ingest, embed, query over the core engine. Internal crate published for the StromaDB binaries; no API stability guarantees pre-1.0 — the supported surfaces are the CLI, HTTP server, and MCP."
 
 [dependencies]
-stromadb-core = { path = "../stroma-core", version = "0.1.0" }
+stromadb-core = { path = "../stroma-core", version = "0.1.1" }
 serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]

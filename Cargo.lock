@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "stromadb"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "stromadb-store",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "stromadb-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "proptest",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "stromadb-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "stromadb-store",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "stromadb-serve"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "stromadb-store",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "stromadb-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde_json",
