@@ -18,6 +18,8 @@
 //!                    is the WAL ops, which the recovered snapshot carries — not replayed)
 //!   embeddings.bin   received embeddings, flat f32 LE; embeddings.ids = u64 LE per row
 //!   meta.json        { "dim": N }
+//!   LOCK             advisory lock file guarding the directory against concurrent opens; holds
+//!                    the owning pid (informational — the flock, not the content, is the guard)
 //!
 //! Record formats (JSONL) — ingest: type_def / pred_def / rule_def / node / fact / retract / close;
 //! embed: {node,vector}.
@@ -87,6 +89,60 @@ struct Schema {
 pub struct Db {
     write: Mutex<WriteState>,
     read: RwLock<Arc<ReadState>>,
+    /// Exclusive advisory lock on `<dir>/LOCK`, held for the lifetime of this handle so a second
+    /// process (or a second open in this process) cannot replay/append the same directory. The OS
+    /// releases the lock when the handle is dropped or the process exits.
+    _lock: DirLock,
+}
+
+/// Holder of the data directory's `LOCK` file (see [`Db`]). On non-unix targets the guard is a
+/// no-op — the field only exists to keep the file (and its flock) alive on unix.
+struct DirLock {
+    #[cfg(unix)]
+    _file: fs::File,
+}
+
+/// Take a non-blocking exclusive advisory lock on `<dir>/LOCK` and stamp the current pid into it.
+/// Fails fast with the holder's pid when another process already owns the directory. MSRV 1.88
+/// predates `File::try_lock` (stabilized 1.89), so this calls `flock` through libc on unix; other
+/// targets get a no-op fallback.
+fn lock_dir(dir: &Path) -> DbResult<DirLock> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let path = dir.join("LOCK");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| format!("open LOCK: {e}"))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            // Best effort: the holder wrote its pid into the file on acquiring the lock.
+            let holder = fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            return Err(match holder {
+                Some(pid) => format!(
+                    "data directory {} is in use by another process (pid {pid})",
+                    dir.display()
+                ),
+                None => format!(
+                    "data directory {} is in use by another process",
+                    dir.display()
+                ),
+            });
+        }
+        file.set_len(0).map_err(|e| format!("LOCK: {e}"))?;
+        writeln!(&file, "{}", std::process::id()).map_err(|e| format!("LOCK: {e}"))?;
+        Ok(DirLock { _file: file })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Ok(DirLock {})
+    }
 }
 
 /// Everything mutated during a write. Held behind `Db::write`.
@@ -154,6 +210,9 @@ impl Db {
                 dir.display()
             ));
         }
+        // Guard the directory before touching any of its files: exactly one live handle (across
+        // processes) may replay the WAL and append to it.
+        let lock = lock_dir(dir)?;
         LazyLock::force(&START); // anchor /stats uptime at first open
         let eng = Engine::open(dir.join("wal.log"), n_max).map_err(|e| format!("open wal: {e}"))?;
         let mut schema = Schema::default();
@@ -203,6 +262,7 @@ impl Db {
         Ok(Db {
             write: Mutex::new(w),
             read: RwLock::new(rs),
+            _lock: lock,
         })
     }
 

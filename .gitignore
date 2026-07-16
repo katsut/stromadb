@@ -32,6 +32,7 @@ nodes.jsonl
 embeddings.bin
 embeddings.ids
 meta.json
+LOCK
 
 # --- OS ---
 .DS_Store
