@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
-use stroma_db::Db;
+use stromadb_store::Db;
 
 /// The only registered node type in this workload — every observed node type must be one of these.
 const TYPES: [&str; 1] = ["Person"];

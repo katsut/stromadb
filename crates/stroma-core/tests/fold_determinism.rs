@@ -2,7 +2,7 @@
 //! Ports the Phase 0 `poc-fold-determinism` properties onto the engine's `fold` types.
 
 use proptest::prelude::*;
-use stroma_core::{Cardinality, ObjKey, Op, OrderKey, Snapshot, fold};
+use stromadb_core::{Cardinality, ObjKey, Op, OrderKey, Snapshot, fold};
 
 const SUBJECTS: u64 = 3;
 const ONE_PREDS: [u32; 2] = [0, 1];
@@ -398,11 +398,11 @@ proptest! {
         let ops = materialize(&tmpls);
         let base = fold(&ops).observe();
         for k in [2usize, 3, 4] {
-            let mut sources: Vec<stroma_core::Fold> = (0..k).map(|_| stroma_core::Fold::default()).collect();
+            let mut sources: Vec<stromadb_core::Fold> = (0..k).map(|_| stromadb_core::Fold::default()).collect();
             for (i, op) in ops.iter().enumerate() {
                 sources[(splitmix(i as u64) as usize) % k].apply(op);
             }
-            let mut merged = stroma_core::Fold::default();
+            let mut merged = stromadb_core::Fold::default();
             for s in &sources {
                 merged.merge(s);
             }

@@ -1,13 +1,14 @@
 [package]
-name = "stroma-core"
-version = "0.1.0"
+name = "stromadb-core"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-keywords.workspace = true
-categories.workspace = true
-description = "StromaDB core engine: Fact model, type catalog, fold, and query."
+readme.workspace = true
+keywords = ["graph", "database", "vector-search", "knowledge-graph", "graphrag"]
+categories = ["database-implementations", "data-structures"]
+description = "StromaDB core engine: Fact model, type catalog, fold, and query. Internal crate published for the StromaDB binaries; no API stability guarantees pre-1.0 — the supported surfaces are the CLI, HTTP server, and MCP."
 
 [dependencies]
 

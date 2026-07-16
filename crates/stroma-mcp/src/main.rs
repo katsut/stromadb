@@ -1,17 +1,17 @@
 //! `stroma-mcp` — a Model Context Protocol server exposing a StromaDB database as tools an LLM agent
 //! can call directly. Transport: newline-delimited JSON-RPC 2.0 over stdio (the MCP stdio transport).
 //!
-//! The tool schemas and JSON-RPC dispatch live in `stroma_db::mcp` (shared with the `stroma-serve`
-//! `POST /mcp` endpoint); this binary is only the stdio framing around it. Requests are handled
-//! sequentially (single writer).
+//! The tool schemas and JSON-RPC dispatch live in `stromadb_store::mcp` (shared with the
+//! `stroma-serve` `POST /mcp` endpoint); this binary is only the stdio framing around it. Requests
+//! are handled sequentially (single writer).
 //!
 //! Usage: stroma-mcp --db <dir>   (spoken to by an MCP client over stdin/stdout)
 
 use std::io::{BufRead, Write};
 
 use serde_json::Value;
-use stroma_db::Db;
-use stroma_db::mcp::{PROTOCOL_VERSION, handle_message, rpc_error};
+use stromadb_store::Db;
+use stromadb_store::mcp::{PROTOCOL_VERSION, handle_message, rpc_error};
 
 /// Resolve a setting: `--flag <v>` overrides `$ENV` overrides `default`.
 fn opt(args: &[String], name: &str, env: &str, default: &str) -> String {
@@ -28,7 +28,7 @@ fn main() {
     let dir = opt(&args, "--db", "STROMA_DB", ".");
     let n_max: usize = opt(&args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
         .parse()
-        .unwrap_or(stroma_db::DEFAULT_N_MAX);
+        .unwrap_or(stromadb_store::DEFAULT_N_MAX);
     let db = match Db::open_with(std::path::Path::new(&dir), n_max) {
         Ok(db) => db,
         Err(e) => {

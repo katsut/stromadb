@@ -3,11 +3,11 @@
 //! where nprobe=1 already suffices. Finds the minimum nprobe reaching recall@10 ≥ 0.9 and its warm p99,
 //! deciding the operating point (recall≥0.9 AND p99<2ms).
 //!
-//! Run: `cargo run --release --example ann_nprobe_curve -p stroma-core`
+//! Run: `cargo run --release --example ann_nprobe_curve -p stromadb-core`
 
 use std::time::Instant;
-use stroma_core::ivf::IvfPq;
-use stroma_core::vector::sqdist;
+use stromadb_core::ivf::IvfPq;
+use stromadb_core::vector::sqdist;
 
 const N: usize = 100_000;
 const DIM: usize = 768;

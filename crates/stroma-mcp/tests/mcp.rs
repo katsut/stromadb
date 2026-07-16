@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde_json::{Value, json};
-use stroma_db::Db;
+use stromadb_store::Db;
 
 struct Mcp {
     child: Child,

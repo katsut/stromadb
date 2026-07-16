@@ -5,7 +5,7 @@
 //! transitive closure — all across a durability reopen. No properties are ever pre-materialized.
 
 use serde_json::json;
-use stroma_db::Db;
+use stromadb_store::Db;
 
 // `child-of` is declared *before* `parent-of` to exercise the forward-reference resolution of its
 // `inverse`. `knows` is symmetric; `ancestor-of` is transitive.

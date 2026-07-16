@@ -1,7 +1,7 @@
 //! Data-directory lock: a second open of the same directory fails fast while a handle is alive,
 //! and succeeds again once the first handle is dropped (the flock is released on drop).
 
-use stroma_db::Db;
+use stromadb_store::Db;
 
 fn tmp(tag: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("stroma_lock_{tag}_{}", std::process::id()));

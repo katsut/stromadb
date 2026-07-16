@@ -84,7 +84,7 @@ Load the [sample dataset](examples/) first to explore a populated graph in about
 ## Quickstart (CLI)
 
 ```bash
-cargo install --path crates/stroma-cli   # installs the `stroma` binary
+cargo install stromadb                   # installs the `stroma` binary
 
 stroma init --db ./mydb
 

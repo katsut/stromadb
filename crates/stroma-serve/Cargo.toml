@@ -1,10 +1,13 @@
 [package]
-name = "stroma-serve"
-version = "0.1.0"
+name = "stromadb-serve"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["graph", "database", "http", "server", "graphrag"]
+categories = ["database", "web-programming::http-server"]
 description = "StromaDB HTTP serving surface over a directory-backed database (single-node)."
 
 [[bin]]
@@ -12,6 +15,6 @@ name = "stroma-serve"
 path = "src/main.rs"
 
 [dependencies]
-stroma-db = { path = "../stroma-db" }
+stromadb-store = { path = "../stroma-db", version = "0.1.1" }
 serde_json = "1"
 tiny_http = "0.12"

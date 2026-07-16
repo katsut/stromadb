@@ -9,13 +9,13 @@
 //!   GET  /me              → {"user": name}
 //!   GET  /events?since=N  → long-poll; returns {"head": M} when the durable head advances (or ~20s)
 //!   GET  /stats           → engine/schema/embedding/storage counters
-//!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stroma_db::Db::query)
+//!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
 //!   POST /mcp     <json-rpc> → MCP streamable HTTP transport: one JSON-RPC message per request;
 //!                 a request gets its JSON-RPC response (200), a notification gets 202 with an
 //!                 empty body. Stateless (no session ids); GET /mcp is 405 (no server stream).
-//!                 Same tool set as `stroma-mcp` (shared `stroma_db::mcp` dispatch).
+//!                 Same tool set as `stroma-mcp` (shared `stromadb_store::mcp` dispatch).
 //!   POST /reset           → clears the whole database (opt-in: only when started with --allow-reset)
 //!
 //! Auth: every endpoint except `/health` and the login page/POST requires either a valid session
@@ -40,7 +40,7 @@ use std::process::exit;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use stroma_db::Db;
+use stromadb_store::Db;
 use tiny_http::{Header, Method, Request, Response, Server};
 
 type SharedDb = Arc<Db>;
@@ -229,7 +229,7 @@ fn main() {
     let addr = opt(&args, "--addr", "STROMA_ADDR", "127.0.0.1:7687");
     let n_max: usize = opt(&args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
         .parse()
-        .unwrap_or(stroma_db::DEFAULT_N_MAX);
+        .unwrap_or(stromadb_store::DEFAULT_N_MAX);
     let auth = Arc::new(Auth {
         user: opt(&args, "--admin-user", "STROMA_ADMIN_USER", "admin"),
         pass: opt(
@@ -381,7 +381,7 @@ fn main() {
                         let body = read_body(&mut req);
                         match serde_json::from_str::<Value>(&body) {
                             // a request (has an id) → its JSON-RPC response
-                            Ok(msg) => match stroma_db::mcp::handle_message(&db, &msg) {
+                            Ok(msg) => match stromadb_store::mcp::handle_message(&db, &msg) {
                                 Some(resp) => {
                                     let _ = req.respond(json_response(200, &resp));
                                 }
@@ -393,7 +393,7 @@ fn main() {
                             Err(e) => {
                                 let _ = req.respond(json_response(
                                     400,
-                                    &stroma_db::mcp::rpc_error(
+                                    &stromadb_store::mcp::rpc_error(
                                         &Value::Null,
                                         -32700,
                                         &format!("parse error: {e}"),

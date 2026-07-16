@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
-use stroma_db::Db;
+use stromadb_store::Db;
 
 // The fixture schema + data (backlog release-approval). `manager-of` for the Platform department (1)
 // transfers from Alice(10) to Carol(12) at valid-time 5000, which is what the as-of hop turns on.

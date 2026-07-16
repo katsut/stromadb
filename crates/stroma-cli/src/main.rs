@@ -1,11 +1,11 @@
 //! `stroma` — the StromaDB CLI: init / ingest / embed / query / stats / serve. A thin frontend over
-//! the `stroma-db` directory-backed database (which owns the on-disk layout and query dispatch).
+//! the `stromadb-store` directory-backed database (which owns the on-disk layout and query dispatch).
 
 use std::path::Path;
 use std::process::exit;
 
 use serde_json::{Value, json};
-use stroma_db::Db;
+use stromadb_store::Db;
 
 fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");

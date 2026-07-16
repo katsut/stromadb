@@ -1,7 +1,7 @@
 //! Directory-backed DB: init → ingest → embed → query (point/expand/search + authz), across a reopen.
 
 use serde_json::json;
-use stroma_db::Db;
+use stromadb_store::Db;
 
 fn tmp() -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("stroma_db_test_{}", std::process::id()));
