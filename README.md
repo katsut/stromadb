@@ -118,13 +118,19 @@ assignments, received embeddings); derived stores (the vector index) rebuild on 
 Run the HTTP surface with no local Rust toolchain — a fresh data volume is initialized on first run:
 
 ```bash
+docker run -p 7687:7687 -v stroma-data:/data ghcr.io/katsut/stromadb:latest   # linux/amd64 + arm64
+
+curl -s localhost:7687/health
+curl -s -X POST localhost:7687/ingest -d '{"type_def":{"name":"Person"}}'
+```
+
+Or build locally:
+
+```bash
 docker compose up            # builds the image, serves on localhost:7687 (persisted in a volume)
 # or without compose:
 docker build -t stromadb .
 docker run -p 7687:7687 -v stroma-data:/data stromadb
-
-curl -s localhost:7687/health
-curl -s -X POST localhost:7687/ingest -d '{"type_def":{"name":"Person"}}'
 ```
 
 The image ships `stroma-serve` (entrypoint), plus the `stroma` CLI and `stroma-mcp` binaries.
