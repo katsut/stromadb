@@ -130,6 +130,8 @@ mod tests {
             subject: s,
             predicate: p,
             object: ObjKey::Node(o),
+            valid_from: 0,
+            valid_to: None,
         }
     }
 

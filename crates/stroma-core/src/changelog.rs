@@ -41,6 +41,20 @@ pub enum WriteKind {
         subject: NodeId,
         predicate: FieldId,
         object: ObjKey,
+        /// Start of the element's valid-time interval (mirrors `SetOne`; `0` = unreported).
+        valid_from: i64,
+        /// End of the element's valid-time interval (`None` = open). Used by valid-time as-of
+        /// reads; presence (the current set) and the OR-Set ordering are unaffected.
+        valid_to: Option<i64>,
+    },
+    /// End ONE element's valid-time interval at `valid_from` — the cardinality-Many analogue of
+    /// `CloseOne`. The element leaves the current set (when this row wins by order key) but its
+    /// history stays sliceable; `RemoveMany` stays the history-destroying hard retract.
+    CloseMany {
+        subject: NodeId,
+        predicate: FieldId,
+        object: ObjKey,
+        valid_from: i64,
     },
     RemoveMany {
         subject: NodeId,
@@ -126,10 +140,26 @@ fn record_to_op(seqno: u64, source: FieldId, kind: &WriteKind) -> Op {
             subject,
             predicate,
             object,
+            valid_from,
+            valid_to,
         } => Op::AddMany {
             subject: *subject,
             predicate: *predicate,
             object: object.clone(),
+            valid_from: *valid_from,
+            valid_to: *valid_to,
+            ok,
+        },
+        WriteKind::CloseMany {
+            subject,
+            predicate,
+            object,
+            valid_from,
+        } => Op::CloseMany {
+            subject: *subject,
+            predicate: *predicate,
+            object: object.clone(),
+            valid_from: *valid_from,
             ok,
         },
         WriteKind::RemoveMany {
@@ -348,6 +378,8 @@ mod tests {
             subject: s,
             predicate: p,
             object: ObjKey::Node(o),
+            valid_from: 0,
+            valid_to: None,
         }
     }
 

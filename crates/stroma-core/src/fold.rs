@@ -5,8 +5,9 @@
 //! deterministic replay and audit (algebra validated in Phase 0 `poc-fold-determinism`).
 //!
 //! Cardinality (from the [`Catalog`]) drives behaviour: `One` → LWW-Register with history (supersede);
-//! `Many` → OR-Set (accumulate). Hard-delete is a max-register floor that purges everything `<= floor`
-//! (re-assertion above the floor survives).
+//! `Many` → OR-Set whose per-element rows carry valid-time (accumulate; a `CloseMany` row ends an
+//! element's interval, presence = the element's greatest live row is an add). Hard-delete is a
+//! max-register floor that purges everything `<= floor` (re-assertion above the floor survives).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -48,8 +49,9 @@ pub struct OrderKey {
     pub seq: u64,
 }
 
-/// A stream diff. `SetOne`/`CloseOne` target cardinality-`One` keys, `AddMany`/`RemoveMany` target
-/// cardinality-`Many` keys; `HardDelete` carries the key's cardinality so it can apply before any add.
+/// A stream diff. `SetOne`/`CloseOne` target cardinality-`One` keys, `AddMany`/`CloseMany`/
+/// `RemoveMany` target cardinality-`Many` keys; `HardDelete` carries the key's cardinality so it
+/// can apply before any add.
 #[derive(Clone, Debug)]
 pub enum Op {
     SetOne {
@@ -70,6 +72,18 @@ pub enum Op {
         subject: NodeId,
         predicate: FieldId,
         object: ObjKey,
+        valid_from: i64,
+        valid_to: Option<i64>,
+        ok: OrderKey,
+    },
+    /// End one element's valid-time interval (the Many analogue of [`Op::CloseOne`]): a per-element
+    /// version row with no object. When it wins the element's LWW the element leaves the present
+    /// set; as-of reads before `valid_from` still see the earlier add rows.
+    CloseMany {
+        subject: NodeId,
+        predicate: FieldId,
+        object: ObjKey,
+        valid_from: i64,
         ok: OrderKey,
     },
     RemoveMany {
@@ -134,6 +148,8 @@ impl Op {
                 subject,
                 predicate,
                 object: ObjKey::of(&fact.object),
+                valid_from: fact.valid_time.from,
+                valid_to: fact.valid_time.to,
                 ok,
             },
         })
@@ -148,6 +164,9 @@ impl Op {
                 subject, predicate, ..
             }
             | Op::AddMany {
+                subject, predicate, ..
+            }
+            | Op::CloseMany {
                 subject, predicate, ..
             }
             | Op::RemoveMany {
@@ -193,9 +212,17 @@ struct OneState {
     hd: Option<OrderKey>,
 }
 
+/// Per-element version rows keyed by the element object. Each row reuses [`Version`]: an add row
+/// carries `object = Some(element)` and its `[valid_from, valid_to)` interval, a close row carries
+/// `object = None` and ends the interval from its `valid_from` — the exact shape [`OneState`] uses,
+/// so the element-level LWW/as-of semantics are the One-cardinality semantics per element. Rows are
+/// keyed by globally-unique [`OrderKey`], so map union stays a join (idempotent, order-free).
+/// `removes` still tombstones observed ADD rows outright (the history-destroying hard retract);
+/// presence is "the element's greatest live row is an add" — with adds only, exactly the old
+/// add-wins OR-Set.
 #[derive(Clone, Debug, Default)]
 struct ManyState {
-    adds: BTreeMap<ObjKey, BTreeSet<OrderKey>>,
+    elems: BTreeMap<ObjKey, BTreeMap<OrderKey, Version>>,
     removes: BTreeSet<OrderKey>,
     hd: Option<OrderKey>,
 }
@@ -256,6 +283,10 @@ pub struct Snapshot {
     pub one: BTreeMap<(NodeId, FieldId), Option<ObjKey>>,
     pub one_history: BTreeMap<(NodeId, FieldId), Vec<VersionRow>>,
     pub many: BTreeMap<(NodeId, FieldId), BTreeSet<ObjKey>>,
+    /// Per-element version rows of each Many key, ascending by order key — the Many analogue of
+    /// `one_history` (an add row carries `Some(element)` and its interval, a close row `None`).
+    /// Valid-time as-of reads slice these; the present set above stays the current read.
+    pub many_history: BTreeMap<(NodeId, FieldId), BTreeMap<ObjKey, Vec<VersionRow>>>,
     /// Edge properties: `(subject, predicate)` → edge object → property key → value (LWW-resolved).
     pub edge_props: BTreeMap<(NodeId, FieldId), BTreeMap<ObjKey, BTreeMap<String, ObjKey>>>,
     /// Node → entity type (LWW-resolved). A flat `FxHashMap` behind an `Arc`: cloning a snapshot
@@ -314,13 +345,49 @@ impl Fold {
                     panic!("cardinality mismatch (expected One)");
                 }
             }
-            Op::AddMany { object, ok, .. } => {
+            Op::AddMany {
+                object,
+                valid_from,
+                valid_to,
+                ok,
+                ..
+            } => {
                 let st = self
                     .keys
                     .entry(op.key())
                     .or_insert_with(|| KeyState::new(Cardinality::Many));
                 if let KeyState::Many(s) = st {
-                    s.adds.entry(object.clone()).or_default().insert(*ok);
+                    s.elems.entry(object.clone()).or_default().insert(
+                        *ok,
+                        Version {
+                            object: Some(object.clone()),
+                            valid_from: *valid_from,
+                            valid_to: *valid_to,
+                        },
+                    );
+                } else {
+                    panic!("cardinality mismatch (expected Many)");
+                }
+            }
+            Op::CloseMany {
+                object,
+                valid_from,
+                ok,
+                ..
+            } => {
+                let st = self
+                    .keys
+                    .entry(op.key())
+                    .or_insert_with(|| KeyState::new(Cardinality::Many));
+                if let KeyState::Many(s) = st {
+                    s.elems.entry(object.clone()).or_default().insert(
+                        *ok,
+                        Version {
+                            object: None,
+                            valid_from: *valid_from,
+                            valid_to: None,
+                        },
+                    );
                 } else {
                     panic!("cardinality mismatch (expected Many)");
                 }
@@ -417,10 +484,10 @@ impl Fold {
                 }
                 Some(KeyState::Many(a)) => {
                     if let KeyState::Many(b) = st {
-                        for (obj, tags) in &b.adds {
-                            let e = a.adds.entry(obj.clone()).or_default();
-                            for t in tags {
-                                e.insert(*t);
+                        for (obj, rows) in &b.elems {
+                            let e = a.elems.entry(obj.clone()).or_default();
+                            for (ok, v) in rows {
+                                e.insert(*ok, v.clone());
                             }
                         }
                         for t in &b.removes {
@@ -478,10 +545,10 @@ impl Fold {
                 }
                 KeyState::Many(s) => {
                     if let Some(h) = s.hd {
-                        for tags in s.adds.values_mut() {
-                            tags.retain(|t| *t > h);
+                        for rows in s.elems.values_mut() {
+                            rows.retain(|ok, _| *ok > h);
                         }
-                        s.adds.retain(|_, tags| !tags.is_empty());
+                        s.elems.retain(|_, rows| !rows.is_empty());
                         s.removes.retain(|t| *t > h);
                     }
                 }
@@ -490,20 +557,59 @@ impl Fold {
     }
 
     /// The live add-tags for a cardinality-Many element `(subject, predicate, object)` — the tags a
-    /// retraction must observe-and-remove. Empty if the element isn't currently present. This is the
-    /// resolver the DB↔ETL "diff reflection" needs (turn "remove this edge" into an observed-remove).
+    /// retraction must observe-and-remove. Close rows are not tags (a retract erases adds; a close
+    /// that then wins the element's LWW keeps it absent). Empty if the element has no live adds.
+    /// This is the resolver the DB↔ETL "diff reflection" needs (turn "remove this edge" into an
+    /// observed-remove).
     pub fn live_tags(&self, subject: NodeId, predicate: FieldId, object: &ObjKey) -> Vec<OrderKey> {
         match self.keys.get(&(subject, predicate)) {
             Some(KeyState::Many(s)) => s
-                .adds
+                .elems
                 .get(object)
                 .into_iter()
                 .flatten()
-                .filter(|t| !s.removes.contains(t) && s.hd.is_none_or(|h| **t > h))
-                .copied()
+                .filter(|(ok, v)| {
+                    v.object.is_some() && !s.removes.contains(ok) && s.hd.is_none_or(|h| **ok > h)
+                })
+                .map(|(ok, _)| *ok)
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// Ingest no-op probe for a cardinality-Many assertion: the element is currently PRESENT (its
+    /// greatest live row is an add) and some live add row matches `(source, valid_from, valid_to)`
+    /// exactly. A re-assertion matching this changes nothing; anything else — a different source
+    /// (corroboration), a corrected interval, or a re-grant after a close — must append.
+    pub fn many_live_asserted(
+        &self,
+        subject: NodeId,
+        predicate: FieldId,
+        object: &ObjKey,
+        source: FieldId,
+        valid_from: i64,
+        valid_to: Option<i64>,
+    ) -> bool {
+        let Some(KeyState::Many(s)) = self.keys.get(&(subject, predicate)) else {
+            return false;
+        };
+        let Some(rows) = s.elems.get(object) else {
+            return false;
+        };
+        let live: Vec<(&OrderKey, &Version)> = rows
+            .iter()
+            .filter(|(ok, _)| !s.removes.contains(ok) && s.hd.is_none_or(|h| **ok > h))
+            .collect();
+        let Some((_, top)) = live.last() else {
+            return false;
+        };
+        top.object.is_some()
+            && live.iter().any(|(ok, v)| {
+                v.object.is_some()
+                    && ok.source == source
+                    && v.valid_from == valid_from
+                    && v.valid_to == valid_to
+            })
     }
 
     /// Canonical observation. Keys with no live state are omitted.
@@ -532,6 +638,7 @@ impl Fold {
         snap.one.remove(k);
         snap.one_history.remove(k);
         snap.many.remove(k);
+        snap.many_history.remove(k);
         snap.edge_props.remove(k);
         // edge properties for this key: project each edge's LWW-resolved property values.
         if let Some(objs) = self.edge_props.get(k) {
@@ -569,16 +676,27 @@ impl Fold {
             }
             Some(KeyState::Many(s)) => {
                 let mut present = BTreeSet::new();
-                for (obj, tags) in &s.adds {
-                    let live = tags
+                let mut history: BTreeMap<ObjKey, Vec<VersionRow>> = BTreeMap::new();
+                for (obj, rows) in &s.elems {
+                    let live: Vec<VersionRow> = rows
                         .iter()
-                        .any(|t| !s.removes.contains(t) && s.hd.is_none_or(|h| *t > h));
-                    if live {
-                        present.insert(obj.clone());
+                        .filter(|(ok, _)| !s.removes.contains(ok) && s.hd.is_none_or(|h| **ok > h))
+                        .map(|(ok, v)| (*ok, v.object.clone(), v.valid_from, v.valid_to))
+                        .collect();
+                    if let Some((_, top, _, _)) = live.last() {
+                        // present iff the element's greatest live row is an add — with adds only
+                        // this is exactly the old add-wins OR-Set observation
+                        if top.is_some() {
+                            present.insert(obj.clone());
+                        }
+                        history.insert(obj.clone(), live);
                     }
                 }
                 if !present.is_empty() {
                     snap.many.insert(*k, present);
+                }
+                if !history.is_empty() {
+                    snap.many_history.insert(*k, history);
                 }
             }
             None => {}
@@ -710,6 +828,8 @@ mod tests {
                 subject: s,
                 predicate: p,
                 object: ObjKey::Node(1),
+                valid_from: 0,
+                valid_to: None,
                 ok: ok(1, 0, 0),
             },
             Op::HardDelete {
@@ -722,6 +842,8 @@ mod tests {
                 subject: s,
                 predicate: p,
                 object: ObjKey::Node(2),
+                valid_from: 0,
+                valid_to: None,
                 ok: ok(9, 0, 2),
             },
         ];
@@ -745,12 +867,16 @@ mod tests {
                 subject: s,
                 predicate: p,
                 object: ObjKey::Node(7),
+                valid_from: 0,
+                valid_to: None,
                 ok: tag_a,
             },
             Op::AddMany {
                 subject: s,
                 predicate: p,
                 object: ObjKey::Node(7),
+                valid_from: 0,
+                valid_to: None,
                 ok: tag_b,
             },
             Op::RemoveMany {
@@ -767,5 +893,93 @@ mod tests {
                 .unwrap()
                 .contains(&ObjKey::Node(7))
         );
+    }
+
+    fn add_at(s: u64, p: u32, o: u64, vf: i64, okey: OrderKey) -> Op {
+        Op::AddMany {
+            subject: s,
+            predicate: p,
+            object: ObjKey::Node(o),
+            valid_from: vf,
+            valid_to: None,
+            ok: okey,
+        }
+    }
+
+    fn close_at(s: u64, p: u32, o: u64, vf: i64, okey: OrderKey) -> Op {
+        Op::CloseMany {
+            subject: s,
+            predicate: p,
+            object: ObjKey::Node(o),
+            valid_from: vf,
+            ok: okey,
+        }
+    }
+
+    #[test]
+    fn close_many_removes_from_present_set_but_keeps_history() {
+        let (s, p) = (0u64, 100u32);
+        let snap = fold(&[
+            add_at(s, p, 7, 100, ok(1, 0, 0)),
+            close_at(s, p, 7, 200, ok(2, 0, 1)),
+        ])
+        .observe();
+        // the winning row is the close → the element leaves the CURRENT set…
+        assert!(!snap.many.contains_key(&(s, p)));
+        // …but both rows stay sliceable in the element's history
+        let rows = snap.many_history[&(s, p)][&ObjKey::Node(7)].clone();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, Some(ObjKey::Node(7))); // the add
+        assert_eq!(rows[1].1, None); // the close
+    }
+
+    #[test]
+    fn close_many_then_readd_restores_presence_order_free() {
+        let (s, p) = (0u64, 100u32);
+        let ops = vec![
+            add_at(s, p, 7, 100, ok(1, 0, 0)),
+            close_at(s, p, 7, 200, ok(2, 0, 1)),
+            add_at(s, p, 7, 300, ok(3, 0, 2)),
+        ];
+        let snap = fold(&ops).observe();
+        assert!(snap.many[&(s, p)].contains(&ObjKey::Node(7)));
+        // any arrival order converges to the same observation (join-semilattice)
+        let mut rev = ops.clone();
+        rev.reverse();
+        assert_eq!(snap, fold(&rev).observe());
+    }
+
+    #[test]
+    fn retract_after_close_leaves_element_absent_and_close_unobservable_by_tags() {
+        let (s, p) = (0u64, 100u32);
+        let f = fold(&[
+            add_at(s, p, 7, 100, ok(1, 0, 0)),
+            close_at(s, p, 7, 200, ok(2, 0, 1)),
+        ]);
+        // live_tags exposes ADD rows only — a retraction never observes the close row
+        assert_eq!(f.live_tags(s, p, &ObjKey::Node(7)), vec![ok(1, 0, 0)]);
+        let mut f2 = f.clone();
+        f2.apply(&Op::RemoveMany {
+            subject: s,
+            predicate: p,
+            observed: vec![ok(1, 0, 0)],
+        });
+        let snap = f2.observe();
+        assert!(!snap.many.contains_key(&(s, p)));
+        // only the close row survives in history
+        assert_eq!(snap.many_history[&(s, p)][&ObjKey::Node(7)].len(), 1);
+    }
+
+    #[test]
+    fn many_live_asserted_probe_tracks_presence_and_interval() {
+        let (s, p) = (0u64, 100u32);
+        let o = ObjKey::Node(7);
+        let mut f = fold(&[add_at(s, p, 7, 100, ok(1, 3, 0))]);
+        assert!(f.many_live_asserted(s, p, &o, 3, 100, None)); // identical re-assertion → suppress
+        assert!(!f.many_live_asserted(s, p, &o, 4, 100, None)); // different source → corroborate
+        assert!(!f.many_live_asserted(s, p, &o, 3, 150, None)); // corrected interval → append
+        f.apply(&close_at(s, p, 7, 200, ok(2, 3, 1)));
+        // closed → not present → a re-grant must append even with the original interval
+        assert!(!f.many_live_asserted(s, p, &o, 3, 100, None));
     }
 }

@@ -37,6 +37,16 @@ enum Tmpl {
         subj: u64,
         pred: u32,
         object: u64,
+        valid_from: i64,
+        valid_to: Option<i64>,
+        tx: u64,
+        src: u32,
+    },
+    CloseMany {
+        subj: u64,
+        pred: u32,
+        object: u64,
+        valid_from: i64,
         tx: u64,
         src: u32,
     },
@@ -82,6 +92,7 @@ fn txsrc(t: &Tmpl) -> (u64, u32) {
         Tmpl::SetOne { tx, src, .. }
         | Tmpl::CloseOne { tx, src, .. }
         | Tmpl::AddMany { tx, src, .. }
+        | Tmpl::CloseMany { tx, src, .. }
         | Tmpl::RemoveMany { tx, src, .. }
         | Tmpl::HardDelete { tx, src, .. }
         | Tmpl::SetEdgeProp { tx, src, .. }
@@ -138,11 +149,31 @@ fn materialize(tmpls: &[Tmpl]) -> Vec<Op> {
                     ok,
                 },
                 Tmpl::AddMany {
-                    subj, pred, object, ..
+                    subj,
+                    pred,
+                    object,
+                    valid_from,
+                    valid_to,
+                    ..
                 } => Op::AddMany {
                     subject: *subj,
                     predicate: *pred,
                     object: ObjKey::Node(*object),
+                    valid_from: *valid_from,
+                    valid_to: *valid_to,
+                    ok,
+                },
+                Tmpl::CloseMany {
+                    subj,
+                    pred,
+                    object,
+                    valid_from,
+                    ..
+                } => Op::CloseMany {
+                    subject: *subj,
+                    predicate: *pred,
+                    object: ObjKey::Node(*object),
+                    valid_from: *valid_from,
                     ok,
                 },
                 Tmpl::RemoveMany {
@@ -245,15 +276,39 @@ fn tmpl_strategy() -> impl Strategy<Value = Tmpl> {
             prop::sample::select(MANY_PREDS.to_vec()),
             0..OBJECTS,
             0..TX,
+            prop::option::of(0..TX),
+            0..TX,
             0..SRC
         )
-            .prop_map(|(subj, pred, object, tx, src)| Tmpl::AddMany {
-                subj,
-                pred,
-                object,
-                tx,
-                src
+            .prop_map(|(subj, pred, object, valid_from, valid_to, tx, src)| {
+                Tmpl::AddMany {
+                    subj,
+                    pred,
+                    object,
+                    valid_from: valid_from as i64,
+                    valid_to: valid_to.map(|t| t as i64),
+                    tx,
+                    src,
+                }
             }),
+        (
+            0..SUBJECTS,
+            prop::sample::select(MANY_PREDS.to_vec()),
+            0..OBJECTS,
+            0..TX,
+            0..TX,
+            0..SRC
+        )
+            .prop_map(
+                |(subj, pred, object, valid_from, tx, src)| Tmpl::CloseMany {
+                    subj,
+                    pred,
+                    object,
+                    valid_from: valid_from as i64,
+                    tx,
+                    src
+                }
+            ),
         (
             0..SUBJECTS,
             prop::sample::select(MANY_PREDS.to_vec()),
@@ -355,6 +410,9 @@ fn touched(ops: &[Op]) -> Touched {
                 subject, predicate, ..
             }
             | Op::AddMany {
+                subject, predicate, ..
+            }
+            | Op::CloseMany {
                 subject, predicate, ..
             }
             | Op::RemoveMany {

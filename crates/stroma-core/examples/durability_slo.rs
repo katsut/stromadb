@@ -18,6 +18,8 @@ fn edge(i: u64) -> (u32, WriteKind) {
             subject: i % SUBJECTS,
             predicate: 100 + (i % 8) as u32,
             object: ObjKey::Node(i),
+            valid_from: 0,
+            valid_to: None,
         },
     )
 }

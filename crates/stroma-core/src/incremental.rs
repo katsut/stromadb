@@ -170,6 +170,8 @@ mod tests {
                             subject: s,
                             predicate: approved,
                             object: ObjKey::Node(100),
+                            valid_from: 0,
+                            valid_to: None,
                         },
                     )
                     .unwrap();

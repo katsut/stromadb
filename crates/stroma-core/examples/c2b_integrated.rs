@@ -121,6 +121,8 @@ fn main() {
                             subject: i,
                             predicate: refs,
                             object: ObjKey::Node((i + 1) % N as u64),
+                            valid_from: 0,
+                            valid_to: None,
                         },
                     ),
                     (
@@ -129,6 +131,8 @@ fn main() {
                             subject: i,
                             predicate: refs,
                             object: ObjKey::Node((i + 7) % N as u64),
+                            valid_from: 0,
+                            valid_to: None,
                         },
                     ),
                 ]
@@ -191,6 +195,8 @@ fn main() {
                         subject: s,
                         predicate: refs,
                         object: ObjKey::Node(o),
+                        valid_from: 0,
+                        valid_to: None,
                     },
                 )
             })
