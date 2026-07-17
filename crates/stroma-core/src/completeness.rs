@@ -143,6 +143,8 @@ mod tests {
             subject,
             predicate,
             object,
+            valid_from: 0,
+            valid_to: None,
             ok: ok(*seq),
         });
         *seq += 1;

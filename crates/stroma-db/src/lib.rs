@@ -338,16 +338,19 @@ impl Db {
     /// Pin the current read view and run a JSON query on it with no lock held (lock-free read).
     ///
     /// - `{"op":"point","subject":N,"predicate":"name"[,"valid_at":T][,"now":T,"max_age":A]}` →
-    ///   `{"one":..}` or `{"many":[..]}` (`valid_at` = valid-time as-of read for a One-predicate: the
-    ///   value in effect at instant `T`). A *current* One answer also carries the winning version's
-    ///   `"valid_from"` and an additive `"confidence"` `{tier, corroboration, sources[, age]}` — a
-    ///   coarse tier plus its raw signals; both omitted for an as-of / absent read. `now`/`max_age`
-    ///   supply the freshness reference (`age = now - valid_from`; stale when `age > max_age`).
-    ///   A current One answer whose winning version is a *close* carries `"closed_from"` (the
-    ///   close's `valid_from`) next to `"one": null`; never for an as-of read or a never-written key.
-    /// - `{"op":"expand","subject":N,"predicate":"name"[,"max_depth":D]}` → `{"nodes":[..]}`
-    ///   (honors the predicate's declared props — symmetric / inverse / transitive; `max_depth`
-    ///   bounds the transitive closure, default 16)
+    ///   `{"one":..}` or `{"many":[..]}` (`valid_at` = valid-time as-of read: for a One-predicate
+    ///   the value in effect at instant `T`; for a Many-predicate the elements in effect at `T`,
+    ///   with `"valid_at"` echoed so a client can detect the capability). A *current* One answer
+    ///   also carries the winning version's `"valid_from"` and an additive `"confidence"`
+    ///   `{tier, corroboration, sources[, age]}` — a coarse tier plus its raw signals; both omitted
+    ///   for an as-of / absent read. `now`/`max_age` supply the freshness reference
+    ///   (`age = now - valid_from`; stale when `age > max_age`). A current One answer whose winning
+    ///   version is a *close* carries `"closed_from"` (the close's `valid_from`) next to
+    ///   `"one": null`; never for an as-of read or a never-written key.
+    /// - `{"op":"expand","subject":N,"predicate":"name"[,"max_depth":D][,"valid_at":T]}` →
+    ///   `{"nodes":[..]}` (honors the predicate's declared props — symmetric / inverse /
+    ///   transitive; `max_depth` bounds the transitive closure, default 16; with `valid_at` every
+    ///   hop answers from the state in effect at `T`, echoed back)
     /// - `{"op":"edge_props","subject":N,"predicate":"name","object":{..}}` → `{"props":{k:v,..}}`
     ///   (properties on the edge `(subject, predicate, object)`; set at ingest via a fact's `props`)
     /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
@@ -599,15 +602,20 @@ impl WriteState {
                         })
                     }
                     _ => {
-                        // Suppress iff an identical (object, source) element is already live.
+                        // Suppress iff the element is currently PRESENT with a live add row
+                        // matching (source, valid interval) exactly — a different source is
+                        // corroboration, a changed interval a correction, and a re-grant after a
+                        // close a re-open; all of those append.
                         let dup = clean
-                            && self
-                                .eng
-                                .many_has_live_source(subject, predicate, &object, source);
+                            && self.eng.many_live_asserted(
+                                subject, predicate, &object, source, valid_from, valid_to,
+                            );
                         (!dup).then(|| WriteKind::AddMany {
                             subject,
                             predicate,
                             object: object.clone(),
+                            valid_from,
+                            valid_to,
                         })
                     }
                 };
@@ -650,9 +658,12 @@ impl WriteState {
                     dirty.clear();
                 }
             } else if let Some(c) = v.get("close") {
-                // Close a cardinality-one value: no successor — the head becomes absent and as-of
-                // reads at or after `valid_from` return nothing. Maps to `CloseOne` in the changelog
-                // (a versioned row with no object), so it replays and merges like any other write.
+                // Close a value's valid-time interval: no successor — reads at or after
+                // `valid_from` return nothing. Cardinality-one closes the key's single value
+                // (`CloseOne`); cardinality-many requires an `object` and closes THAT element's
+                // interval (`CloseMany`) — the temporal end of one grant, unlike `retract` which
+                // erases the element's history outright. Both are versioned rows with no object,
+                // so they replay and merge like any other write.
                 let subject = c["subject"].as_u64().ok_or("close.subject missing")?;
                 let pname = c["predicate"].as_str().ok_or("close.predicate missing")?;
                 let predicate = self
@@ -660,34 +671,64 @@ impl WriteState {
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
-                match self.schema.cardinality.get(pname) {
-                    Some(Cardinality::One) => {}
+                let many = match self.schema.cardinality.get(pname) {
+                    Some(Cardinality::One) => {
+                        if c.get("object").is_some() {
+                            return Err(format!(
+                                "close on '{pname}' (cardinality-one) takes no object — the key has a single value"
+                            ));
+                        }
+                        false
+                    }
                     Some(Cardinality::Many) => {
-                        return Err(format!(
-                            "cannot close '{pname}' (cardinality-many): use a retract record to remove an edge"
-                        ));
+                        if c.get("object").is_none() {
+                            return Err(format!(
+                                "close on '{pname}' (cardinality-many) requires an object — a close ends ONE element's interval (use retract to erase an edge without history)"
+                            ));
+                        }
+                        true
                     }
                     None => return Err(format!("unknown predicate: {pname}")),
-                }
+                };
                 let valid_from = c["valid_from"].as_i64().unwrap_or(0);
                 let source = self.source_id(c.get("source").and_then(|x| x.as_str()))?;
-                // No-op suppression: the head is already a close at the same boundary.
-                if !dirty.contains(&(subject, predicate))
-                    && query::point_one_closed_from(&self.eng.snapshot_arc(), subject, predicate)
-                        == Some(valid_from)
-                {
-                    s.suppressed += 1;
-                } else {
-                    batch.push((
-                        source,
-                        WriteKind::CloseOne {
+                let clean = !dirty.contains(&(subject, predicate));
+                // No-op suppression: the (element's) winner is already a close at the same boundary.
+                let kind = if many {
+                    let object = obj_key(&c["object"])?;
+                    let dup = clean
+                        && query::many_closed_from(
+                            &self.eng.snapshot_arc(),
                             subject,
                             predicate,
-                            valid_from,
-                        },
-                    ));
-                    dirty.insert((subject, predicate));
-                    s.closes += 1;
+                            &object,
+                        ) == Some(valid_from);
+                    (!dup).then_some(WriteKind::CloseMany {
+                        subject,
+                        predicate,
+                        object,
+                        valid_from,
+                    })
+                } else {
+                    let dup = clean
+                        && query::point_one_closed_from(
+                            &self.eng.snapshot_arc(),
+                            subject,
+                            predicate,
+                        ) == Some(valid_from);
+                    (!dup).then_some(WriteKind::CloseOne {
+                        subject,
+                        predicate,
+                        valid_from,
+                    })
+                };
+                match kind {
+                    Some(kind) => {
+                        batch.push((source, kind));
+                        dirty.insert((subject, predicate));
+                        s.closes += 1;
+                    }
+                    None => s.suppressed += 1,
                 }
                 if batch.len() >= 10_000 {
                     self.flush(&mut batch)?;
@@ -931,9 +972,17 @@ impl ReadState {
                         }
                         resp
                     }
-                    _ => {
-                        json!({ "many": query::point_many(&self.snap, subject, pid).into_iter().map(fmt_obj).collect::<Vec<_>>() })
-                    }
+                    _ => match valid_at {
+                        // As-of Many read: the elements in effect at T. The response echoes
+                        // `valid_at` so a client can tell a supporting server from an older one
+                        // that would silently answer with the current set.
+                        Some(at) => {
+                            json!({ "many": query::point_many_asof(&self.snap, subject, pid, at).into_iter().map(fmt_obj).collect::<Vec<_>>(), "valid_at": at })
+                        }
+                        None => {
+                            json!({ "many": query::point_many(&self.snap, subject, pid).into_iter().map(fmt_obj).collect::<Vec<_>>() })
+                        }
+                    },
                 })
             }
             "expand" => {
@@ -947,11 +996,18 @@ impl ReadState {
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 // Honor the predicate's declared relationship properties (symmetric / inverse /
-                // transitive); `max_depth` bounds the transitive closure (default 16).
+                // transitive); `max_depth` bounds the transitive closure (default 16). Optional
+                // `valid_at` answers every hop from the state in effect at T (echoed back, same
+                // capability-detection contract as the Many as-of point read).
                 let max_depth = req["max_depth"].as_u64().map(|d| d as usize).unwrap_or(16);
-                Ok(
-                    json!({ "nodes": query::expand_rel(&self.snap, &self.schema.cat, subject, pid, max_depth).into_iter().collect::<Vec<_>>() }),
-                )
+                Ok(match req["valid_at"].as_i64() {
+                    Some(at) => {
+                        json!({ "nodes": query::expand_rel_asof(&self.snap, &self.schema.cat, subject, pid, max_depth, at).into_iter().collect::<Vec<_>>(), "valid_at": at })
+                    }
+                    None => {
+                        json!({ "nodes": query::expand_rel(&self.snap, &self.schema.cat, subject, pid, max_depth).into_iter().collect::<Vec<_>>() })
+                    }
+                })
             }
             "search" => {
                 let t = self.run_hybrid(req)?;

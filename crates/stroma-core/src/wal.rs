@@ -118,11 +118,23 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
             subject,
             predicate,
             object,
+            valid_from,
+            valid_to,
         } => {
             buf.push(2);
             put_u64(buf, *subject);
             put_u32(buf, *predicate);
             put_objkey(buf, object);
+            // trailing valid-time (backward compatible: a record written before these fields
+            // existed simply ends after the object and decodes to `0` / `None`)
+            put_i64(buf, *valid_from);
+            match valid_to {
+                Some(t) => {
+                    buf.push(1);
+                    put_i64(buf, *t);
+                }
+                None => buf.push(0),
+            }
         }
         WriteKind::RemoveMany {
             subject,
@@ -173,6 +185,18 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
             buf.push(7);
             put_u64(buf, *node);
             buf.push(*label);
+        }
+        WriteKind::CloseMany {
+            subject,
+            predicate,
+            object,
+            valid_from,
+        } => {
+            buf.push(8);
+            put_u64(buf, *subject);
+            put_u32(buf, *predicate);
+            put_objkey(buf, object);
+            put_i64(buf, *valid_from);
         }
     }
 }
@@ -256,6 +280,16 @@ impl<'a> Reader<'a> {
             _ => None,
         }
     }
+    /// Trailing valid-time pair `[valid_from i64][opt valid_to]`. A record written before these
+    /// fields existed has no trailing bytes and decodes to `(0, None)` (backward compatible).
+    fn valid_time_tail(&mut self) -> Option<(i64, Option<i64>)> {
+        if self.remaining() == 0 {
+            return Some((0, None));
+        }
+        let valid_from = self.i64()?;
+        let valid_to = self.opt_i64_tail()?;
+        Some((valid_from, valid_to))
+    }
 }
 
 fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
@@ -292,10 +326,13 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
             subject = r.u64()?;
             predicate = r.u32()?;
             let object = r.objkey()?;
+            let (valid_from, valid_to) = r.valid_time_tail()?;
             WriteKind::AddMany {
                 subject,
                 predicate,
                 object,
+                valid_from,
+                valid_to,
             }
         }
         3 => {
@@ -349,6 +386,18 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
             let node = r.u64()?;
             let label = r.u8()?;
             WriteKind::SetNodeLabel { node, label }
+        }
+        8 => {
+            subject = r.u64()?;
+            predicate = r.u32()?;
+            let object = r.objkey()?;
+            let valid_from = r.i64()?;
+            WriteKind::CloseMany {
+                subject,
+                predicate,
+                object,
+                valid_from,
+            }
         }
         _ => return None,
     };
@@ -442,6 +491,8 @@ mod tests {
                 subject: 8,
                 predicate: 4,
                 object: ObjKey::Node(99),
+                valid_from: 123,
+                valid_to: Some(456),
             },
         );
         roundtrip(
@@ -450,6 +501,8 @@ mod tests {
                 subject: 8,
                 predicate: 4,
                 object: ObjKey::Float(1.5f64.to_bits()),
+                valid_from: 0,
+                valid_to: None,
             },
         );
         roundtrip(
@@ -503,6 +556,39 @@ mod tests {
                 label: 200,
             },
         );
+        roundtrip(
+            5,
+            WriteKind::CloseMany {
+                subject: 8,
+                predicate: 4,
+                object: ObjKey::Node(99),
+                valid_from: -7,
+            },
+        );
+    }
+
+    #[test]
+    fn old_format_add_many_without_valid_time_decodes_as_unreported() {
+        // A pre-valid-time AddMany record ends right after the object — hand-build one and check
+        // it decodes with `valid_from = 0`, open `valid_to` (the backward-compat contract).
+        let mut payload = Vec::new();
+        put_u32(&mut payload, 9); // source
+        payload.push(2); // AddMany tag
+        put_u64(&mut payload, 8); // subject
+        put_u32(&mut payload, 4); // predicate
+        put_objkey(&mut payload, &ObjKey::Node(99));
+        let (source, kind) = decode_record(&payload).unwrap();
+        assert_eq!(source, 9);
+        assert!(matches!(
+            kind,
+            WriteKind::AddMany {
+                subject: 8,
+                predicate: 4,
+                object: ObjKey::Node(99),
+                valid_from: 0,
+                valid_to: None,
+            }
+        ));
     }
 
     #[test]
@@ -515,6 +601,8 @@ mod tests {
                 subject: 1,
                 predicate: 2,
                 object: ObjKey::Node(3),
+                valid_from: 0,
+                valid_to: None,
             },
         );
         // flip a payload byte → checksum mismatch on recovery

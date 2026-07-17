@@ -86,9 +86,11 @@
   reported in a `suppressed` ingest counter (`facts`/`closes` count appended writes only). A one-fact is
   suppressed iff the *current head* row matches on object, valid interval, and source — head-only, so a
   re-send equal to an older row still appends and legitimately moves the head under arrival order (the
-  late-arrival guard depends on that); a many-fact iff the same `(object, source)` element is already
-  live; an edge-prop set iff the value is unchanged (checked per prop — a suppressed fact body with a
-  changed prop appends just the prop); a close iff the head is already a close at the same `valid_from`.
+  late-arrival guard depends on that); a many-fact iff the element is currently present AND a live add
+  row matches `(object, source, valid interval)` exactly — so a corrected interval, and a re-grant
+  after a close, still append; an edge-prop set iff the value is unchanged (checked per prop — a
+  suppressed fact body with a changed prop appends just the prop); a close iff the (element's) winner
+  is already a close at the same `valid_from`.
   A same-value fact from a *different* source always appends: distinct agreeing sources are per-row
   corroboration evidence. Cost: one head read per incoming fact against the materialized state (the same
   head the point read resolves), no new lookup structure. Node records follow the same rule: a re-send
@@ -100,6 +102,27 @@
 - **Evidence:** suppression tests in `crates/stroma-db/tests/db.rs` (identical re-send suppressed with
   `durable_head` unchanged; different source / different `valid_from` / older-value re-send still append;
   duplicate close suppressed).
+
+### D23. Many-cardinality elements carry valid time; `close` with an object ends one element
+- **Context:** Many keys were a plain add/remove OR-Set: `AddMany` dropped the fact's valid time and a
+  `retract` tombstoned the observed adds outright, so a revocation *destroyed* the interval instead of
+  ending it — "who could access this document as of T" was unanswerable even though every grant change
+  had been ingested. One-cardinality had already solved cessation temporally (D21).
+- **Decision:** each Many element keeps per-element version rows in the exact One-cardinality shape —
+  an add row carries the element and its `[valid_from, valid_to)` interval, a `CloseMany` row (ingest:
+  the `close` record with an `object` field) ends it. Rows are keyed by globally-unique order keys, so
+  the state stays a join-semilattice (map union), and *presence* is "the element's greatest live row is
+  an add" — with adds only that is exactly the old add-wins OR-Set, so pre-existing data and old WAL
+  frames (which decode with an unreported interval) observe identically. As-of reads slice the rows per
+  element with the same covering-row rule as `point_one_asof`; `point` and `expand` accept `valid_at`
+  for Many and echo it back (capability detection — an older server would silently answer current).
+  `retract` stays the history-destroying erase and never observes close rows.
+- **Why:** revocation is a temporal fact, not an un-write; reusing the One-cardinality row shape per
+  element buys the as-of semantics, arrival-order independence, and the determinism argument in one
+  move instead of inventing a second temporal model.
+- **Evidence:** fold determinism proptests extended with `CloseMany` + intervals (P1–P5, 2000 cases
+  each); per-element as-of unit tests in `stroma-core/src/query.rs`; WAL old-frame decode test; ingest
+  end-to-end (grant → close → re-grant across a reopen) in `crates/stroma-db/tests/db.rs`.
 
 ## Read path
 

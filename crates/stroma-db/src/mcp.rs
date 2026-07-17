@@ -32,7 +32,7 @@ fn tools() -> Value {
                 "properties": {
                     "subject": { "type": "integer", "description": "subject node id" },
                     "predicate": { "type": "string", "description": "predicate name" },
-                    "valid_at": { "type": "integer", "description": "as-of valid-time: the value in effect at instant T (for a one-cardinality predicate)" }
+                    "valid_at": { "type": "integer", "description": "as-of valid-time: the value (one-cardinality) or element set (many-cardinality) in effect at instant T" }
                 },
                 "required": ["subject", "predicate"]
             }
@@ -44,7 +44,8 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "subject": { "type": "integer" },
-                    "predicate": { "type": "string" }
+                    "predicate": { "type": "string" },
+                    "valid_at": { "type": "integer", "description": "as-of valid-time: expand over the edges in effect at instant T" }
                 },
                 "required": ["subject", "predicate"]
             }
@@ -155,7 +156,7 @@ pub fn handle_message(db: &Db, msg: &Value) -> Option<Value> {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "stroma-mcp", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Use `point` for one-cardinality predicates (add `valid_at` for an as-of read) and `expand` for many-cardinality ones. There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`."
+                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Use `point` for one-cardinality predicates and `expand` for many-cardinality ones (both accept `valid_at` for an as-of read of the state in effect at that instant). There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`."
             }),
         ),
         "ping" => rpc_result(&id, json!({})),

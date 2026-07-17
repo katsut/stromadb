@@ -404,12 +404,26 @@ fn close_validation_errors() {
     ))
     .unwrap();
 
-    // close on a many-predicate is rejected (use retract for a many-edge)
+    // close on a many-predicate without an object is rejected (a close ends ONE element)
     let err = db
         .ingest_str("{\"close\":{\"subject\":1,\"predicate\":\"works-on\"}}\n")
         .unwrap_err();
     assert!(
-        err.contains("cardinality-many") && err.contains("retract"),
+        err.contains("cardinality-many") && err.contains("object"),
+        "unexpected error: {err}"
+    );
+    // close on a one-predicate with an object is rejected (the key has a single value)
+    db.ingest_str(
+        "{\"pred_def\":{\"name\":\"lead-of\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+    )
+    .unwrap();
+    let err = db
+        .ingest_str(
+            "{\"close\":{\"subject\":1,\"predicate\":\"lead-of\",\"object\":{\"node\":2}}}\n",
+        )
+        .unwrap_err();
+    assert!(
+        err.contains("cardinality-one") && err.contains("no object"),
         "unexpected error: {err}"
     );
     // close on an undeclared predicate is rejected
@@ -1444,5 +1458,89 @@ fn resend_identical_node_is_suppressed() {
         .ingest_str("{\"node\":{\"id\":1,\"type\":\"Ticket\"}}\n")
         .unwrap();
     assert_eq!((s.nodes, s.suppressed), (0, 1));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn many_close_and_asof_reads() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_many_asof_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // Grant timeline on a many-predicate: 9 granted at 100 and closed at 200 (then re-granted at
+    // 400), 8 granted over the bounded interval [150, 300).
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Document\"}}\n",
+        "{\"pred_def\":{\"name\":\"can-access\",\"cardinality\":\"many\",\"domain\":\"Document\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Document\"}}\n",
+        "{\"node\":{\"id\":8,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Person\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"can-access\",\"object\":{\"node\":9},\"valid_from\":100}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"can-access\",\"object\":{\"node\":8},\"valid_from\":150,\"valid_to\":300}}\n",
+        "{\"close\":{\"subject\":1,\"predicate\":\"can-access\",\"object\":{\"node\":9},\"valid_from\":200}}\n",
+    ))
+    .unwrap();
+
+    // reopen: the close and the intervals must survive the WAL round-trip
+    drop(db); // release the directory lock
+    let db = Db::open(&dir).unwrap();
+
+    let asof = |at: i64| {
+        db.query(&json!({"op":"point","subject":1,"predicate":"can-access","valid_at":at}))
+            .unwrap()
+    };
+    // the as-of answer echoes valid_at (capability detection: an older server would omit it)
+    assert_eq!(asof(120), json!({ "many": [{"node": 9}], "valid_at": 120 }));
+    assert_eq!(
+        asof(180)["many"],
+        json!([{ "node": 8 }, { "node": 9 }]) // both in effect
+    );
+    assert_eq!(asof(250)["many"], json!([{ "node": 8 }])); // 9 closed at 200
+    assert_eq!(asof(350)["many"], json!([])); // 8's bound passed too
+    assert_eq!(asof(50)["many"], json!([])); // before any grant
+    // the CURRENT set drops the closed element but keeps the bounded one (valid_to is read-time
+    // only for current reads, exactly like the One-cardinality contract)
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"can-access"}))
+            .unwrap(),
+        json!({ "many": [{ "node": 8 }] })
+    );
+    // expand honors the same instant (and echoes it)
+    assert_eq!(
+        db.query(&json!({"op":"expand","subject":1,"predicate":"can-access","valid_at":120}))
+            .unwrap(),
+        json!({ "nodes": [9], "valid_at": 120 })
+    );
+    assert_eq!(
+        db.query(&json!({"op":"expand","subject":1,"predicate":"can-access"}))
+            .unwrap(),
+        json!({ "nodes": [8] })
+    );
+
+    // a duplicate close at the same boundary is suppressed; a re-grant afterwards re-opens
+    let s = db
+        .ingest_str(
+            "{\"close\":{\"subject\":1,\"predicate\":\"can-access\",\"object\":{\"node\":9},\"valid_from\":200}}\n",
+        )
+        .unwrap();
+    assert_eq!((s.closes, s.suppressed), (0, 1));
+    let s = db
+        .ingest_str(
+            "{\"fact\":{\"subject\":1,\"predicate\":\"can-access\",\"object\":{\"node\":9},\"valid_from\":400}}\n",
+        )
+        .unwrap();
+    assert_eq!(s.facts, 1); // a re-grant after a close must append, never suppress
+    assert_eq!(asof(450)["many"], json!([{ "node": 9 }]));
+    assert_eq!(asof(250)["many"], json!([{ "node": 8 }])); // history unchanged
+    // …and an identical re-assertion of the live grant IS suppressed
+    let s = db
+        .ingest_str(
+            "{\"fact\":{\"subject\":1,\"predicate\":\"can-access\",\"object\":{\"node\":9},\"valid_from\":400}}\n",
+        )
+        .unwrap();
+    assert_eq!((s.facts, s.suppressed), (0, 1));
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }

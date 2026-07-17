@@ -99,23 +99,24 @@ impl Engine {
         Ok(Some(seqno))
     }
 
-    /// Whether the materialized base holds a live cardinality-Many element
-    /// `(subject, predicate, object)` asserted by `source` — the ingest no-op suppression probe
-    /// (an identical `(object, source)` re-assertion changes nothing; a *different* source is
-    /// corroboration and must append). Reads the materialized base only, not the un-materialized
-    /// tail: the ingest path runs it right after a materialize, when the tail can hold no
-    /// cardinality-Many assertions for a key it has not already marked dirty.
-    pub fn many_has_live_source(
+    /// Whether the materialized base holds cardinality-Many element `(subject, predicate, object)`
+    /// as CURRENTLY PRESENT with a live add row matching `(source, valid_from, valid_to)` — the
+    /// ingest no-op suppression probe. An identical re-assertion changes nothing; a *different*
+    /// source is corroboration, a changed interval is a correction, and a re-grant after a close
+    /// must re-open the element — all of those append. Reads the materialized base only, not the
+    /// un-materialized tail: the ingest path runs it right after a materialize, when the tail can
+    /// hold no cardinality-Many assertions for a key it has not already marked dirty.
+    pub fn many_live_asserted(
         &self,
         subject: NodeId,
         predicate: FieldId,
         object: &ObjKey,
         source: FieldId,
+        valid_from: i64,
+        valid_to: Option<i64>,
     ) -> bool {
         self.base
-            .live_tags(subject, predicate, object)
-            .iter()
-            .any(|t| t.source == source)
+            .many_live_asserted(subject, predicate, object, source, valid_from, valid_to)
     }
 
     /// Fold the tail `[watermark, head)` into the base and advance the watermark (relieves
@@ -189,6 +190,8 @@ mod tests {
             subject: s,
             predicate: p,
             object: ObjKey::Node(o),
+            valid_from: 0,
+            valid_to: None,
         }
     }
 

@@ -191,6 +191,57 @@ pub fn point_many(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTree
         .unwrap_or_default()
 }
 
+/// Whether one element's version rows put it in effect at valid-time `at` — per element this is
+/// exactly the [`point_one_asof`] rule: among the rows whose `[valid_from, valid_to)` interval
+/// covers `at`, the greatest `valid_from` wins (ties → the later write), and the element is in
+/// effect iff that winner is an add (close rows carry no object).
+fn elem_in_effect_at(rows: &[VersionRow], at: i64) -> bool {
+    rows.iter()
+        .filter(|(_ok, _obj, valid_from, valid_to)| {
+            *valid_from <= at && valid_to.is_none_or(|to| at < to)
+        })
+        .max_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)))
+        .is_some_and(|(_ok, obj, _vf, _vt)| obj.is_some())
+}
+
+/// Valid-time as-of read of a cardinality-Many `(subject, predicate)`: the elements in effect at
+/// valid-time `at`. The Many analogue of [`point_one_asof`], applied per element over
+/// `many_history` — an element added at `t0` and closed at `t1` is in the answer for
+/// `t0 <= at < t1`, out after, and back in after a re-add. Elements erased by a retract
+/// (observed-remove) have no live rows and never answer — a retract destroys history by design;
+/// closing is the temporal path.
+pub fn point_many_asof(
+    snap: &Snapshot,
+    subject: NodeId,
+    predicate: FieldId,
+    at: i64,
+) -> BTreeSet<ObjKey> {
+    snap.many_history
+        .get(&(subject, predicate))
+        .into_iter()
+        .flatten()
+        .filter(|(_, rows)| elem_in_effect_at(rows, at))
+        .map(|(obj, _)| obj.clone())
+        .collect()
+}
+
+/// The close boundary of one cardinality-Many element *when its winning row is a close* — `Some`
+/// only when the element's greatest live row carries no object (the Many analogue of
+/// [`point_one_closed_from`], per element). `None` for a present element and for one never
+/// written, so an ingest guard can suppress a duplicate close without conflating the two.
+pub fn many_closed_from(
+    snap: &Snapshot,
+    subject: NodeId,
+    predicate: FieldId,
+    object: &ObjKey,
+) -> Option<i64> {
+    snap.many_history
+        .get(&(subject, predicate))?
+        .get(object)?
+        .last()
+        .and_then(|(_ok, obj, vf, _vt)| obj.is_none().then_some(*vf))
+}
+
 /// 1-hop expand: neighbor node ids reachable from `subject` via `predicate` (both the One current
 /// value and the Many present set, restricted to node-valued objects).
 pub fn expand(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTreeSet<NodeId> {
@@ -249,22 +300,107 @@ pub fn expand_rel(
     predicate: FieldId,
     max_depth: usize,
 ) -> BTreeSet<NodeId> {
+    expand_rel_at(snap, catalog, subject, predicate, max_depth, None)
+}
+
+/// [`expand_rel`] at valid-time `at`: every hop — forward, symmetric-reverse, inverse-reverse —
+/// answers from the state in effect at that instant (One values via [`point_one_asof`], Many
+/// elements via [`point_many_asof`]), so a transitive closure over history never mixes eras.
+pub fn expand_rel_asof(
+    snap: &Snapshot,
+    catalog: &Catalog,
+    subject: NodeId,
+    predicate: FieldId,
+    max_depth: usize,
+    at: i64,
+) -> BTreeSet<NodeId> {
+    expand_rel_at(snap, catalog, subject, predicate, max_depth, Some(at))
+}
+
+/// 1-hop expand at valid-time `at`: node-valued neighbours in effect at that instant.
+pub fn expand_asof(
+    snap: &Snapshot,
+    subject: NodeId,
+    predicate: FieldId,
+    at: i64,
+) -> BTreeSet<NodeId> {
+    let mut out = BTreeSet::new();
+    if let Some(ObjKey::Node(n)) = point_one_asof(snap, subject, predicate, at) {
+        out.insert(n);
+    }
+    for o in point_many_asof(snap, subject, predicate, at) {
+        if let ObjKey::Node(n) = o {
+            out.insert(n);
+        }
+    }
+    out
+}
+
+/// [`reverse_adjacency`] at valid-time `at` — the same single restricted scan, but each key's
+/// contribution is its as-of winner(s) instead of its current state (histories, not present sets).
+fn reverse_adjacency_asof(
+    snap: &Snapshot,
+    predicate: FieldId,
+    at: i64,
+) -> HashMap<NodeId, BTreeSet<NodeId>> {
+    let mut rev: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
+    for &(s, p) in snap.one_history.keys() {
+        if p == predicate
+            && let Some(ObjKey::Node(o)) = point_one_asof(snap, s, p, at)
+        {
+            rev.entry(o).or_default().insert(s);
+        }
+    }
+    for &(s, p) in snap.many_history.keys() {
+        if p != predicate {
+            continue;
+        }
+        for o in point_many_asof(snap, s, p, at) {
+            if let ObjKey::Node(o) = o {
+                rev.entry(o).or_default().insert(s);
+            }
+        }
+    }
+    rev
+}
+
+fn expand_rel_at(
+    snap: &Snapshot,
+    catalog: &Catalog,
+    subject: NodeId,
+    predicate: FieldId,
+    max_depth: usize,
+    at: Option<i64>,
+) -> BTreeSet<NodeId> {
+    // the 1-hop direct expand, current or as-of
+    let hop = |node: NodeId, p: FieldId| -> BTreeSet<NodeId> {
+        match at {
+            None => expand(snap, node, p),
+            Some(t) => expand_asof(snap, node, p, t),
+        }
+    };
+    let rev_of = |p: FieldId| -> HashMap<NodeId, BTreeSet<NodeId>> {
+        match at {
+            None => reverse_adjacency(snap, p),
+            Some(t) => reverse_adjacency_asof(snap, p, t),
+        }
+    };
     let props = catalog
         .predicate(predicate)
         .map(|d| d.props)
         .unwrap_or_default();
     // No declared properties → identical to the plain 1-hop direct expand.
     if !props.symmetric && !props.transitive && props.inverse.is_none() {
-        return expand(snap, subject, predicate);
+        return hop(subject, predicate);
     }
     // Reverse adjacency is only needed for the undirected (symmetric) and inverse cases; build each
     // once (a single restricted scan) and reuse it across every hop.
-    let rev_p = props.symmetric.then(|| reverse_adjacency(snap, predicate));
-    let rev_inv = props.inverse.map(|inv| reverse_adjacency(snap, inv));
+    let rev_p = props.symmetric.then(|| rev_of(predicate));
+    let rev_inv = props.inverse.map(&rev_of);
     // One property-aware hop from `node`: forward P edges, plus (symmetric) reverse P edges, plus
     // (inverse) the reverse of the named predicate's edges.
     let step = |node: NodeId| -> BTreeSet<NodeId> {
-        let mut out = expand(snap, node, predicate);
+        let mut out = hop(node, predicate);
         if let Some(rp) = &rev_p
             && let Some(s) = rp.get(&node)
         {
@@ -477,24 +613,32 @@ mod tests {
                 subject: 1,
                 predicate: 100,
                 object: ObjKey::Node(20),
+                valid_from: 0,
+                valid_to: None,
                 ok: ok(1),
             },
             Op::AddMany {
                 subject: 1,
                 predicate: 100,
                 object: ObjKey::Node(21),
+                valid_from: 0,
+                valid_to: None,
                 ok: ok(2),
             },
             Op::AddMany {
                 subject: 10,
                 predicate: 101,
                 object: ObjKey::Node(20),
+                valid_from: 0,
+                valid_to: None,
                 ok: ok(3),
             },
             Op::AddMany {
                 subject: 10,
                 predicate: 101,
                 object: ObjKey::Node(22),
+                valid_from: 0,
+                valid_to: None,
                 ok: ok(4),
             },
         ];
@@ -560,6 +704,126 @@ mod tests {
         assert_eq!(point_one(&s, 7, 5), Some(ObjKey::Node(42)));
     }
 
+    fn add_many_at(s: u64, p: u32, o: u64, vf: i64, vt: Option<i64>, seq: u64) -> Op {
+        Op::AddMany {
+            subject: s,
+            predicate: p,
+            object: ObjKey::Node(o),
+            valid_from: vf,
+            valid_to: vt,
+            ok: ok(seq),
+        }
+    }
+
+    fn close_many_at(s: u64, p: u32, o: u64, vf: i64, seq: u64) -> Op {
+        Op::CloseMany {
+            subject: s,
+            predicate: p,
+            object: ObjKey::Node(o),
+            valid_from: vf,
+            ok: ok(seq),
+        }
+    }
+
+    #[test]
+    fn many_valid_time_as_of() {
+        // grant(20) at 100 closed at 200 then re-granted at 300; grant(21) bounded [150, 250)
+        let s = fold(&[
+            add_many_at(1, 100, 20, 100, None, 0),
+            close_many_at(1, 100, 20, 200, 1),
+            add_many_at(1, 100, 20, 300, None, 2),
+            add_many_at(1, 100, 21, 150, Some(250), 3),
+        ])
+        .observe();
+        let set = |at: i64| point_many_asof(&s, 1, 100, at);
+        assert_eq!(set(50), BTreeSet::new()); // nothing in effect yet
+        assert_eq!(set(120), [ObjKey::Node(20)].into_iter().collect());
+        assert_eq!(
+            set(180),
+            [ObjKey::Node(20), ObjKey::Node(21)].into_iter().collect()
+        );
+        assert_eq!(set(220), [ObjKey::Node(21)].into_iter().collect()); // 20 closed at 200
+        assert_eq!(set(260), BTreeSet::new()); // 21's bound passed, 20 not yet re-granted
+        assert_eq!(set(350), [ObjKey::Node(20)].into_iter().collect()); // re-grant back in effect
+        // the CURRENT set follows the winning rows: 20 present (re-add wins), 21 present
+        // (valid_to is read-time only, exactly like the One-cardinality current read)
+        assert_eq!(
+            point_many(&s, 1, 100),
+            [ObjKey::Node(20), ObjKey::Node(21)].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn many_closed_from_distinguishes_ended_from_never_written() {
+        let s = fold(&[
+            add_many_at(1, 100, 20, 100, None, 0),
+            close_many_at(1, 100, 20, 200, 1),
+        ])
+        .observe();
+        assert_eq!(many_closed_from(&s, 1, 100, &ObjKey::Node(20)), Some(200));
+        assert_eq!(many_closed_from(&s, 1, 100, &ObjKey::Node(99)), None); // never written
+        let s2 = fold(&[add_many_at(1, 100, 20, 100, None, 0)]).observe();
+        assert_eq!(many_closed_from(&s2, 1, 100, &ObjKey::Node(20)), None); // live winner
+    }
+
+    #[test]
+    fn expand_asof_slices_both_cardinalities() {
+        // One edge (1 -0-> 10) superseded at 200 by (1 -0-> 11); Many edge (1 -100-> 20) closed at 150
+        let s = fold(&[
+            Op::SetOne {
+                subject: 1,
+                predicate: 0,
+                object: ObjKey::Node(10),
+                valid_from: 100,
+                valid_to: None,
+                ok: ok(0),
+            },
+            Op::SetOne {
+                subject: 1,
+                predicate: 0,
+                object: ObjKey::Node(11),
+                valid_from: 200,
+                valid_to: None,
+                ok: ok(1),
+            },
+            add_many_at(1, 100, 20, 100, None, 2),
+            close_many_at(1, 100, 20, 150, 3),
+        ])
+        .observe();
+        assert_eq!(expand_asof(&s, 1, 0, 120), [10].into_iter().collect());
+        assert_eq!(expand_asof(&s, 1, 0, 250), [11].into_iter().collect());
+        assert_eq!(expand_asof(&s, 1, 100, 120), [20].into_iter().collect());
+        assert_eq!(expand_asof(&s, 1, 100, 180), BTreeSet::new());
+    }
+
+    #[test]
+    fn expand_rel_asof_honours_symmetric_reverse_edges_in_their_era() {
+        // symmetric predicate: 2 -sym-> 1 granted at 100, closed at 200 — the REVERSE hop from 1
+        // must appear inside the era and vanish after it
+        let mut c = Catalog::new();
+        let t = c.register_type("Node");
+        let sym = c.register_predicate(
+            "sym",
+            crate::catalog::Cardinality::Many,
+            crate::catalog::RelProps {
+                symmetric: true,
+                ..Default::default()
+            },
+            t,
+            crate::catalog::Range::Type(t),
+        );
+        let s = fold(&[
+            add_many_at(2, sym, 1, 100, None, 0),
+            close_many_at(2, sym, 1, 200, 1),
+        ])
+        .observe();
+        assert_eq!(
+            expand_rel_asof(&s, &c, 1, sym, 16, 150),
+            [2].into_iter().collect()
+        );
+        assert_eq!(expand_rel_asof(&s, &c, 1, sym, 16, 250), BTreeSet::new());
+    }
+
     #[test]
     fn edge_props_lww_and_read() {
         // Edge (1, has-skill=100, Skill 20): set level=3 then level=5 (later ok wins), plus role.
@@ -568,6 +832,8 @@ mod tests {
                 subject: 1,
                 predicate: 100,
                 object: ObjKey::Node(20),
+                valid_from: 0,
+                valid_to: None,
                 ok: ok(0),
             },
             Op::SetEdgeProp {
@@ -741,6 +1007,8 @@ mod tests {
                 subject,
                 predicate,
                 object: ObjKey::Node(object),
+                valid_from: 0,
+                valid_to: None,
                 ok: ok(i as u64),
             })
             .collect();
