@@ -9,6 +9,10 @@ use std::time::Instant;
 use stromadb_core::ivf::IvfPq;
 use stromadb_core::vector::sqdist;
 
+#[path = "util/mod.rs"]
+mod util;
+use util::{centers, gen_vecs, percentile};
+
 const N: usize = 100_000;
 const DIM: usize = 768;
 const M: usize = 96;
@@ -18,31 +22,6 @@ const NC: usize = 150; // few centers + large noise ⇒ clusters merge ⇒ neigh
 const NOISE: f32 = 0.9;
 const R: usize = 100;
 const K: usize = 10;
-
-fn splitmix(s: &mut u64) -> f32 {
-    *s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *s;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    ((z ^ (z >> 31)) as f32 / u64::MAX as f32) * 2.0 - 1.0
-}
-
-fn centers() -> Vec<Vec<f32>> {
-    let mut s = 0xC0FF_EE00_1234_5678u64;
-    (0..NC)
-        .map(|_| (0..DIM).map(|_| splitmix(&mut s)).collect())
-        .collect()
-}
-
-fn gen_vecs(n: usize, seed: u64, ctr: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    let mut s = seed;
-    (0..n)
-        .map(|_| {
-            let c = &ctr[(splitmix(&mut s).abs() * NC as f32) as usize % NC];
-            (0..DIM).map(|i| c[i] + splitmix(&mut s) * NOISE).collect()
-        })
-        .collect()
-}
 
 fn exact_type0_topk(data: &[Vec<f32>], q: &[f32]) -> Vec<u64> {
     let mut d: Vec<(f32, u64)> = data
@@ -56,8 +35,8 @@ fn exact_type0_topk(data: &[Vec<f32>], q: &[f32]) -> Vec<u64> {
 }
 
 fn main() {
-    let ctr = centers();
-    let data = gen_vecs(N, 42, &ctr);
+    let ctr = centers(NC, DIM);
+    let data = gen_vecs(N, 42, &ctr, NOISE);
     let mut idx = IvfPq::new(DIM, NLIST, M);
     idx.train(&data[..TRAIN]);
     idx.add_batch(
@@ -70,9 +49,9 @@ fn main() {
         "=== #23 nprobe operating-point (harder data: NC={NC}, noise={NOISE}, {N}×{DIM}d, type-sel 50%) ==="
     );
 
-    let queries = gen_vecs(200, 7, &ctr);
+    let queries = gen_vecs(200, 7, &ctr, NOISE);
     let truth: Vec<Vec<u64>> = queries.iter().map(|q| exact_type0_topk(&data, q)).collect();
-    let warm = gen_vecs(3000, 123, &ctr);
+    let warm = gen_vecs(3000, 123, &ctr, NOISE);
     let authz = |l: u32| l == 0;
     let keep = |n: u64| n.is_multiple_of(2);
 
@@ -93,7 +72,7 @@ fn main() {
             lat.push(t.elapsed().as_secs_f64() * 1e3);
         }
         lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p = |qq: f64| lat[((lat.len() as f64 * qq) as usize).min(lat.len() - 1)];
+        let p = |qq: f64| percentile(&lat, qq);
         let ok = recall >= 0.9 && p(0.99) < 2.0;
         if ok && op.is_none() {
             op = Some(np);
@@ -131,7 +110,7 @@ fn main() {
             lat.push(t.elapsed().as_secs_f64() * 1e3);
         }
         lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p = |qq: f64| lat[((lat.len() as f64 * qq) as usize).min(lat.len() - 1)];
+        let p = |qq: f64| percentile(&lat, qq);
         let mark = if recall >= 0.9 && p(0.99) < 2.0 {
             "← recall≥0.9 & p99<2ms ✅"
         } else {
