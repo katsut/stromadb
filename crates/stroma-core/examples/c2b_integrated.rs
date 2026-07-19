@@ -19,6 +19,10 @@ use stromadb_core::live::LiveQueries;
 use stromadb_core::query;
 use stromadb_core::version::{ReadMode, VersionVector};
 
+#[path = "util/mod.rs"]
+mod util;
+use util::{centers, gen_vecs, percentile as pct};
+
 const N: usize = 100_000; // set higher (e.g. 500_000) for the A1 representative-scale re-measure
 const DIM: usize = 768;
 const M: usize = 96;
@@ -33,38 +37,9 @@ const WRITE_EDGES: usize = 200; // durable edges appended per epoch
 const NEW_DOCS: usize = 20; // embeddings added per epoch
 const LIVE_QUERIES: usize = 30; // A1: 30 concurrent live queries
 
-fn splitmix(s: &mut u64) -> f32 {
-    *s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *s;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    ((z ^ (z >> 31)) as f32 / u64::MAX as f32) * 2.0 - 1.0
-}
-
-fn centers() -> Vec<Vec<f32>> {
-    let mut s = 0xC0FF_EE00_1234_5678u64;
-    (0..NC)
-        .map(|_| (0..DIM).map(|_| splitmix(&mut s)).collect())
-        .collect()
-}
-
-fn gen_vecs(n: usize, seed: u64, ctr: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    let mut s = seed;
-    (0..n)
-        .map(|_| {
-            let c = &ctr[(splitmix(&mut s).abs() * NC as f32) as usize % NC];
-            (0..DIM).map(|i| c[i] + splitmix(&mut s) * NOISE).collect()
-        })
-        .collect()
-}
-
-fn pct(sorted: &[f64], q: f64) -> f64 {
-    sorted[((sorted.len() as f64 * q) as usize).min(sorted.len() - 1)]
-}
-
 fn main() {
-    let ctr = centers();
-    let data = gen_vecs(N, 42, &ctr);
+    let ctr = centers(NC, DIM);
+    let data = gen_vecs(N, 42, &ctr, NOISE);
 
     // catalog: every node is a Doc; `refs` is a Doc→Doc relation; authz label = node % 4. Node
     // type/label attributes reach the read path via the snapshot (SetNodeType/SetNodeLabel ops seeded
@@ -155,7 +130,7 @@ fn main() {
     let principal = Principal {
         allowed_labels: 0b0111,
     }; // deny label 3 (~25% filtered)
-    let queries = gen_vecs(256, 7, &ctr);
+    let queries = gen_vecs(256, 7, &ctr, NOISE);
     let pipeline = |q: Vec<f32>| Pipeline {
         source: Source::TypeAnn {
             q,

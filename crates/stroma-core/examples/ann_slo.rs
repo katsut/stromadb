@@ -9,6 +9,10 @@ use std::time::Instant;
 use stromadb_core::ivf::IvfPq;
 use stromadb_core::vector::sqdist;
 
+#[path = "util/mod.rs"]
+mod util;
+use util::{centers, gen_vecs, percentile};
+
 const N: usize = 200_000;
 const DIM: usize = 768;
 const M: usize = 96; // PQ subquantizers → 96 B/vec code
@@ -17,34 +21,6 @@ const TRAIN_SAMPLE: usize = 20_000;
 const NC: usize = 2000; // latent cluster centers (shared by data + queries)
 const NOISE: f32 = 0.35; // within-cluster spread
 const RERANK_R: usize = 100; // PQ candidates re-ranked by exact distance
-
-fn splitmix(s: &mut u64) -> f32 {
-    *s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *s;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    ((z ^ (z >> 31)) as f32 / u64::MAX as f32) * 2.0 - 1.0
-}
-
-// Latent cluster centers with a FIXED seed so data and queries share the same manifold
-// (realistic embeddings: near-neighbours live in the same cluster → PQ residuals are small).
-fn centers() -> Vec<Vec<f32>> {
-    let mut s = 0xC0FF_EE00_1234_5678u64;
-    (0..NC)
-        .map(|_| (0..DIM).map(|_| splitmix(&mut s)).collect())
-        .collect()
-}
-
-// Each vector = a cluster center + small noise. `seed` picks clusters + noise.
-fn gen_vecs(n: usize, seed: u64, ctr: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    let mut s = seed;
-    (0..n)
-        .map(|_| {
-            let c = &ctr[(splitmix(&mut s).abs() * NC as f32) as usize % NC];
-            (0..DIM).map(|i| c[i] + splitmix(&mut s) * NOISE).collect()
-        })
-        .collect()
-}
 
 fn exact_filtered_topk(
     data: &[Vec<f32>],
@@ -68,8 +44,8 @@ fn main() {
 
     println!("=== hybrid-search SLO — real IVF-PQ ({N} vec × {DIM}d, type-sel 50%) ===");
     let t = Instant::now();
-    let ctr = centers();
-    let data = gen_vecs(N, 42, &ctr);
+    let ctr = centers(NC, DIM);
+    let data = gen_vecs(N, 42, &ctr, NOISE);
     println!("gen         : {:.1}s", t.elapsed().as_secs_f64());
 
     let t = Instant::now();
@@ -95,7 +71,7 @@ fn main() {
     );
 
     // --- filtered recall@10 vs nprobe (type filter, authz allow-all) ---
-    let queries = gen_vecs(200, 7, &ctr);
+    let queries = gen_vecs(200, 7, &ctr, NOISE);
     let truth: Vec<Vec<u64>> = queries
         .iter()
         .map(|q| exact_filtered_topk(&data, q, k, &is_type))
@@ -138,7 +114,7 @@ fn main() {
 
     // --- warm p99 with authz + type filters active + rerank, at the chosen nprobe ---
     let np = if chosen == 0 { 32 } else { chosen };
-    let warm = gen_vecs(3000, 123, &ctr);
+    let warm = gen_vecs(3000, 123, &ctr, NOISE);
     let mut lat: Vec<f64> = Vec::with_capacity(warm.len());
     for q in &warm {
         let t = Instant::now();
@@ -154,7 +130,7 @@ fn main() {
         lat.push(t.elapsed().as_secs_f64() * 1e3); // ms
     }
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let p = |q: f64| lat[((lat.len() as f64 * q) as usize).min(lat.len() - 1)];
+    let p = |q: f64| percentile(&lat, q);
     println!(
         "warm hybrid (authz ON, nprobe={np}, +rerank): p50={:.3}ms p99={:.3}ms max={:.3}ms  [SLO p99<2ms] → {}",
         p(0.50),

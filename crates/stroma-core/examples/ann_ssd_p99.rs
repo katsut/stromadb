@@ -15,6 +15,10 @@ use std::time::Instant;
 use stromadb_core::ivf::IvfPq;
 use stromadb_core::vector::sqdist;
 
+#[path = "util/mod.rs"]
+mod util;
+use util::{centers, gen_vecs, percentile};
+
 /// Bypass the OS buffer cache for this fd so reads hit the device (macOS `F_NOCACHE` = O_DIRECT-equiv).
 /// Returns false on platforms without it (the uncached measurement is then skipped).
 #[cfg(target_os = "macos")]
@@ -40,31 +44,6 @@ const K: usize = 10;
 const NPROBE: usize = 8; // operating point
 const ROW: usize = DIM * 4; // bytes per raw vector
 
-fn splitmix(s: &mut u64) -> f32 {
-    *s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *s;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    ((z ^ (z >> 31)) as f32 / u64::MAX as f32) * 2.0 - 1.0
-}
-
-fn centers() -> Vec<Vec<f32>> {
-    let mut s = 0xC0FF_EE00_1234_5678u64;
-    (0..NC)
-        .map(|_| (0..DIM).map(|_| splitmix(&mut s)).collect())
-        .collect()
-}
-
-fn gen_vecs(n: usize, seed: u64, ctr: &[Vec<f32>]) -> Vec<Vec<f32>> {
-    let mut s = seed;
-    (0..n)
-        .map(|_| {
-            let c = &ctr[(splitmix(&mut s).abs() * NC as f32) as usize % NC];
-            (0..DIM).map(|i| c[i] + splitmix(&mut s) * NOISE).collect()
-        })
-        .collect()
-}
-
 fn read_row(file: &File, node: u64, buf: &mut [u8], out: &mut Vec<f32>) {
     file.read_at(buf, node * ROW as u64).unwrap();
     out.clear();
@@ -77,7 +56,7 @@ fn read_row(file: &File, node: u64, buf: &mut [u8], out: &mut Vec<f32>) {
 
 fn percentiles(mut lat: Vec<f64>, label: &str) {
     lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let p = |q: f64| lat[((lat.len() as f64 * q) as usize).min(lat.len() - 1)];
+    let p = |q: f64| percentile(&lat, q);
     let verdict = if p(0.99) < 2.0 { "PASS" } else { "FAIL" };
     println!(
         "  {label:<34} p50={:.3}ms p99={:.3}ms max={:.3}ms  [<2ms] → {verdict}",
@@ -88,8 +67,8 @@ fn percentiles(mut lat: Vec<f64>, label: &str) {
 }
 
 fn main() {
-    let ctr = centers();
-    let data = gen_vecs(N, 42, &ctr);
+    let ctr = centers(NC, DIM);
+    let data = gen_vecs(N, 42, &ctr, NOISE);
     let mut idx = IvfPq::new(DIM, IvfPq::suggested_nlist(N), M);
     idx.train(&data[..TRAIN]);
     idx.add_batch(
@@ -119,7 +98,7 @@ fn main() {
         path.display()
     );
 
-    let warm = gen_vecs(3000, 123, &ctr);
+    let warm = gen_vecs(3000, 123, &ctr, NOISE);
     let authz = |l: u32| l == 0;
     let keep = |n: u64| n.is_multiple_of(2);
 
