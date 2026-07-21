@@ -85,7 +85,7 @@ fn run(n: u64) {
 
     // decode share of the RTO: framing + checksum + payload decode, no fold
     let t_decode = Instant::now();
-    let recovered = wal::recover(&path).expect("recover");
+    let (_, recovered) = wal::recover(&path).expect("recover");
     let decode_s = t_decode.elapsed().as_secs_f64();
     assert_eq!(recovered.len() as u64, n);
     drop(recovered);

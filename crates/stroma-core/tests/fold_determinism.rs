@@ -490,6 +490,21 @@ proptest! {
         prop_assert_eq!(&before, &f.observe());
     }
 
+    /// P6 — the compaction codec is lossless and canonical: decode(encode(fold)) observes
+    /// identically (same rows, same order keys → same LWW/as-of answers) and re-encodes to the
+    /// exact same bytes (BTreeMap order ⇒ one canonical serialization).
+    #[test]
+    fn p6_snapshot_codec_roundtrip(tmpls in workload()) {
+        let f = fold(&materialize(&tmpls));
+        let mut bytes = Vec::new();
+        f.encode_into(&mut bytes);
+        let decoded = stromadb_core::Fold::decode(&bytes).expect("decode");
+        prop_assert_eq!(&f.observe(), &decoded.observe());
+        let mut again = Vec::new();
+        decoded.encode_into(&mut again);
+        prop_assert_eq!(bytes, again);
+    }
+
     /// P5 — incremental refresh equals full observe. Rebuilding a snapshot from empty by re-observing
     /// only the touched graph keys (`observe_key_into`) and touched nodes (`observe_node_into`) must
     /// equal a full `observe()` — the invariant the engine's O(tail) snapshot cache depends on, now

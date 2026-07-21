@@ -11,6 +11,9 @@
 //!
 //! Directory layout (authoritative inputs only; derived stores rebuild on open — the DR design):
 //!   wal.log          append-only changelog (facts + node type/label ops; crash-sound, group-commit)
+//!   wal.log.snap     compaction snapshot: the full fold state (superseded rows included — as-of
+//!                    reads keep answering) as of a covered seqno; cold-start = snapshot + tail
+//!   wal.log.archive-<S>  the WAL prefix a compaction truncated (kept for audit; uncompressed v1)
 //!   schema.jsonl     type/predicate definitions, replayed in order (Field-ID interning is
 //!                    order-deterministic, so ids are stable across restarts)
 //!   rules.jsonl      named conformance rules (`rule_def`), replayed in order into the rule registry
@@ -54,6 +57,14 @@ use stromadb_core::version::{ReadMode, VersionVector};
 pub mod mcp;
 
 pub type DbResult<T> = Result<T, String>;
+
+/// What a compaction did — the covered seqno and the resulting on-disk footprint.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactionStats {
+    pub covered: u64,
+    pub wal_bytes: u64,
+    pub snapshot_bytes: u64,
+}
 
 /// Counts from an ingest batch. `facts` counts fact writes actually appended — a re-assertion
 /// identical to current state is skipped and counted in `suppressed` instead. `retracts` counts
@@ -303,6 +314,17 @@ impl Db {
                 fs::remove_file(&p).map_err(|e| format!("reset: remove {f}: {e}"))?;
             }
         }
+        // compaction siblings too — a surviving snapshot/archive would resurrect the old state on
+        // the next open (the snapshot IS authoritative input once the WAL prefix is truncated)
+        if let Ok(entries) = fs::read_dir(&w.dir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("wal.log.") {
+                    fs::remove_file(e.path())
+                        .map_err(|err| format!("reset: remove {name}: {err}"))?;
+                }
+            }
+        }
         Self::init(&w.dir)?;
         let eng = Engine::open(w.dir.join("wal.log"), w.n_max)
             .map_err(|e| format!("reset: open: {e}"))?;
@@ -316,6 +338,23 @@ impl Db {
         w.index = Arc::new(None);
         self.publish(&w);
         Ok(())
+    }
+
+    /// Snapshot + truncate the changelog (see `Engine::compact`): the full fold state — superseded
+    /// rows included, as-of reads keep answering across the boundary — is persisted as
+    /// `wal.log.snap`, the covered WAL is archived, and cold-start replay becomes snapshot-load +
+    /// tail. Non-destructive (unlike reset) but heavyweight; explicitly invoked, no automatic
+    /// trigger. Returns the covered seqno plus the resulting file sizes for observability.
+    pub fn compact(&self) -> DbResult<CompactionStats> {
+        let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        let covered = w.eng.compact().map_err(|e| format!("compact: {e}"))?;
+        let wal = w.dir.join("wal.log");
+        let size = |p: &std::path::Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        Ok(CompactionStats {
+            covered,
+            wal_bytes: size(&wal),
+            snapshot_bytes: size(&w.dir.join("wal.log.snap")),
+        })
     }
 
     /// Ingest a JSONL batch (type_def / pred_def / rule_def / node / fact / retract / close).

@@ -1544,3 +1544,69 @@ fn many_close_and_asof_reads() {
     assert_eq!((s.facts, s.suppressed), (0, 1));
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn compact_preserves_reads_across_reopen_and_reset_clears_the_snapshot() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_compact_db_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"member-of\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"pred_def\":{\"name\":\"works-on\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Project\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":8,\"type\":\"Project\"}}\n",
+        "{\"node\":{\"id\":9,\"type\":\"Project\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"member-of\",\"object\":{\"node\":8},\"valid_from\":100}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"member-of\",\"object\":{\"node\":9},\"valid_from\":200}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":8},\"valid_from\":100}}\n",
+        "{\"close\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":8},\"valid_from\":200}}\n",
+    ))
+    .unwrap();
+    let head = db.stats()["facts"]["durable_head"].as_u64().unwrap();
+
+    let s = db.compact().unwrap();
+    assert_eq!(s.covered, head);
+    assert!(s.snapshot_bytes > 0);
+
+    // post-compaction writes keep seqnos continuous
+    let st = db
+        .ingest_str("{\"fact\":{\"subject\":1,\"predicate\":\"works-on\",\"object\":{\"node\":9},\"valid_from\":300}}\n")
+        .unwrap();
+    assert_eq!(st.durable_head, head + 1);
+
+    // cold reopen: snapshot + tail — history (as-of across the boundary) intact
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"member-of","valid_at":150}))
+            .unwrap()["one"],
+        json!({ "node": 8 }) // superseded row survived the snapshot
+    );
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"works-on","valid_at":150}))
+            .unwrap()["many"],
+        json!([{ "node": 8 }]) // the closed grant's era too
+    );
+    assert_eq!(
+        db.query(&json!({"op":"point","subject":1,"predicate":"works-on"}))
+            .unwrap()["many"],
+        json!([{ "node": 9 }])
+    );
+    assert_eq!(db.stats()["facts"]["durable_head"], json!(head + 1));
+
+    // reset clears the snapshot and archives — nothing resurrects
+    db.reset().unwrap();
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(db.stats()["facts"]["durable_head"], json!(0));
+    let err = db
+        .query(&json!({"op":"point","subject":1,"predicate":"member-of"}))
+        .unwrap_err();
+    assert!(err.contains("unknown predicate"), "unexpected: {err}");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}

@@ -31,13 +31,21 @@ impl Engine {
         }
     }
 
-    /// Open a durable engine backed by the WAL at `path`: recover the committed changelog prefix and
-    /// rebuild the fold from it (the cold-start replay = recovery-time-objective path). Writes become
-    /// durable via [`Engine::sync`]. A missing file starts empty.
+    /// Open a durable engine backed by the WAL at `path`: load the compaction snapshot when one
+    /// exists (the fold state as of its covered seqno, order keys and all), then recover and replay
+    /// only the WAL tail past it — the cold-start path a compaction bounds. Replay skips records
+    /// below the snapshot's seqno, so a crash between snapshot commit and WAL truncation
+    /// self-reconciles (the stale prefix is simply not replayed). Writes become durable via
+    /// [`Engine::sync`]. Missing files start empty.
     pub fn open(path: impl AsRef<Path>, n_max: usize) -> io::Result<Self> {
+        let path = path.as_ref();
+        let snapshot = crate::changelog::read_snapshot(path)?;
         let changelog = Changelog::open(path, n_max)?;
-        let mut base = Fold::default();
-        changelog.replay_into(&mut base); // fold the whole recovered log = cold-start rebuild
+        let (mut base, covered) = match snapshot {
+            Some((upto, fold)) => (fold, upto),
+            None => (Fold::default(), changelog.base()),
+        };
+        changelog.replay_range_into(covered, &mut base); // the tail past the snapshot
         let base_snap = Arc::new(base.observe());
         let watermark = changelog.head();
         Ok(Engine {
@@ -46,6 +54,21 @@ impl Engine {
             base_snap,
             watermark,
         })
+    }
+
+    /// Snapshot + truncate compaction: drain and fsync everything, persist the full fold state
+    /// (superseded rows included — as-of reads are part of the read contract) as `<wal>.snap`, and
+    /// truncate the WAL it covers (archived as `<wal>.archive-<seqno>`). Bounds the cold-start
+    /// replay at "snapshot load + tail" instead of "full history". Returns the covered seqno.
+    /// Explicitly invoked (an admin action, like reset) — no automatic trigger yet.
+    pub fn compact(&mut self) -> io::Result<u64> {
+        self.materialize();
+        self.changelog.sync()?;
+        // dominated rows (hard-delete floors, observed-removes) are unreadable already — gc before
+        // persisting so the snapshot doesn't carry them (provably observation-preserving)
+        self.base.gc();
+        let bytes = crate::changelog::encode_snapshot(&self.base, self.changelog.head());
+        self.changelog.compact_to(&bytes)
     }
 
     /// Durability commit point: fsync every appended-but-not-yet-durable write (group commit — the

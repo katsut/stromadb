@@ -12,6 +12,7 @@
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
+//!   POST /compact         → {compacted_upto, wal_bytes, snapshot_bytes}  (snapshot + truncate)
 //!   POST /mcp     <json-rpc> → MCP streamable HTTP transport: one JSON-RPC message per request;
 //!                 a request gets its JSON-RPC response (200), a notification gets 202 with an
 //!                 empty body. Stateless (no session ids); GET /mcp is 405 (no server stream).
@@ -219,6 +220,16 @@ fn handle(db: &SharedDb, req: &mut Request) -> (u16, Value) {
                 Err(e) => (400, json!({ "error": e })),
             }
         }
+        // Snapshot + truncate the changelog: non-destructive (as-of reads keep answering across
+        // the boundary), so unlike /reset it needs no opt-in flag — but it is an explicit admin
+        // action, never triggered automatically.
+        (Method::Post, "/compact") => match db.compact() {
+            Ok(s) => (
+                200,
+                json!({ "compacted_upto": s.covered, "wal_bytes": s.wal_bytes, "snapshot_bytes": s.snapshot_bytes }),
+            ),
+            Err(e) => (400, json!({ "error": e })),
+        },
         _ => (404, json!({ "error": "not found" })),
     }
 }
