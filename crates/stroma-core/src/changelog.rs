@@ -17,7 +17,7 @@ use crate::fold::{Fold, ObjKey, Op, OrderKey};
 use crate::wal;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A write submitted to the changelog — a diff *without* its order key (the changelog assigns it).
 /// `RemoveMany` carries the order keys it observed (resolved by the ingest layer from current tags).
@@ -96,13 +96,17 @@ pub struct Backpressure {
     pub limit: usize,
 }
 
-/// Append-only changelog. `seqno` = index in the log = version authority.
+/// Append-only changelog. `seqno` = `base + index` in the log = version authority. `base` is `0`
+/// for a log that has never been compacted; a snapshot+truncate compaction advances it to the
+/// covered seqno, so seqnos stay globally continuous across the boundary.
 pub struct Changelog {
     records: Vec<Record>,
+    base: u64,         // seqno of records[0] (a compaction truncated everything before it)
     materialized: u64, // count of records a derived store has caught up to
     max_unmaterialized: usize,
-    wal: Option<File>,   // durable backend; `None` = pure in-memory mode
-    durable_upto: usize, // records[..durable_upto] have been fsynced
+    wal: Option<File>,     // durable backend; `None` = pure in-memory mode
+    path: Option<PathBuf>, // the WAL's path (needed by compaction's file swaps)
+    durable_upto: usize,   // records[..durable_upto] have been fsynced
 }
 
 fn record_to_op(seqno: u64, source: FieldId, kind: &WriteKind) -> Op {
@@ -208,15 +212,72 @@ fn record_to_op(seqno: u64, source: FieldId, kind: &WriteKind) -> Op {
     }
 }
 
+// --- compaction snapshot file ------------------------------------------------------------------
+// `[magic "SSNP"][version u8 = 1][covered_seqno u64 LE][fold_len u64 LE][crc32 u32 LE][fold bytes]`
+// The fold bytes are the verbatim fold state (Fold::encode_into — superseded rows, tombstones and
+// order keys included, so as-of reads and LWW tie-breaks survive the boundary).
+
+const SNAP_MAGIC: &[u8; 4] = b"SSNP";
+
+/// Encode a compaction snapshot covering everything below `upto`.
+pub fn encode_snapshot(fold: &Fold, upto: u64) -> Vec<u8> {
+    let mut fold_bytes = Vec::new();
+    fold.encode_into(&mut fold_bytes);
+    let mut out = Vec::with_capacity(fold_bytes.len() + 25);
+    out.extend_from_slice(SNAP_MAGIC);
+    out.push(1);
+    out.extend_from_slice(&upto.to_le_bytes());
+    out.extend_from_slice(&(fold_bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(&wal::checksum(&fold_bytes).to_le_bytes());
+    out.extend_from_slice(&fold_bytes);
+    out
+}
+
+/// Decode a compaction snapshot → `(covered_seqno, fold)`. `None` on any malformation — magic,
+/// version, length, checksum, or fold decode.
+pub fn decode_snapshot(bytes: &[u8]) -> Option<(u64, Fold)> {
+    if bytes.len() < 25 || &bytes[..4] != SNAP_MAGIC || bytes[4] != 1 {
+        return None;
+    }
+    let upto = u64::from_le_bytes(bytes[5..13].try_into().ok()?);
+    let len = u64::from_le_bytes(bytes[13..21].try_into().ok()?) as usize;
+    let crc = u32::from_le_bytes(bytes[21..25].try_into().ok()?);
+    let fold_bytes = bytes.get(25..)?;
+    if fold_bytes.len() != len || wal::checksum(fold_bytes) != crc {
+        return None;
+    }
+    Some((upto, Fold::decode(fold_bytes)?))
+}
+
+/// Read the compaction snapshot next to `wal_path`, if any. A missing file is a normal state
+/// (never compacted → `None`); a PRESENT but malformed one is an error — the WAL prefix it covered
+/// is gone, so guessing would silently drop history.
+pub fn read_snapshot(wal_path: &Path) -> io::Result<Option<(u64, Fold)>> {
+    let snap = Changelog::snapshot_path(wal_path);
+    let bytes = match std::fs::read(&snap) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    decode_snapshot(&bytes).map(Some).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("corrupt compaction snapshot at {}", snap.display()),
+        )
+    })
+}
+
 impl Changelog {
     /// `max_unmaterialized` bounds the in-flight (appended but not-yet-materialized) backlog.
     /// Pure in-memory mode (no durability) — see [`Changelog::open`] for the durable variant.
     pub fn new(max_unmaterialized: usize) -> Self {
         Changelog {
             records: Vec::new(),
+            base: 0,
             materialized: 0,
             max_unmaterialized,
             wal: None,
+            path: None,
             durable_upto: 0,
         }
     }
@@ -228,7 +289,7 @@ impl Changelog {
     /// an empty database.
     pub fn open(path: impl AsRef<Path>, max_unmaterialized: usize) -> io::Result<Self> {
         let path = path.as_ref();
-        let recovered = wal::recover(path)?;
+        let (base, recovered) = wal::recover(path)?;
         let records: Vec<Record> = recovered
             .into_iter()
             .map(|(source, kind)| Record { source, kind })
@@ -237,11 +298,87 @@ impl Changelog {
         let wal = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Changelog {
             records,
+            base,
             materialized: n as u64,
             max_unmaterialized,
             wal: Some(wal),
+            path: Some(path.to_path_buf()),
             durable_upto: n,
         })
+    }
+
+    /// Seqno of the first record still in this log — `0` until a compaction truncates a prefix.
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// The sibling path a compaction snapshot lives at (`<wal>.snap`).
+    pub fn snapshot_path(wal_path: &Path) -> PathBuf {
+        let mut p = wal_path.as_os_str().to_owned();
+        p.push(".snap");
+        PathBuf::from(p)
+    }
+
+    /// Snapshot + truncate: persist `snapshot_bytes` (the encoded fold + the seqno it covers,
+    /// built by the engine) as `<wal>.snap`, archive the covered WAL as `<wal>.archive-<S>`, and
+    /// start a fresh WAL whose first frame names `S` — so seqnos stay continuous and any crash
+    /// window self-reconciles on open (a committed snapshot next to a not-yet-truncated WAL just
+    /// replays from `S`, skipping the stale prefix by seqno). Caller contract: every record is
+    /// already materialized AND durable (the engine drains + syncs first). Returns `S`.
+    pub fn compact_to(&mut self, snapshot_bytes: &[u8]) -> io::Result<u64> {
+        let Some(path) = self.path.clone() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "in-memory changelog has no WAL to compact",
+            ));
+        };
+        if self.durable_upto < self.records.len()
+            || (self.materialized as usize) < self.records.len()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "compact requires a fully materialized, fully synced log",
+            ));
+        }
+        let upto = self.head();
+
+        // 1. commit the snapshot: tmp + fsync + atomic rename — after this instant the log prefix
+        //    is redundant even if the truncation below never happens (open replays from `upto`).
+        let snap = Self::snapshot_path(&path);
+        let tmp = {
+            let mut p = snap.as_os_str().to_owned();
+            p.push(".tmp");
+            PathBuf::from(p)
+        };
+        {
+            let mut f = File::create(&tmp)?;
+            f.write_all(snapshot_bytes)?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &snap)?;
+
+        // 2. truncate: archive the covered WAL, start a fresh one whose first frame names `upto`.
+        self.wal = None; // close the handle before the rename
+        let archive = {
+            let mut p = path.as_os_str().to_owned();
+            p.push(format!(".archive-{upto}"));
+            PathBuf::from(p)
+        };
+        std::fs::rename(&path, &archive)?;
+        let mut buf = Vec::new();
+        wal::frame_wal_start(&mut buf, upto);
+        let mut f = OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)?;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+        self.wal = Some(f);
+        self.records.clear();
+        self.base = upto;
+        self.materialized = 0;
+        self.durable_upto = 0;
+        Ok(upto)
     }
 
     /// Make every appended record durable: frame the `[durable_upto, head)` tail and `fsync` it
@@ -265,7 +402,10 @@ impl Changelog {
     /// Seqno up to which records are guaranteed durable (fsynced). Equals [`Changelog::head`] right
     /// after a successful [`Changelog::sync`]; `0` in in-memory mode.
     pub fn durable_head(&self) -> u64 {
-        self.durable_upto as u64
+        if self.wal.is_none() {
+            return 0;
+        }
+        self.base + self.durable_upto as u64
     }
 
     /// Append a write; returns its assigned `seqno`, or [`Backpressure`] if the backlog is full.
@@ -277,7 +417,7 @@ impl Changelog {
                 limit: self.max_unmaterialized,
             });
         }
-        let seqno = self.records.len() as u64;
+        let seqno = self.base + self.records.len() as u64;
         self.records.push(Record { source, kind });
         Ok(seqno)
     }
@@ -297,16 +437,16 @@ impl Changelog {
         }
         let mut seqnos = Vec::with_capacity(writes.len());
         for (source, kind) in writes {
-            let seqno = self.records.len() as u64;
+            let seqno = self.base + self.records.len() as u64;
             self.records.push(Record { source, kind });
             seqnos.push(seqno);
         }
         Ok(seqnos)
     }
 
-    /// Next seqno that will be assigned (== current length).
+    /// Next seqno that will be assigned (`base +` current length).
     pub fn head(&self) -> u64 {
-        self.records.len() as u64
+        self.base + self.records.len() as u64
     }
 
     /// Records appended but not yet materialized by a derived store.
@@ -316,7 +456,8 @@ impl Changelog {
 
     /// Advance the materialized watermark (a derived store reports its progress, relieving backpressure).
     pub fn mark_materialized(&mut self, up_to: u64) {
-        self.materialized = up_to.min(self.records.len() as u64).max(self.materialized);
+        let rel = up_to.saturating_sub(self.base);
+        self.materialized = rel.min(self.records.len() as u64).max(self.materialized);
     }
 
     /// Deterministically rebuild state by folding the whole log in seqno order.
@@ -351,9 +492,9 @@ impl Changelog {
     ) {
         let mut keys = std::collections::BTreeSet::new();
         let mut nodes = std::collections::BTreeSet::new();
-        let start = (from as usize).min(self.records.len());
+        let start = (from.saturating_sub(self.base) as usize).min(self.records.len());
         for (offset, r) in self.records[start..].iter().enumerate() {
-            let seqno = (start + offset) as u64;
+            let seqno = self.base + (start + offset) as u64;
             let op = record_to_op(seqno, r.source, &r.kind);
             match op.node_attr_node() {
                 Some(node) => {

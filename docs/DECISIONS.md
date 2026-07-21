@@ -124,6 +124,31 @@
   each); per-element as-of unit tests in `stroma-core/src/query.rs`; WAL old-frame decode test; ingest
   end-to-end (grant → close → re-grant across a reopen) in `crates/stroma-db/tests/db.rs`.
 
+### D24. Compaction = fold snapshot + WAL truncate; explicit, history-preserving, crash-window-free
+- **Context:** the changelog grows without bound and cold-start replay scales with total history —
+  measured near-linear at ~0.29s RTO / ~44 MB WAL per million records (`examples/changelog_growth`),
+  crossing the <10s SLO at ~35M records. fold+observe is ~80% of that RTO; frame decode ~20%.
+- **Decision:** an explicit compaction (`Engine::compact` / `Db::compact` / serve `POST /compact` —
+  an admin action like reset, no automatic trigger yet) persists the FOLD state verbatim as
+  `wal.log.snap` — every version row with its original order key, tombstones, hard-delete floors —
+  archives the covered WAL (`wal.log.archive-<S>`, uncompressed v1) and starts a fresh WAL whose
+  first frame names `S`, so seqnos stay globally continuous. Superseded rows are retained by design:
+  as-of reads are part of the read contract, so the snapshot bounds *replay work*, not history.
+  Crash windows self-reconcile without multi-file atomicity: the snapshot commit is one atomic
+  rename, and open replays only WAL records at/after the snapshot's seqno — a committed snapshot
+  next to a not-yet-truncated WAL just skips the stale prefix.
+- **Why:** the fold is the one structure that already holds everything the read contract needs;
+  serializing it verbatim (rather than re-emitting synthetic writes) preserves LWW/as-of tie-breaks
+  exactly, because order keys travel with the rows. `gc()` runs first — it provably preserves
+  observation, so the snapshot never carries rows no read could see.
+- **Limits:** with as-of retention the snapshot still grows with history — compaction shrinks the
+  constant (sequential load vs replay-apply), not the asymptote; bounding by LIVE state needs a
+  history-horizon/archive policy (future). Archive compression not yet.
+- **Evidence:** `crates/stroma-core/tests/compaction.rs` — a compacted engine is asserted
+  observationally identical to a never-compacted twin (current + as-of reads across the boundary,
+  seqno continuity) across reopen, including the crash-window and double-compaction cases; P6
+  proptest: the fold codec round-trips losslessly and canonically (2000 cases).
+
 ## Read path
 
 ### D6. Read-merge: materialized base ∪ bounded tail

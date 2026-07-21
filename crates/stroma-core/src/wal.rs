@@ -24,7 +24,7 @@ use std::path::Path;
 /// corrupt length field triggering a huge allocation). No legitimate single write approaches this.
 const MAX_RECORD_LEN: usize = 16 * 1024 * 1024;
 
-fn checksum(bytes: &[u8]) -> u32 {
+pub(crate) fn checksum(bytes: &[u8]) -> u32 {
     let mut h: u32 = 0x811c_9dc5;
     for &b in bytes {
         h ^= b as u32;
@@ -35,21 +35,21 @@ fn checksum(bytes: &[u8]) -> u32 {
 
 // --- encode ---
 
-fn put_u32(buf: &mut Vec<u8>, v: u32) {
+pub(crate) fn put_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_le_bytes());
 }
-fn put_u64(buf: &mut Vec<u8>, v: u64) {
+pub(crate) fn put_u64(buf: &mut Vec<u8>, v: u64) {
     buf.extend_from_slice(&v.to_le_bytes());
 }
-fn put_i64(buf: &mut Vec<u8>, v: i64) {
+pub(crate) fn put_i64(buf: &mut Vec<u8>, v: i64) {
     buf.extend_from_slice(&v.to_le_bytes());
 }
-fn put_str(buf: &mut Vec<u8>, s: &str) {
+pub(crate) fn put_str(buf: &mut Vec<u8>, s: &str) {
     put_u32(buf, s.len() as u32);
     buf.extend_from_slice(s.as_bytes());
 }
 
-fn put_objkey(buf: &mut Vec<u8>, o: &ObjKey) {
+pub(crate) fn put_objkey(buf: &mut Vec<u8>, o: &ObjKey) {
     match o {
         ObjKey::Node(n) => {
             buf.push(0);
@@ -74,7 +74,7 @@ fn put_objkey(buf: &mut Vec<u8>, o: &ObjKey) {
     }
 }
 
-fn put_orderkey(buf: &mut Vec<u8>, ok: &OrderKey) {
+pub(crate) fn put_orderkey(buf: &mut Vec<u8>, ok: &OrderKey) {
     put_u64(buf, ok.tx);
     put_u32(buf, ok.source);
     put_u64(buf, ok.seq);
@@ -201,6 +201,33 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
     }
 }
 
+// A WAL-start frame: file-level metadata, not a write. Written as the FIRST frame of a WAL created
+// by compaction, it names the seqno of the file's first record — recovery offsets every following
+// record by it, so a snapshot-truncated log keeps globally continuous seqnos. Payload:
+// [u32 source=0][tag 255][u64 first_seqno]. A pre-compaction WAL simply has no such frame and
+// recovers with first_seqno = 0 (backward compatible).
+const WAL_START_TAG: u8 = 255;
+
+/// Append the WAL-start frame naming the file's first record seqno.
+pub(crate) fn frame_wal_start(buf: &mut Vec<u8>, first_seqno: u64) {
+    let header = buf.len();
+    buf.extend_from_slice(&[0u8; 8]);
+    let payload_start = buf.len();
+    put_u32(buf, 0);
+    buf.push(WAL_START_TAG);
+    put_u64(buf, first_seqno);
+    finish_frame(buf, header, payload_start);
+}
+
+fn decode_wal_start(payload: &[u8]) -> Option<u64> {
+    let mut r = Reader { b: payload, pos: 0 };
+    if r.u32()? != 0 || r.u8()? != WAL_START_TAG {
+        return None;
+    }
+    let first = r.u64()?;
+    (r.pos == payload.len()).then_some(first)
+}
+
 /// Append one framed record (`[len][crc][payload]`) to `buf`. The framing header is backfilled after
 /// the payload is encoded in place, so no scratch allocation is needed.
 pub(crate) fn frame_record(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
@@ -208,6 +235,11 @@ pub(crate) fn frame_record(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind)
     buf.extend_from_slice(&[0u8; 8]); // placeholder for [len][crc]
     let payload_start = buf.len();
     encode_payload(buf, source, kind);
+    finish_frame(buf, header, payload_start);
+}
+
+/// Backfill a frame's `[len][crc]` header once its payload is in place.
+fn finish_frame(buf: &mut [u8], header: usize, payload_start: usize) {
     let len = (buf.len() - payload_start) as u32;
     let crc = checksum(&buf[payload_start..]);
     buf[header..header + 4].copy_from_slice(&len.to_le_bytes());
@@ -216,39 +248,45 @@ pub(crate) fn frame_record(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind)
 
 // --- decode ---
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     b: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+    pub(crate) fn new(b: &'a [u8]) -> Self {
+        Reader { b, pos: 0 }
+    }
+    pub(crate) fn done(&self) -> bool {
+        self.pos == self.b.len()
+    }
+    pub(crate) fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let end = self.pos.checked_add(n)?;
         let slice = self.b.get(self.pos..end)?;
         self.pos = end;
         Some(slice)
     }
-    fn u8(&mut self) -> Option<u8> {
+    pub(crate) fn u8(&mut self) -> Option<u8> {
         self.take(1).map(|s| s[0])
     }
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         self.take(4)
             .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
     }
-    fn u64(&mut self) -> Option<u64> {
+    pub(crate) fn u64(&mut self) -> Option<u64> {
         self.take(8)
             .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
     }
-    fn i64(&mut self) -> Option<i64> {
+    pub(crate) fn i64(&mut self) -> Option<i64> {
         self.take(8)
             .map(|s| i64::from_le_bytes(s.try_into().unwrap()))
     }
-    fn string(&mut self) -> Option<String> {
+    pub(crate) fn string(&mut self) -> Option<String> {
         let len = self.u32()? as usize;
         let bytes = self.take(len)?;
         String::from_utf8(bytes.to_vec()).ok()
     }
-    fn objkey(&mut self) -> Option<ObjKey> {
+    pub(crate) fn objkey(&mut self) -> Option<ObjKey> {
         Some(match self.u8()? {
             0 => ObjKey::Node(self.u64()?),
             1 => ObjKey::Int(self.i64()?),
@@ -258,19 +296,19 @@ impl<'a> Reader<'a> {
             _ => return None,
         })
     }
-    fn orderkey(&mut self) -> Option<OrderKey> {
+    pub(crate) fn orderkey(&mut self) -> Option<OrderKey> {
         Some(OrderKey {
             tx: self.u64()?,
             source: self.u32()?,
             seq: self.u64()?,
         })
     }
-    fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.b.len().saturating_sub(self.pos)
     }
     /// Trailing optional i64 (`[0]` = None, `[1][i64]` = Some). A record written before this field
     /// existed simply has no trailing bytes, so an empty tail decodes to `None` (backward compatible).
-    fn opt_i64_tail(&mut self) -> Option<Option<i64>> {
+    pub(crate) fn opt_i64_tail(&mut self) -> Option<Option<i64>> {
         if self.remaining() == 0 {
             return Some(None);
         }
@@ -282,7 +320,7 @@ impl<'a> Reader<'a> {
     }
     /// Trailing valid-time pair `[valid_from i64][opt valid_to]`. A record written before these
     /// fields existed has no trailing bytes and decodes to `(0, None)` (backward compatible).
-    fn valid_time_tail(&mut self) -> Option<(i64, Option<i64>)> {
+    pub(crate) fn valid_time_tail(&mut self) -> Option<(i64, Option<i64>)> {
         if self.remaining() == 0 {
             return Some((0, None));
         }
@@ -408,16 +446,20 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
     Some((source, kind))
 }
 
-/// Replay the WAL at `path` into an ordered list of records. Stops at the first torn/corrupt frame
-/// (short read, bad checksum, or undecodable payload), dropping only that tail — a committed prefix is
-/// always recovered intact. A missing file recovers as empty (fresh database).
-pub fn recover(path: &Path) -> io::Result<Vec<(FieldId, WriteKind)>> {
+/// Replay the WAL at `path` into `(first_seqno, records)`: the seqno of the file's first record
+/// (from the WAL-start frame a compaction writes; `0` for a pre-compaction file without one) and
+/// the ordered records. Stops at the first torn/corrupt frame (short read, bad checksum, or
+/// undecodable payload), dropping only that tail — a committed prefix is always recovered intact.
+/// A missing file recovers as empty (fresh database).
+pub fn recover(path: &Path) -> io::Result<(u64, Vec<(FieldId, WriteKind)>)> {
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((0, Vec::new())),
         Err(e) => return Err(e),
     };
     let mut r = BufReader::new(file);
+    let mut first_seqno = 0u64;
+    let mut first_frame = true;
     let mut out = Vec::new();
     loop {
         let mut header = [0u8; 8];
@@ -440,12 +482,20 @@ pub fn recover(path: &Path) -> io::Result<Vec<(FieldId, WriteKind)>> {
         if checksum(&payload) != crc {
             break; // torn/corrupt tail
         }
+        // only the physical first frame may carry the file's start seqno
+        if first_frame {
+            first_frame = false;
+            if let Some(s) = decode_wal_start(&payload) {
+                first_seqno = s;
+                continue;
+            }
+        }
         match decode_record(&payload) {
             Some(rec) => out.push(rec),
             None => break, // undecodable ⇒ treat as torn tail
         }
     }
-    Ok(out)
+    Ok((first_seqno, out))
 }
 
 #[cfg(test)]

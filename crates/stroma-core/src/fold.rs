@@ -15,6 +15,7 @@ use std::sync::Arc;
 use crate::catalog::{Cardinality, Catalog};
 use crate::fact::{Fact, FieldId, NodeId, Object, Value};
 use crate::hash::FxHashMap;
+use crate::wal;
 
 /// Orderable, hashable object identity (the value/edge target an op refers to). `Float` keeps the
 /// raw bits so it has a total order (no NaN ambiguity in the fold).
@@ -721,6 +722,236 @@ impl Fold {
                 labels.insert(node, label);
             }
         }
+    }
+}
+
+// --- compaction codec --------------------------------------------------------------------------
+// The fold serialized VERBATIM — every version row with its ORIGINAL order key, the observed-remove
+// tombstones, and the hard-delete floors — so a decoded fold observes identically AND keeps every
+// LWW / as-of tie-break. This is what a compaction snapshot persists: superseded rows included
+// (as-of reads are part of the read contract); only what `gc()` already provably drops is gone
+// (the compaction path runs gc first). Deterministic bytes: BTreeMap iteration order throughout.
+
+fn put_opt_i64(buf: &mut Vec<u8>, v: Option<i64>) {
+    match v {
+        Some(t) => {
+            buf.push(1);
+            wal::put_i64(buf, t);
+        }
+        None => buf.push(0),
+    }
+}
+
+fn put_opt_ok(buf: &mut Vec<u8>, ok: Option<OrderKey>) {
+    match ok {
+        Some(k) => {
+            buf.push(1);
+            wal::put_orderkey(buf, &k);
+        }
+        None => buf.push(0),
+    }
+}
+
+fn read_opt_i64(r: &mut wal::Reader) -> Option<Option<i64>> {
+    match r.u8()? {
+        0 => Some(None),
+        1 => Some(Some(r.i64()?)),
+        _ => None,
+    }
+}
+
+fn read_opt_ok(r: &mut wal::Reader) -> Option<Option<OrderKey>> {
+    match r.u8()? {
+        0 => Some(None),
+        1 => Some(Some(r.orderkey()?)),
+        _ => None,
+    }
+}
+
+impl Fold {
+    /// Serialize this fold into `buf` — see the codec note above.
+    pub fn encode_into(&self, buf: &mut Vec<u8>) {
+        wal::put_u32(buf, self.keys.len() as u32);
+        for ((node, field), st) in &self.keys {
+            wal::put_u64(buf, *node);
+            wal::put_u32(buf, *field);
+            match st {
+                KeyState::One(s) => {
+                    buf.push(0);
+                    put_opt_ok(buf, s.hd);
+                    wal::put_u32(buf, s.versions.len() as u32);
+                    for (ok, v) in &s.versions {
+                        wal::put_orderkey(buf, ok);
+                        match &v.object {
+                            Some(o) => {
+                                buf.push(1);
+                                wal::put_objkey(buf, o);
+                            }
+                            None => buf.push(0),
+                        }
+                        wal::put_i64(buf, v.valid_from);
+                        put_opt_i64(buf, v.valid_to);
+                    }
+                }
+                KeyState::Many(s) => {
+                    buf.push(1);
+                    put_opt_ok(buf, s.hd);
+                    wal::put_u32(buf, s.elems.len() as u32);
+                    for (obj, rows) in &s.elems {
+                        wal::put_objkey(buf, obj);
+                        wal::put_u32(buf, rows.len() as u32);
+                        for (ok, v) in rows {
+                            wal::put_orderkey(buf, ok);
+                            // an add row's object IS the element — one flag reconstructs it exactly
+                            buf.push(v.object.is_some() as u8);
+                            wal::put_i64(buf, v.valid_from);
+                            put_opt_i64(buf, v.valid_to);
+                        }
+                    }
+                    wal::put_u32(buf, s.removes.len() as u32);
+                    for t in &s.removes {
+                        wal::put_orderkey(buf, t);
+                    }
+                }
+            }
+        }
+        wal::put_u32(buf, self.edge_props.len() as u32);
+        for ((node, field), objs) in &self.edge_props {
+            wal::put_u64(buf, *node);
+            wal::put_u32(buf, *field);
+            wal::put_u32(buf, objs.len() as u32);
+            for (obj, props) in objs {
+                wal::put_objkey(buf, obj);
+                wal::put_u32(buf, props.len() as u32);
+                for (key, reg) in props {
+                    wal::put_str(buf, key);
+                    wal::put_objkey(buf, &reg.value);
+                    wal::put_orderkey(buf, &reg.ok);
+                }
+            }
+        }
+        wal::put_u32(buf, self.node_attrs.len() as u32);
+        for (node, st) in &self.node_attrs {
+            wal::put_u64(buf, *node);
+            match st.ty {
+                Some((ok, ty)) => {
+                    buf.push(1);
+                    wal::put_orderkey(buf, &ok);
+                    wal::put_u32(buf, ty);
+                }
+                None => buf.push(0),
+            }
+            match st.label {
+                Some((ok, label)) => {
+                    buf.push(1);
+                    wal::put_orderkey(buf, &ok);
+                    buf.push(label);
+                }
+                None => buf.push(0),
+            }
+        }
+    }
+
+    /// Decode a fold serialized by [`Fold::encode_into`]. `None` on a malformed buffer (a caller
+    /// treats that like a torn WAL tail — refuse the snapshot, never guess).
+    pub fn decode(bytes: &[u8]) -> Option<Fold> {
+        let mut r = wal::Reader::new(bytes);
+        let mut f = Fold::default();
+        for _ in 0..r.u32()? {
+            let node = r.u64()?;
+            let field = r.u32()?;
+            let st = match r.u8()? {
+                0 => {
+                    let hd = read_opt_ok(&mut r)?;
+                    let mut versions = BTreeMap::new();
+                    for _ in 0..r.u32()? {
+                        let ok = r.orderkey()?;
+                        let object = match r.u8()? {
+                            0 => None,
+                            1 => Some(r.objkey()?),
+                            _ => return None,
+                        };
+                        let valid_from = r.i64()?;
+                        let valid_to = read_opt_i64(&mut r)?;
+                        versions.insert(
+                            ok,
+                            Version {
+                                object,
+                                valid_from,
+                                valid_to,
+                            },
+                        );
+                    }
+                    KeyState::One(OneState { versions, hd })
+                }
+                1 => {
+                    let hd = read_opt_ok(&mut r)?;
+                    let mut elems = BTreeMap::new();
+                    for _ in 0..r.u32()? {
+                        let obj = r.objkey()?;
+                        let mut rows = BTreeMap::new();
+                        for _ in 0..r.u32()? {
+                            let ok = r.orderkey()?;
+                            let is_add = match r.u8()? {
+                                0 => false,
+                                1 => true,
+                                _ => return None,
+                            };
+                            let valid_from = r.i64()?;
+                            let valid_to = read_opt_i64(&mut r)?;
+                            rows.insert(
+                                ok,
+                                Version {
+                                    object: is_add.then(|| obj.clone()),
+                                    valid_from,
+                                    valid_to,
+                                },
+                            );
+                        }
+                        elems.insert(obj, rows);
+                    }
+                    let mut removes = BTreeSet::new();
+                    for _ in 0..r.u32()? {
+                        removes.insert(r.orderkey()?);
+                    }
+                    KeyState::Many(ManyState { elems, removes, hd })
+                }
+                _ => return None,
+            };
+            f.keys.insert((node, field), st);
+        }
+        for _ in 0..r.u32()? {
+            let node = r.u64()?;
+            let field = r.u32()?;
+            let mut objs = BTreeMap::new();
+            for _ in 0..r.u32()? {
+                let obj = r.objkey()?;
+                let mut props = BTreeMap::new();
+                for _ in 0..r.u32()? {
+                    let key = r.string()?;
+                    let value = r.objkey()?;
+                    let ok = r.orderkey()?;
+                    props.insert(key, PropReg { value, ok });
+                }
+                objs.insert(obj, props);
+            }
+            f.edge_props.insert((node, field), objs);
+        }
+        for _ in 0..r.u32()? {
+            let node = r.u64()?;
+            let ty = match r.u8()? {
+                0 => None,
+                1 => Some((r.orderkey()?, r.u32()?)),
+                _ => return None,
+            };
+            let label = match r.u8()? {
+                0 => None,
+                1 => Some((r.orderkey()?, r.u8()?)),
+                _ => return None,
+            };
+            f.node_attrs.insert(node, NodeAttrState { ty, label });
+        }
+        r.done().then_some(f)
     }
 }
 
