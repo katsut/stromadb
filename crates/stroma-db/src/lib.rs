@@ -178,6 +178,8 @@ struct WriteState {
     emb: Arc<Vec<f32>>,
     dim: usize,
     index: Arc<Option<IvfPq>>,
+    /// Whether the last index build retrained the quantizers (vs reusing them) — /stats observability.
+    index_retrained: bool,
     n_max: usize,
 }
 
@@ -269,6 +271,7 @@ impl Db {
             emb: Arc::new(emb),
             dim,
             index: Arc::new(None),
+            index_retrained: false,
             n_max,
         };
         w.rebuild_index();
@@ -336,6 +339,7 @@ impl Db {
         w.emb = Arc::new(Vec::new());
         w.dim = 0;
         w.index = Arc::new(None);
+        w.index_retrained = false;
         self.publish(&w);
         Ok(())
     }
@@ -470,6 +474,19 @@ impl Db {
             "labels": labels,
             "sources": sources,
             "embeddings": { "count": w.emb_ids.len(), "dim": w.dim },
+            // Quantizer fit (drift observability): live/trained assignment error and whether the
+            // last rebuild had to retrain. A drift_ratio creeping past ~1.5 is the "recall is
+            // silently degrading" signal this block exists to surface.
+            "index": w.index.as_ref().as_ref().map(|i| {
+                let f = i.fit();
+                json!({
+                    "nlist": i.nlist(),
+                    "trained_fit": f.trained,
+                    "live_fit": f.live,
+                    "drift_ratio": f.ratio,
+                    "retrained_last_build": w.index_retrained,
+                })
+            }),
             "storage": { "wal_bytes": wal_bytes, "embeddings_bytes": w.emb.len() * 4 },
         })
     }
@@ -485,24 +502,27 @@ impl WriteState {
         writeln!(f, "{line}").map_err(|e| format!("write {file}: {e}"))
     }
 
+    /// Rebuild the vector index over the current embeddings — reuse-or-retrain. The trained
+    /// quantizers are kept (skipping k-means, the dominant build cost) while they still describe the
+    /// corpus; a full retrain happens only when the fit ratio crosses [`INDEX_DRIFT_RATIO_MAX`] or
+    /// the corpus outgrows the trained `nlist` by ≥2× (the cell-imbalance driver). Runs under the
+    /// write lock; the fresh index reaches readers via the usual atomic view publish, and either
+    /// path carries the identical posting set (nodes/seqnos/labels), so watermark semantics are
+    /// unaffected by which one ran.
     fn rebuild_index(&mut self) {
         if self.emb_ids.is_empty() || self.dim == 0 {
             self.index = Arc::new(None);
+            self.index_retrained = false;
             return;
         }
-        let vecs: Vec<Vec<f32>> = (0..self.emb_ids.len())
+        let n = self.emb_ids.len();
+        let vecs: Vec<Vec<f32>> = (0..n)
             .map(|i| self.emb[i * self.dim..(i + 1) * self.dim].to_vec())
             .collect();
-        let mut idx = IvfPq::new(
-            self.dim,
-            IvfPq::suggested_nlist(vecs.len()),
-            pick_m(self.dim),
-        );
-        idx.train(&vecs[..vecs.len().min(20_000)]);
-        idx.add_batch(
+        let items = |vecs: &[Vec<f32>]| -> Vec<(u64, u64, Vec<f32>, u32)> {
             self.emb_ids
                 .iter()
-                .zip(&vecs)
+                .zip(vecs)
                 .enumerate()
                 .map(|(i, (&id, v))| {
                     (
@@ -512,9 +532,34 @@ impl WriteState {
                         self.node_label_w.get(&id).copied().unwrap_or(0) as u32,
                     )
                 })
-                .collect(),
-        );
+                .collect()
+        };
+        // Reuse path: re-add everything against the existing quantizers, then let the fit ratio —
+        // accumulated over exactly the vectors just added — judge whether they still fit.
+        let reused: Option<IvfPq> = match self.index.as_ref().as_ref() {
+            Some(old) if old.dim() == self.dim && IvfPq::suggested_nlist(n) < old.nlist() * 2 => {
+                Some(old.fresh_like())
+            }
+            _ => None,
+        };
+        if let Some(mut idx) = reused {
+            idx.add_batch(items(&vecs));
+            if idx.fit().ratio <= INDEX_DRIFT_RATIO_MAX {
+                self.index = Arc::new(Some(idx));
+                self.index_retrained = false;
+                return;
+            }
+            // drifted — fall through and pay for k-means on the actual corpus
+        }
+        // Retrain path: a deterministic stride sample spanning the WHOLE corpus. A prefix sample
+        // (`vecs[..20_000]`) would lock the quantizers to the oldest distribution forever.
+        let cap = INDEX_TRAIN_SAMPLE.min(n);
+        let sample: Vec<Vec<f32>> = (0..cap).map(|i| vecs[i * n / cap].clone()).collect();
+        let mut idx = IvfPq::new(self.dim, IvfPq::suggested_nlist(n), pick_m(self.dim));
+        idx.train(&sample);
+        idx.add_batch(items(&vecs));
         self.index = Arc::new(Some(idx));
+        self.index_retrained = true;
     }
 
     /// Snapshot the current write state into an immutable read view.
@@ -1800,6 +1845,13 @@ impl ReadState {
 
 /// Default un-merged backlog bound — the read-merge tail length before backpressure.
 pub const DEFAULT_N_MAX: usize = 8_000_000;
+
+/// Vectors sampled (deterministic stride over the whole corpus) when training the index quantizers.
+const INDEX_TRAIN_SAMPLE: usize = 20_000;
+
+/// Fit-ratio ceiling for reusing trained quantizers on rebuild: at or below it the quantizers still
+/// describe the corpus and k-means is skipped; above it the rebuild retrains on a fresh sample.
+const INDEX_DRIFT_RATIO_MAX: f32 = 1.5;
 
 fn pick_m(dim: usize) -> usize {
     for m in (1..=96.min(dim)).rev() {
