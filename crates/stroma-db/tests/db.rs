@@ -1610,3 +1610,79 @@ fn compact_preserves_reads_across_reopen_and_reset_clears_the_snapshot() {
     assert!(err.contains("unknown predicate"), "unexpected: {err}");
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn index_rebuild_reuses_quantizers_until_drift_or_growth() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_drift_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+
+    // deterministic dim-4 vectors clustered around `off`
+    let batch = |ids: std::ops::Range<u64>, off: f32| -> String {
+        ids.map(|i| {
+            format!(
+                "{{\"node\":{},\"vector\":[{},{},{},{}]}}\n",
+                i,
+                off + (i % 7) as f32 * 0.05,
+                off + (i % 11) as f32 * 0.03,
+                off - (i % 5) as f32 * 0.04,
+                off
+            )
+        })
+        .collect()
+    };
+
+    // no embeddings yet → no index block
+    assert_eq!(db.stats()["index"], json!(null));
+
+    // first build has nothing to reuse → retrains, and fit is healthy by construction
+    db.embed_str(&batch(0..300, 0.0)).unwrap();
+    let s = db.stats();
+    assert_eq!(s["index"]["retrained_last_build"], json!(true));
+    assert!(s["index"]["drift_ratio"].as_f64().unwrap() < 1.5);
+
+    // same distribution again → quantizers still fit, rebuild reuses them (no k-means)
+    db.embed_str(&batch(300..600, 0.0)).unwrap();
+    let s = db.stats();
+    assert_eq!(s["index"]["retrained_last_build"], json!(false));
+    assert!(s["index"]["drift_ratio"].as_f64().unwrap() < 1.5);
+
+    // a far-away cluster floods in → fit ratio blows past the ceiling → rebuild retrains,
+    // and the fresh quantizers (trained on a stride sample of the WHOLE corpus) fit again
+    db.embed_str(&batch(600..1200, 50.0)).unwrap();
+    let s = db.stats();
+    assert_eq!(s["index"]["retrained_last_build"], json!(true));
+    assert!(s["index"]["drift_ratio"].as_f64().unwrap() < 1.5);
+
+    // same mixture but 4×+ the corpus → suggested nlist outgrows the trained one ≥2× → retrain
+    // even though the distribution itself did not move (the cell-imbalance driver)
+    let mixed: String = (1200..5200u64)
+        .map(|i| {
+            let off = if i % 2 == 0 { 0.0 } else { 50.0 };
+            format!(
+                "{{\"node\":{},\"vector\":[{},{},{},{}]}}\n",
+                i,
+                off + (i % 7) as f32 * 0.05,
+                off + (i % 11) as f32 * 0.03,
+                off - (i % 5) as f32 * 0.04,
+                off
+            )
+        })
+        .collect();
+    db.embed_str(&mixed).unwrap();
+    let s = db.stats();
+    assert_eq!(s["index"]["retrained_last_build"], json!(true));
+    assert!(s["index"]["drift_ratio"].as_f64().unwrap() < 1.5);
+    assert_eq!(s["embeddings"]["count"], json!(5200));
+
+    // reopen rebuilds from persisted embeddings — the index block survives the restart
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+    let s = db.stats();
+    assert!(s["index"]["nlist"].as_u64().unwrap() >= 200);
+    assert!(s["index"]["drift_ratio"].as_f64().unwrap() < 1.5);
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}

@@ -228,6 +228,25 @@
   fully-cold SSD re-rank at R=256 adds several ms (`examples/ann_ssd_p99.rs`) — mitigations (OPQ to shrink
   R, a warm re-rank buffer) are tracked as roadmap.
 
+### D25. Quantizer fit is tracked; rebuild reuses quantizers until drift or growth
+- **Context:** the quantizers (coarse cells + PQ codebooks) are fitted once, to a sample. The store's
+  rebuild used to retrain on the *oldest 20K prefix* every embed batch — quantizers locked to the earliest
+  distribution — and the coarse-assignment distance computed on every add was thrown away, so recall decay
+  from distribution shift was invisible.
+- **Decision:** `train` records the mean coarse-assignment sqdist over its sample (the baseline); every
+  `add` accumulates the same number for the live corpus; `fit()` reports baseline/live/ratio. The store's
+  rebuild is **reuse-or-retrain**: reuse the trained quantizers (`fresh_like`, skips k-means — the dominant
+  build cost) while the fit ratio stays ≤ 1.5 and `suggested_nlist(n)` has not outgrown the trained `nlist`
+  ≥ 2×; otherwise retrain on a deterministic **stride sample spanning the whole corpus**. `/stats` exposes
+  the fit numbers and whether the last build retrained.
+- **Why:** makes silent recall decay observable and turns retraining into an explicit, threshold-gated
+  event; steady-state rebuilds skip their dominant cost. Either rebuild path carries the identical posting
+  set (nodes/seqnos/labels), so watermark/strict read semantics do not depend on which one ran.
+- **Known limits:** fit measures coarse-assignment error only (PQ codebook misfit is correlated but not
+  separately tracked); the ratio is a corpus mean, so a large well-fitting old corpus can dilute a small
+  drifted stream below the threshold; when drift does trip, the reuse attempt pays one extra add pass
+  before the retrain (k-means still dominates, so the retry is cheap by comparison).
+
 ## Query IR, Live Query, build
 
 ### D15. Composable operator IR — authz at the head, bounded result, single algebra
