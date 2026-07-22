@@ -168,6 +168,117 @@ fn watermark_scopes_indexed_prefix() {
 }
 
 #[test]
+fn fit_tracks_distribution_drift() {
+    let dim = 32;
+    let ctr = centers(50, dim, 21);
+    let mut idx = IvfPq::new(dim, 64, 8);
+    idx.train(&clustered(3000, 100, &ctr, dim));
+    // fresh index, no adds: no evidence of drift
+    assert!((idx.fit().ratio - 1.0).abs() < 1e-6);
+    // same distribution → ratio stays near 1 (out-of-sample, so slightly above)
+    for (i, v) in clustered(2000, 200, &ctr, dim).iter().enumerate() {
+        idx.add(i as NodeId, i as u64, v, 0);
+    }
+    let same = idx.fit();
+    assert_eq!(same.adds, 2000);
+    assert!(
+        same.ratio < 1.3,
+        "same-distribution ratio must stay ~1 (got {})",
+        same.ratio
+    );
+    // shifted distribution → ratio blows past any reasonable threshold
+    let far: Vec<Vec<f32>> = ctr
+        .iter()
+        .map(|c| c.iter().map(|x| x + 8.0).collect())
+        .collect();
+    let mut drifted = idx.fresh_like();
+    for (i, v) in clustered(2000, 300, &far, dim).iter().enumerate() {
+        drifted.add(i as NodeId, i as u64, v, 0);
+    }
+    assert!(
+        drifted.fit().ratio > 2.0,
+        "shifted-distribution ratio must rise (got {})",
+        drifted.fit().ratio
+    );
+}
+
+#[test]
+fn fresh_like_reuses_quantizers_and_matches_search() {
+    let dim = 32;
+    let ctr = centers(80, dim, 9);
+    let data = clustered(2000, 3, &ctr, dim);
+    let mut a = IvfPq::new(dim, 32, 8);
+    a.train(&data);
+    let mut b = a.fresh_like();
+    for (i, v) in data.iter().enumerate() {
+        a.add(i as NodeId, i as u64, v, (i % 3) as u32);
+    }
+    b.add_batch(
+        data.iter()
+            .enumerate()
+            .map(|(i, v)| (i as NodeId, i as u64, v.clone(), (i % 3) as u32))
+            .collect(),
+    );
+    // same quantizers + same content → identical cells, codes, and results
+    let q = &data[7];
+    assert_eq!(
+        a.search_rerank(q, 10, 8, 100, None, |_| true, |_| true),
+        b.search_rerank(q, 10, 8, 100, None, |_| true, |_| true)
+    );
+    assert_eq!(a.len(), b.len());
+    assert!((a.fit().ratio - b.fit().ratio).abs() < 1e-6);
+}
+
+#[test]
+fn retraining_on_the_shifted_corpus_restores_recall() {
+    // Quantizers trained on distribution A while the corpus is entirely B (= A shifted): PQ-only
+    // recall degrades because cells concentrate and codebooks cover the wrong range. Retraining on
+    // the actual corpus restores it — the payoff the fit ratio is there to trigger.
+    let dim = 32;
+    let ctr_a = centers(60, dim, 13);
+    let ctr_b: Vec<Vec<f32>> = ctr_a
+        .iter()
+        .map(|c| c.iter().map(|x| x + 6.0).collect())
+        .collect();
+    let corpus = clustered(4000, 2, &ctr_b, dim);
+    let queries = clustered(30, 5, &ctr_b, dim);
+    let k = 10;
+
+    let mut misfit = IvfPq::new(dim, 64, 8);
+    misfit.train(&clustered(3000, 1, &ctr_a, dim));
+    let mut retrained = IvfPq::new(dim, 64, 8);
+    retrained.train(&corpus);
+    for (i, v) in corpus.iter().enumerate() {
+        misfit.add(i as NodeId, i as u64, v, 0);
+        retrained.add(i as NodeId, i as u64, v, 0);
+    }
+    assert!(
+        misfit.fit().ratio > 2.0,
+        "misfit must be visible in the ratio"
+    );
+    assert!(retrained.fit().ratio < 1.3, "retrained fit must be healthy");
+
+    let recall = |idx: &IvfPq| {
+        let mut r = 0.0;
+        for q in &queries {
+            let truth = exact_topk(&corpus, q, k);
+            let got: BTreeSet<NodeId> = idx
+                .search(q, k, 4, None, |_| true, |_| true)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+            r += got.intersection(&truth).count() as f64 / k as f64;
+        }
+        r / queries.len() as f64
+    };
+    let (bad, good) = (recall(&misfit), recall(&retrained));
+    assert!(
+        good - bad >= 0.1,
+        "retraining must materially beat the misfit index (misfit={bad}, retrained={good})"
+    );
+}
+
+#[test]
 fn complete_tail_covers_unprobed_cells() {
     let dim = 32;
     let ctr = centers(100, dim, 4);

@@ -24,12 +24,16 @@
 //! - **recall completeness** (H2): [`IvfPq::search_complete`] merges the probed result with a bounded
 //!   brute-force over matching postings in *unprobed* cells (`ANN(probed) ∪ brute-force(unprobed)`).
 //!
-//! Module layout: `build` (training + ingestion) and `search` (ADC scoring + probe paths).
+//! Module layout: `build` (training + ingestion), `search` (ADC scoring + probe paths), and `drift`
+//! (quantizer-fit tracking — the trained/live fit numbers behind drift-triggered retraining).
 
 mod build;
+mod drift;
 mod search;
 #[cfg(test)]
 mod tests;
+
+pub use drift::FitReport;
 
 use crate::fact::NodeId;
 use std::collections::HashMap;
@@ -72,6 +76,9 @@ pub struct IvfPq {
     raw: Vec<f32>,               // cold tier: raw vectors, flat (ntotal × dim), for exact re-rank
     row_of: HashMap<NodeId, u32>,
     ntotal: usize,
+    trained_fit: f32, // mean coarse-assignment sqdist over the training sample (drift baseline)
+    live_fit_sum: f64, // Σ coarse-assignment sqdist over every add since train
+    live_fit_n: u64,  // adds since train
 }
 
 impl IvfPq {
@@ -99,6 +106,9 @@ impl IvfPq {
             raw: Vec::new(),
             row_of: HashMap::new(),
             ntotal: 0,
+            trained_fit: 0.0,
+            live_fit_sum: 0.0,
+            live_fit_n: 0,
         }
     }
 

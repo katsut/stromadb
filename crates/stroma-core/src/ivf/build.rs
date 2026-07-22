@@ -130,6 +130,15 @@ impl IvfPq {
             self.super_members = members;
         }
 
+        // Fit baseline: the mean coarse-assignment distance over the training sample. Every later
+        // add accumulates the same number for the live corpus; the ratio is the drift observable.
+        let coarse = &self.coarse;
+        let dists = par_map(&refs, |&p| nearest_centroid(p, coarse).1);
+        self.trained_fit =
+            (dists.iter().map(|&d| d as f64).sum::<f64>() / dists.len() as f64) as f32;
+        self.live_fit_sum = 0.0;
+        self.live_fit_n = 0;
+
         // PQ codebooks are trained on RAW sub-vectors (non-residual). Because re-rank restores exact
         // recall, PQ only has to rank candidates, so we trade a little candidate precision for a huge
         // query-time win: the ADC table becomes cell-independent (computed once per query, not per
@@ -179,7 +188,9 @@ impl IvfPq {
     pub fn add(&mut self, node: NodeId, seqno: u64, embedding: &[f32], label: u32) {
         assert_eq!(embedding.len(), self.dim, "embedding dimension mismatch");
         assert!(!self.coarse.is_empty(), "index not trained");
-        let (cell, _) = nearest_centroid(embedding, &self.coarse);
+        let (cell, dist) = nearest_centroid(embedding, &self.coarse);
+        self.live_fit_sum += dist as f64;
+        self.live_fit_n += 1;
         let code = self.encode(embedding);
         self.lists[cell].push(node, seqno, label, &code);
         self.row_of.insert(node, (self.raw.len() / self.dim) as u32);
@@ -192,15 +203,17 @@ impl IvfPq {
     /// for each item in order. Panics on dimension mismatch or if the index is untrained.
     pub fn add_batch(&mut self, items: Vec<(NodeId, u64, Vec<f32>, u32)>) {
         assert!(!self.coarse.is_empty(), "index not trained");
-        let computed: Vec<(usize, Vec<u8>)> = {
+        let computed: Vec<(usize, f32, Vec<u8>)> = {
             let this = &*self; // immutable borrow for the parallel phase
             par_map(&items, |(_, _, emb, _)| {
                 assert_eq!(emb.len(), this.dim, "embedding dimension mismatch");
-                let (cell, _) = nearest_centroid(emb, &this.coarse);
-                (cell, this.encode(emb))
+                let (cell, dist) = nearest_centroid(emb, &this.coarse);
+                (cell, dist, this.encode(emb))
             })
         };
-        for ((node, seqno, emb, label), (cell, code)) in items.into_iter().zip(computed) {
+        for ((node, seqno, emb, label), (cell, dist, code)) in items.into_iter().zip(computed) {
+            self.live_fit_sum += dist as f64;
+            self.live_fit_n += 1;
             self.lists[cell].push(node, seqno, label, &code);
             self.row_of.insert(node, (self.raw.len() / self.dim) as u32);
             self.raw.extend_from_slice(&emb);
