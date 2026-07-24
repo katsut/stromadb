@@ -4,15 +4,17 @@
 //! ([`point_one`], [`point_one_asof`]) — there is no new inference and no reasoner. For every
 //! subject of a given type the evaluator:
 //!   1. checks an optional **scope** condition (out-of-scope subjects are `NOT_APPLICABLE`);
-//!   2. walks a **required** derived path — a chain of one-cardinality hops, left→right, the last of
-//!      which may be read *as-of* a valid-time anchor — to derive the required value;
+//!   2. walks the declared derived paths — chains of one-cardinality hops, left→right, whose last
+//!      hop may be read *as-of* a valid-time anchor: **required** derives the value the actual must
+//!      equal, **distinct_from** the value it must NOT equal (a rule declares either or both);
 //!   3. reads the **actual** value and compares.
 //!
 //! The whole composition is a pure function of the snapshot, so the same snapshot always yields the
 //! same verdicts (sorted by subject id for stable output).
 //!
-//! The rule is a JSON declaration; a first cut supports one derived path plus an actual predicate and
-//! equality comparison:
+//! The rule is a JSON declaration — one equality path and/or one must-differ path plus an actual
+//! predicate; condition values take the ingest object forms (`{"node": N}`, `{"int": …}`, or a bare
+//! string for text):
 //!
 //! ```json
 //! {
@@ -20,6 +22,7 @@
 //!   "scope":     { "predicate": "issue-type", "equals": "release" },
 //!   "required":  { "hops": [ {"predicate":"assigned-to"}, {"predicate":"member-of"},
 //!                            {"predicate":"manager-of","as_of":"approved-at"} ] },
+//!   "distinct_from": { "hops": [ {"predicate":"assigned-to"} ] },
 //!   "actual":    "approved-by",
 //!   "absent_when": { "predicate": "status", "equals": "released" }
 //! }
@@ -50,12 +53,16 @@ pub struct Hop {
 }
 
 /// A declared conformance rule. Predicate/type references are names, resolved against the
-/// [`Catalog`] at evaluation time.
+/// [`Catalog`] at evaluation time. `required` derives the value the actual must equal;
+/// `distinct_from` derives the value it must NOT equal (a self-approval ban is
+/// `distinct_from: [assigned-to]`). Either may be empty, not both — an empty path declares no
+/// expectation on its side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     pub subject_type: String,
     pub scope: Option<Cond>,
     pub required: Vec<Hop>,
+    pub distinct_from: Vec<Hop>,
     pub actual: String,
     pub absent_when: Option<Cond>,
 }
@@ -101,8 +108,9 @@ impl MismatchKind {
     }
 }
 
-/// A per-subject verdict. `required`/`actual` are the derived and observed values (node-valued in the
-/// first cut); `as_of` is the valid-time instant the as-of hop was read at, if the path used one.
+/// A per-subject verdict. `required`/`distinct`/`actual` are the derived and observed values
+/// (node-valued in the first cut); `as_of` is the valid-time instant an as-of hop was read at, if a
+/// path used one (the required path's anchor wins when both do).
 /// `mismatch_kind` is `Some` only when `verdict == Mismatch`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
@@ -110,6 +118,7 @@ pub struct Verdict {
     pub verdict: Outcome,
     pub mismatch_kind: Option<MismatchKind>,
     pub required: Option<ObjKey>,
+    pub distinct: Option<ObjKey>,
     pub actual: Option<ObjKey>,
     pub as_of: Option<i64>,
 }
@@ -124,7 +133,7 @@ pub fn unresolved_names(rule: &Rule, cat: &Catalog) -> Vec<String> {
     if let Some(a) = &rule.absent_when {
         names.push(&a.predicate);
     }
-    for h in &rule.required {
+    for h in rule.required.iter().chain(&rule.distinct_from) {
         names.push(&h.predicate);
         if let Some(anchor) = &h.as_of {
             names.push(anchor);
@@ -173,31 +182,30 @@ fn visible(snap: &Snapshot, node: NodeId, allowed_labels: u32) -> bool {
         .is_none_or(|&l| (allowed_labels >> l) & 1 == 1)
 }
 
-/// The verdict for a single subject `s`.
-fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
-    // scope: out-of-scope subjects are not judged.
-    if let Some(scope) = &rule.scope
-        && !cond_holds(snap, cat, s, scope)
-    {
-        return Verdict {
-            subject: s,
-            verdict: Outcome::NotApplicable,
-            mismatch_kind: None,
-            required: None,
-            actual: None,
+/// What a derived-path walk produced: the terminal node (if the path resolved), the anchor instant
+/// an as-of hop read at, and the (node, predicate) of the LAST hop when it was an as-of read — the
+/// site to history-probe for a stale-vs-wrong mismatch (`None` if the final hop was timeless).
+struct Walk {
+    end: Option<NodeId>,
+    as_of: Option<i64>,
+    final_asof_hop: Option<(NodeId, FieldId)>,
+}
+
+/// Walk a derived path of one-cardinality hops left→right from `s`. A hop with an as-of anchor
+/// reads the valid-time value of that hop at the anchor's integer value on the ORIGINAL subject
+/// `s`. An empty path derives nothing (no expectation), same as a broken one.
+fn walk(snap: &Snapshot, cat: &Catalog, s: NodeId, hops: &[Hop]) -> Walk {
+    if hops.is_empty() {
+        return Walk {
+            end: None,
             as_of: None,
+            final_asof_hop: None,
         };
     }
-
-    // required = the derived path walked left→right from S; a hop with an as-of anchor reads the
-    // valid-time value of that hop at the anchor's integer value on the ORIGINAL subject S.
-    // `final_asof_hop` remembers the (node, predicate) of the LAST hop when it was an as-of read —
-    // the site to history-probe for a stale-vs-wrong mismatch. It is `None` if the final hop was
-    // timeless (a mismatch there is always `Wrong`).
     let mut cur = Some(s);
     let mut as_of: Option<i64> = None;
     let mut final_asof_hop: Option<(NodeId, FieldId)> = None;
-    for hop in &rule.required {
+    for hop in hops {
         let Some(node) = cur else { break };
         let pid = cat.field_id(&hop.predicate);
         final_asof_hop = None;
@@ -214,14 +222,45 @@ fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
             }
         };
     }
-    let required = cur.map(ObjKey::Node);
+    Walk {
+        end: cur,
+        as_of,
+        final_asof_hop,
+    }
+}
+
+/// The verdict for a single subject `s`.
+fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
+    // scope: out-of-scope subjects are not judged.
+    if let Some(scope) = &rule.scope
+        && !cond_holds(snap, cat, s, scope)
+    {
+        return Verdict {
+            subject: s,
+            verdict: Outcome::NotApplicable,
+            mismatch_kind: None,
+            required: None,
+            distinct: None,
+            actual: None,
+            as_of: None,
+        };
+    }
+
+    // The two derived paths: `required` = the value the actual must equal, `distinct_from` = the
+    // value it must NOT equal. When both carry an as-of anchor, the required path's instant is the
+    // one reported.
+    let req = walk(snap, cat, s, &rule.required);
+    let dis = walk(snap, cat, s, &rule.distinct_from);
+    let required = req.end.map(ObjKey::Node);
+    let distinct = dis.end.map(ObjKey::Node);
+    let as_of = req.as_of.or(dis.as_of);
 
     // actual = the observed value on S.
     let actual = cat
         .field_id(&rule.actual)
         .and_then(|p| point_one(snap, s, p));
 
-    let outcome = match &actual {
+    let (outcome, mismatch_kind) = match &actual {
         // absent: no actual value. If an absence condition is declared and holds, it is a gap;
         // otherwise it is not (yet) expected, so OK.
         None => {
@@ -230,35 +269,39 @@ fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
                 .as_ref()
                 .is_some_and(|c| cond_holds(snap, cat, s, c))
             {
-                Outcome::Absent
+                (Outcome::Absent, None)
             } else {
-                Outcome::Ok
+                (Outcome::Ok, None)
             }
         }
-        // present: match iff it equals the required value (a broken/underived path never matches).
+        // present: an equality expectation must match (a broken/underived path never matches), and
+        // a must-differ expectation must not collide (an underived path can never collide).
         Some(a) => {
-            if required.as_ref() == Some(a) {
-                Outcome::Ok
+            if !rule.required.is_empty() && required.as_ref() != Some(a) {
+                // classify: stale if the actual value once satisfied the final as-of hop at an
+                // earlier valid-time, otherwise wrong.
+                let kind = match (req.final_asof_hop, a) {
+                    (Some((node, p)), ObjKey::Node(an)) if ever_held(snap, node, p, *an) => {
+                        MismatchKind::Stale
+                    }
+                    _ => MismatchKind::Wrong,
+                };
+                (Outcome::Mismatch, Some(kind))
+            } else if distinct.as_ref() == Some(a) {
+                // a must-differ collision holds *now* — there is nothing stale about it.
+                (Outcome::Mismatch, Some(MismatchKind::Wrong))
             } else {
-                Outcome::Mismatch
+                (Outcome::Ok, None)
             }
         }
     };
-
-    // classify a mismatch: stale if the actual value once satisfied the final as-of hop at an earlier
-    // valid-time, otherwise wrong.
-    let mismatch_kind = (outcome == Outcome::Mismatch).then(|| match (final_asof_hop, &actual) {
-        (Some((node, p)), Some(ObjKey::Node(a))) if ever_held(snap, node, p, *a) => {
-            MismatchKind::Stale
-        }
-        _ => MismatchKind::Wrong,
-    });
 
     Verdict {
         subject: s,
         verdict: outcome,
         mismatch_kind,
         required,
+        distinct,
         actual,
         as_of,
     }
@@ -364,6 +407,7 @@ mod tests {
                     as_of: Some("approved-at".into()),
                 },
             ],
+            distinct_from: Vec::new(),
             actual: "approved-by".into(),
             absent_when: Some(Cond {
                 predicate: "status".into(),
@@ -569,5 +613,142 @@ mod tests {
             vec!["does-not-exist".to_string()]
         );
         assert!(unresolved_names(&rule(), &f.cat).is_empty());
+        // distinct_from names are checked too.
+        let mut r = rule();
+        r.distinct_from = vec![Hop {
+            predicate: "also-missing".into(),
+            as_of: None,
+        }];
+        assert_eq!(
+            unresolved_names(&r, &f.cat),
+            vec!["also-missing".to_string()]
+        );
+    }
+
+    // A flat workspace with no org chart: person 11 assigned to issues 1/2 (1 self-approved,
+    // 2 peer-approved by 12), issue 3 done with no approval at all.
+    fn flat_fixture() -> Fixture {
+        let mut cat = Catalog::new();
+        let issue = cat.register_type("Issue");
+        let person = cat.register_type("Person");
+        let d = RelProps::default();
+        let assigned_to = cat.register_predicate(
+            "assigned-to",
+            Cardinality::One,
+            d,
+            issue,
+            Range::Type(person),
+        );
+        let approved_by = cat.register_predicate(
+            "approved-by",
+            Cardinality::One,
+            d,
+            issue,
+            Range::Type(person),
+        );
+        let status = cat.register_predicate(
+            "status",
+            Cardinality::One,
+            d,
+            issue,
+            Range::Value(ValueType::Text),
+        );
+        let mut ops: Vec<Op> = Vec::new();
+        let mut seq = 0u64;
+        set_type(&mut ops, &mut seq, 11, person);
+        set_type(&mut ops, &mut seq, 12, person);
+        for id in 1..=3u64 {
+            set_type(&mut ops, &mut seq, id, issue);
+        }
+        set_one(&mut ops, &mut seq, 1, assigned_to, ObjKey::Node(11), 0);
+        set_one(&mut ops, &mut seq, 1, approved_by, ObjKey::Node(11), 0);
+        set_one(&mut ops, &mut seq, 1, status, text("done"), 0);
+        set_one(&mut ops, &mut seq, 2, assigned_to, ObjKey::Node(11), 0);
+        set_one(&mut ops, &mut seq, 2, approved_by, ObjKey::Node(12), 0);
+        set_one(&mut ops, &mut seq, 2, status, text("done"), 0);
+        set_one(&mut ops, &mut seq, 3, assigned_to, ObjKey::Node(12), 0);
+        set_one(&mut ops, &mut seq, 3, status, text("done"), 0);
+        Fixture {
+            snap: fold(&ops).observe(),
+            cat,
+        }
+    }
+
+    #[test]
+    fn distinct_from_bans_self_approval() {
+        let f = flat_fixture();
+        // no equality expectation at all — the only declaration is "approved by someone OTHER
+        // than the assignee".
+        let r = Rule {
+            subject_type: "Issue".into(),
+            scope: None,
+            required: Vec::new(),
+            distinct_from: vec![Hop {
+                predicate: "assigned-to".into(),
+                as_of: None,
+            }],
+            actual: "approved-by".into(),
+            absent_when: Some(Cond {
+                predicate: "status".into(),
+                equals: text("done"),
+            }),
+        };
+        let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        // 1 = self-approved → the must-differ collision; nothing stale about a value that holds now.
+        assert_eq!(by[&1].verdict, Outcome::Mismatch);
+        assert_eq!(by[&1].mismatch_kind, Some(MismatchKind::Wrong));
+        assert_eq!(by[&1].distinct, Some(ObjKey::Node(11)));
+        assert_eq!(by[&1].required, None); // no equality expectation was declared
+        // 2 = peer-approved → fine; 3 = done with no approval → the absence gap still fires.
+        assert_eq!(by[&2].verdict, Outcome::Ok);
+        assert_eq!(by[&3].verdict, Outcome::Absent);
+    }
+
+    #[test]
+    fn required_and_distinct_compose() {
+        let f = flat_fixture();
+        // a deliberately contradictory rule — actual must equal AND differ from the assignee — to
+        // pin the precedence: the equality side is judged first, then the must-differ side.
+        let r = Rule {
+            subject_type: "Issue".into(),
+            scope: None,
+            required: vec![Hop {
+                predicate: "assigned-to".into(),
+                as_of: None,
+            }],
+            distinct_from: vec![Hop {
+                predicate: "assigned-to".into(),
+                as_of: None,
+            }],
+            actual: "approved-by".into(),
+            absent_when: None,
+        };
+        let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        // 1: equality holds (self-approved), so the must-differ collision is the violation.
+        assert_eq!(by[&1].verdict, Outcome::Mismatch);
+        assert_eq!(by[&1].mismatch_kind, Some(MismatchKind::Wrong));
+        assert_eq!(by[&1].required, Some(ObjKey::Node(11)));
+        assert_eq!(by[&1].distinct, Some(ObjKey::Node(11)));
+        // 2: the equality side fails first (approver 12 ≠ assignee 11).
+        assert_eq!(by[&2].verdict, Outcome::Mismatch);
+        assert_eq!(by[&2].mismatch_kind, Some(MismatchKind::Wrong));
+    }
+
+    #[test]
+    fn node_valued_scope_conditions() {
+        let f = fixture();
+        // scope on a node-valued predicate: only issues assigned to 201 are judged.
+        let mut r = rule();
+        r.scope = Some(Cond {
+            predicate: "assigned-to".into(),
+            equals: ObjKey::Node(201),
+        });
+        let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        assert_eq!(by[&1].verdict, Outcome::Ok);
+        assert_eq!(by[&5].verdict, Outcome::NotApplicable);
+        assert_eq!(by[&6].verdict, Outcome::NotApplicable);
     }
 }

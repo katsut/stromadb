@@ -293,3 +293,101 @@ fn conformance_by_stored_rule_name() {
 
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+// The two rule-expressiveness extensions end-to-end through the JSON boundary: a node-valued scope
+// (`equals: {"node": N}` — the documented object form) and `distinct_from` (a must-differ derived
+// path, e.g. a self-approval ban), including the stored `rule_def` replay of the new field.
+#[test]
+fn node_scope_and_distinct_from_via_json() {
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "stroma_conformance_distinct_test_{}",
+            std::process::id()
+        ))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(FIXTURE).unwrap();
+    // one extra issue: a Beacon release its own assignee approved (the self-approval violation).
+    db.ingest_str(concat!(
+        "{\"node\":{\"id\":1009,\"type\":\"Issue\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1009,\"predicate\":\"in-project\",\"object\":{\"node\":302}}}\n",
+        "{\"fact\":{\"subject\":1009,\"predicate\":\"assigned-to\",\"object\":{\"node\":202}}}\n",
+        "{\"fact\":{\"subject\":1009,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+        "{\"fact\":{\"subject\":1009,\"predicate\":\"approved-by\",\"object\":{\"node\":202},\"valid_from\":2400}}\n",
+        "{\"fact\":{\"subject\":1009,\"predicate\":\"approved-at\",\"object\":{\"int\":2400}}}\n",
+        "{\"fact\":{\"subject\":1009,\"predicate\":\"status\",\"object\":{\"text\":\"released\"},\"valid_from\":2500}}\n",
+    ))
+    .unwrap();
+
+    // node-valued scope: only Beacon (project 302) issues are judged; everything else is out.
+    let scoped = json!({ "op": "conformance", "rule": {
+        "subject_type": "Issue",
+        "scope":     { "predicate": "in-project", "equals": { "node": 302 } },
+        "required":  { "hops": [
+            { "predicate": "assigned-to" },
+            { "predicate": "member-of" },
+            { "predicate": "manager-of", "as_of": "approved-at" }
+        ] },
+        "actual":      "approved-by",
+        "absent_when": { "predicate": "status", "equals": "released" }
+    }});
+    let got = verdict_map(&db.query(&scoped).unwrap());
+    assert_eq!(got[&1002], "OK"); // approved by Beacon's manager
+    assert_eq!(got[&1004], "MISMATCH"); // approved by a non-manager
+    assert_eq!(got[&1009], "MISMATCH"); // approved by the assignee (not the manager)
+    for out_of_scope in [1001u64, 1003, 1005, 1006, 1007, 1008] {
+        assert_eq!(got[&out_of_scope], "NOT_APPLICABLE", "issue {out_of_scope}");
+    }
+
+    // distinct_from without required: the only declaration is "not approved by the assignee".
+    let ban = json!({
+        "subject_type": "Issue",
+        "distinct_from": { "hops": [ { "predicate": "assigned-to" } ] },
+        "actual":        "approved-by",
+        "absent_when":   { "predicate": "status", "equals": "released" }
+    });
+    let r = db
+        .query(&json!({ "op": "conformance", "rule": ban }))
+        .unwrap();
+    let got = verdict_map(&r);
+    assert_eq!(got[&1009], "MISMATCH"); // the self-approval
+    for fine in [1001u64, 1002, 1004, 1005, 1007, 1008] {
+        assert_eq!(got[&fine], "OK", "issue {fine}"); // approved, by someone else
+    }
+    assert_eq!(got[&1003], "ABSENT"); // released with no approval still gaps
+    let v1009 = r["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["subject"] == 1009)
+        .unwrap();
+    assert_eq!(v1009["kind"], json!("wrong")); // a collision that holds now is never stale
+    assert_eq!(v1009["distinct"], json!({ "node": 202 }));
+    assert_eq!(v1009["required"], json!(null)); // no equality expectation was declared
+
+    // the new field survives the stored-rule path: declare by rule_def, reopen, evaluate by name.
+    let rule_def = json!({ "rule_def": { "name": "self-approval-ban", "rule": ban } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+    drop(db); // release the directory lock
+    let db = Db::open(&dir).unwrap();
+    let named = verdict_map(
+        &db.query(&json!({ "op": "conformance", "rule_name": "self-approval-ban" }))
+            .unwrap(),
+    );
+    assert_eq!(named, got);
+
+    // a rule declaring neither path is rejected with a clear error.
+    let err = db
+        .query(&json!({ "op": "conformance", "rule": {
+            "subject_type": "Issue", "actual": "approved-by"
+        }}))
+        .unwrap_err();
+    assert!(
+        err.contains("required") && err.contains("distinct_from"),
+        "unexpected error: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
