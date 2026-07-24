@@ -242,10 +242,15 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
 
 - `required.hops` is a path of `one`-predicates walked from each subject to derive an expected value;
   a hop may be read **as-of** a valid-time anchor named by the `as_of` predicate on the subject.
+- `distinct_from.hops` (optional) derives a value the actual must **differ** from — e.g. a
+  self-approval ban is `{"hops": [{"predicate": "assigned-to"}]}`. A rule declares `required`,
+  `distinct_from`, or both; each verdict carries the resolved `distinct` value when declared.
 - The derived value is compared to the subject's `actual` predicate:
-  - `OK` — present and equal.
-  - `MISMATCH` — present but unequal; `kind` sub-classifies via valid-time history as `stale` (was
-    once correct) or `wrong` (never correct).
+  - `OK` — present, equal to the `required` value (when declared), and different from the
+    `distinct_from` value (when declared).
+  - `MISMATCH` — present but unequal to `required`, or colliding with `distinct_from`; `kind`
+    sub-classifies an equality mismatch via valid-time history as `stale` (was once correct) or
+    `wrong` (never correct) — a must-differ collision holds *now*, so it is always `wrong`.
   - `ABSENT` — `actual` is missing where `absent_when` says it should exist.
   - `NOT_APPLICABLE` — the subject falls outside `scope`.
 

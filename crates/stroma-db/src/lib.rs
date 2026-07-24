@@ -1681,7 +1681,7 @@ impl ReadState {
     /// catalog (unknown names are a clear error), then [`conformance::evaluate`] composes the existing
     /// read primitives into `OK | ABSENT | MISMATCH | NOT_APPLICABLE` verdicts, authz-scoped by
     /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`. Returns
-    /// `{ "verdicts": [ { subject, verdict, kind, required, actual, as_of }, .. ] }`.
+    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of }, .. ] }`.
     fn conformance(&self, req: &Value) -> DbResult<Value> {
         let rule = if let Some(name) = req["rule_name"].as_str() {
             self.schema
@@ -1716,6 +1716,7 @@ impl ReadState {
                     "verdict": v.verdict.as_str(),
                     "kind": v.mismatch_kind.map(|k| k.as_str()),
                     "required": v.required.map(fmt_obj),
+                    "distinct": v.distinct.map(fmt_obj),
                     "actual": v.actual.map(fmt_obj),
                     "as_of": v.as_of,
                 })
@@ -2066,7 +2067,8 @@ fn value_key(v: &Value) -> DbResult<ObjKey> {
 }
 
 /// Parse a conformance rule from its JSON declaration into the name-based [`conformance::Rule`]
-/// (names are resolved to field ids later, at evaluation, via the catalog).
+/// (names are resolved to field ids later, at evaluation, via the catalog). `required` and
+/// `distinct_from` are each optional derived paths; a rule must declare at least one of them.
 fn parse_conformance_rule(v: &Value) -> DbResult<conformance::Rule> {
     let subject_type = v["subject_type"]
         .as_str()
@@ -2076,28 +2078,45 @@ fn parse_conformance_rule(v: &Value) -> DbResult<conformance::Rule> {
         .as_str()
         .ok_or("rule.actual missing")?
         .to_string();
-    let hops_v = v["required"]["hops"]
-        .as_array()
-        .ok_or("rule.required.hops missing")?;
-    let mut required = Vec::with_capacity(hops_v.len());
-    for h in hops_v {
-        let predicate = h["predicate"]
-            .as_str()
-            .ok_or("rule.required hop predicate missing")?
-            .to_string();
-        let as_of = h.get("as_of").and_then(|a| a.as_str()).map(str::to_string);
-        required.push(conformance::Hop { predicate, as_of });
+    let required = parse_conformance_hops(&v["required"], "required")?;
+    let distinct_from = parse_conformance_hops(&v["distinct_from"], "distinct_from")?;
+    if required.is_empty() && distinct_from.is_empty() {
+        return Err("rule must declare required.hops and/or distinct_from.hops".into());
     }
     Ok(conformance::Rule {
         subject_type,
         scope: parse_conformance_cond(&v["scope"])?,
         required,
+        distinct_from,
         actual,
         absent_when: parse_conformance_cond(&v["absent_when"])?,
     })
 }
 
-/// Parse an optional `{ "predicate": name, "equals": scalar }` condition (absent/null → `None`).
+/// Parse an optional derived path `{ "hops": [ { "predicate": name, "as_of"?: anchor }, .. ] }`
+/// (absent/null → empty, no expectation on that side).
+fn parse_conformance_hops(v: &Value, what: &str) -> DbResult<Vec<conformance::Hop>> {
+    if v.is_null() {
+        return Ok(Vec::new());
+    }
+    let hops_v = v["hops"]
+        .as_array()
+        .ok_or(format!("rule.{what}.hops missing"))?;
+    let mut hops = Vec::with_capacity(hops_v.len());
+    for h in hops_v {
+        let predicate = h["predicate"]
+            .as_str()
+            .ok_or(format!("rule.{what} hop predicate missing"))?
+            .to_string();
+        let as_of = h.get("as_of").and_then(|a| a.as_str()).map(str::to_string);
+        hops.push(conformance::Hop { predicate, as_of });
+    }
+    Ok(hops)
+}
+
+/// Parse an optional `{ "predicate": name, "equals": value }` condition (absent/null → `None`).
+/// `equals` takes either the ingest object form (`{"node": N}` / `{"int": …}` / `{"text": …}` /
+/// `{"bool": …}` — the documented shape, required for node-valued conditions) or a bare scalar.
 fn parse_conformance_cond(v: &Value) -> DbResult<Option<conformance::Cond>> {
     if v.is_null() {
         return Ok(None);
@@ -2106,7 +2125,11 @@ fn parse_conformance_cond(v: &Value) -> DbResult<Option<conformance::Cond>> {
         .as_str()
         .ok_or("conformance condition predicate missing")?
         .to_string();
-    let equals = value_key(&v["equals"])?;
+    let equals = if v["equals"].is_object() {
+        obj_key(&v["equals"])?
+    } else {
+        value_key(&v["equals"])?
+    };
     Ok(Some(conformance::Cond { predicate, equals }))
 }
 
