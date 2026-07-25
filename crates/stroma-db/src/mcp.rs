@@ -51,6 +51,18 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "timeline",
+            "description": "Answer \"over which intervals / when was\" instead of probing valid_at repeatedly: the full valid-time timeline of a value reached through a chain of one-cardinality predicates walked from a subject (one entry = that predicate's own history). Returns sorted, non-overlapping segments `{value, valid_from, valid_to}` (`valid_to: null` = still in effect); for any instant inside a segment, the equivalent point/valid_at composition returns that segment's value, and instants no segment covers read as absent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": { "type": "integer", "description": "subject node id the hop chain starts from" },
+                    "hops": { "type": "array", "items": { "type": "string" }, "description": "chain of one-cardinality predicate names, walked left to right (e.g. [\"member-of\",\"manager-of\"] = the subject's manager over time)" }
+                },
+                "required": ["subject", "hops"]
+            }
+        },
+        {
             "name": "search",
             "description": "Type-aware hybrid search: k nearest nodes of a type to a query vector, authz-scoped, optionally 1-hop expanded. Returns ids + scores + as_of.",
             "inputSchema": {
@@ -114,7 +126,8 @@ fn tools() -> Value {
 
 fn call_tool(db: &Db, name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "schema" | "point" | "expand" | "search" | "retrieve_context" | "conformance" => {
+        "schema" | "point" | "expand" | "timeline" | "search" | "retrieve_context"
+        | "conformance" => {
             let mut req = args.clone();
             req["op"] = json!(name);
             db.query(&req)
@@ -156,7 +169,7 @@ pub fn handle_message(db: &Db, msg: &Value) -> Option<Value> {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "stroma-mcp", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Use `point` for one-cardinality predicates and `expand` for many-cardinality ones (both accept `valid_at` for an as-of read of the state in effect at that instant). There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`."
+                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Use `point` for one-cardinality predicates and `expand` for many-cardinality ones (both accept `valid_at` for an as-of read of the state in effect at that instant). There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`. For 'over which intervals / when was' questions, call `timeline` with a chain of one-cardinality predicates instead of probing `valid_at` repeatedly."
             }),
         ),
         "ping" => rpc_result(&id, json!({})),

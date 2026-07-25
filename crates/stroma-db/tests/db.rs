@@ -1611,6 +1611,85 @@ fn compact_preserves_reads_across_reopen_and_reset_clears_the_snapshot() {
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
+// The `timeline` op end-to-end: "over which intervals" for a direct predicate and for a derived
+// 2-hop chain, agreeing with the point/valid_at composition, across a reopen.
+#[test]
+fn timeline_op_returns_derived_segments() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_timeline_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // person 1's department changes at 5000; each department's manager is stable
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Department\"}}\n",
+        "{\"pred_def\":{\"name\":\"member-of\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Department\"}}\n",
+        "{\"pred_def\":{\"name\":\"manager-of\",\"cardinality\":\"one\",\"domain\":\"Department\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":10,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":11,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":100,\"type\":\"Department\",\"label\":0}}\n",
+        "{\"node\":{\"id\":200,\"type\":\"Department\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"member-of\",\"object\":{\"node\":100},\"valid_from\":1000}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"member-of\",\"object\":{\"node\":200},\"valid_from\":5000}}\n",
+        "{\"fact\":{\"subject\":100,\"predicate\":\"manager-of\",\"object\":{\"node\":10},\"valid_from\":0}}\n",
+        "{\"fact\":{\"subject\":200,\"predicate\":\"manager-of\",\"object\":{\"node\":11},\"valid_from\":0}}\n",
+    ))
+    .unwrap();
+
+    // reopen so the timeline is served from the replayed valid-time history
+    drop(db); // release the directory lock
+    let db = Db::open(&dir).unwrap();
+
+    // direct predicate: the department stints
+    let r = db
+        .query(&json!({"op":"timeline","subject":1,"hops":["member-of"]}))
+        .unwrap();
+    assert_eq!(
+        r["segments"],
+        json!([
+            {"value": {"node": 100}, "valid_from": 1000, "valid_to": 5000},
+            {"value": {"node": 200}, "valid_from": 5000, "valid_to": null},
+        ])
+    );
+
+    // derived 2-hop: who was 1's manager, when — and it agrees with point/valid_at composition
+    let r = db
+        .query(&json!({"op":"timeline","subject":1,"hops":["member-of","manager-of"]}))
+        .unwrap();
+    assert_eq!(
+        r["segments"],
+        json!([
+            {"value": {"node": 10}, "valid_from": 1000, "valid_to": 5000},
+            {"value": {"node": 11}, "valid_from": 5000, "valid_to": null},
+        ])
+    );
+    let dept_at_2k = db
+        .query(&json!({"op":"point","subject":1,"predicate":"member-of","valid_at":2000}))
+        .unwrap()["one"]
+        .clone();
+    let mgr_at_2k = db.query(
+        &json!({"op":"point","subject":dept_at_2k["node"],"predicate":"manager-of","valid_at":2000}),
+    )
+    .unwrap()["one"]
+        .clone();
+    assert_eq!(mgr_at_2k, json!({"node": 10}));
+
+    // unknown predicate and empty hops are clear errors
+    let err = db
+        .query(&json!({"op":"timeline","subject":1,"hops":["nope"]}))
+        .unwrap_err();
+    assert!(err.contains("nope"), "unexpected: {err}");
+    let err = db
+        .query(&json!({"op":"timeline","subject":1,"hops":[]}))
+        .unwrap_err();
+    assert!(err.contains("hops"), "unexpected: {err}");
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 #[test]
 fn index_rebuild_reuses_quantizers_until_drift_or_growth() {
     let dir = std::env::temp_dir()

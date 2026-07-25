@@ -1093,6 +1093,43 @@ impl ReadState {
                     }
                 })
             }
+            // The "over which intervals" read: the full valid-time timeline of a value reached
+            // through a chain of one-cardinality hops (a single-element chain = one predicate's own
+            // timeline). The interval form of composing `point … valid_at` — for any T inside a
+            // returned segment the point as-of composition returns that segment's value; instants
+            // no segment covers read as absent.
+            "timeline" => {
+                let subject = req["subject"].as_u64().ok_or("timeline.subject missing")?;
+                let hops_v = req["hops"]
+                    .as_array()
+                    .ok_or("timeline.hops must be an array of predicate names")?;
+                if hops_v.is_empty() {
+                    return Err("timeline.hops must not be empty".into());
+                }
+                let mut hops = Vec::with_capacity(hops_v.len());
+                for h in hops_v {
+                    let name = h
+                        .as_str()
+                        .ok_or("timeline.hops entries must be predicate names")?;
+                    hops.push(
+                        self.schema
+                            .cat
+                            .field_id(name)
+                            .ok_or(format!("unknown predicate: {name}"))?,
+                    );
+                }
+                let segments: Vec<Value> = query::derived_timeline(&self.snap, subject, &hops)
+                    .into_iter()
+                    .map(|s| {
+                        json!({
+                            "value": fmt_obj(s.value),
+                            "valid_from": s.valid_from,
+                            "valid_to": s.valid_to,
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "segments": segments }))
+            }
             "search" => {
                 let t = self.run_hybrid(req)?;
                 Ok(
