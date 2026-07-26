@@ -85,7 +85,8 @@ fn mcp_initialize_list_call() {
         names.contains(&"schema")
             && names.contains(&"search")
             && names.contains(&"expand")
-            && names.contains(&"conformance"),
+            && names.contains(&"conformance")
+            && names.contains(&"timeline"),
         "tools: {names:?}"
     );
 

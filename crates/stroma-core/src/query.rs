@@ -68,6 +68,110 @@ pub fn point_one_closed_from(snap: &Snapshot, subject: NodeId, predicate: FieldI
         .and_then(|(_ok, obj, vf, _vt)| obj.is_none().then_some(*vf))
 }
 
+/// One segment of a valid-time timeline: `value` is in effect over `[valid_from, valid_to)`
+/// (`valid_to = None` = still in effect).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Segment {
+    pub value: ObjKey,
+    pub valid_from: i64,
+    pub valid_to: Option<i64>,
+}
+
+/// The full valid-time timeline of a cardinality-One `(subject, predicate)`: the piecewise-constant
+/// answer to "over which intervals did it hold which value" — the interval form of
+/// [`point_one_asof`], with which it agrees at every instant *by construction*: the effective value
+/// can only change at a version row's `valid_from`/`valid_to` boundary, so the timeline probes the
+/// as-of resolution once per boundary and stitches equal neighbours back together. Instants where
+/// nothing is in effect (before the first write, after a close) have no covering segment. Output is
+/// sorted, non-overlapping, and bounded by the number of history rows.
+pub fn point_one_timeline(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Vec<Segment> {
+    let Some(rows) = snap.one_history.get(&(subject, predicate)) else {
+        return Vec::new();
+    };
+    let mut bounds: BTreeSet<i64> = BTreeSet::new();
+    for (_ok, _obj, vf, vt) in rows {
+        bounds.insert(*vf);
+        if let Some(to) = vt {
+            bounds.insert(*to);
+        }
+    }
+    let bounds: Vec<i64> = bounds.into_iter().collect();
+    let mut out: Vec<Segment> = Vec::new();
+    for (i, &from) in bounds.iter().enumerate() {
+        let to = bounds.get(i + 1).copied();
+        let Some(value) = point_one_asof(snap, subject, predicate, from) else {
+            continue;
+        };
+        match out.last_mut() {
+            // the same value continues across this boundary — one segment, not two
+            Some(last) if last.valid_to == Some(from) && last.value == value => {
+                last.valid_to = to;
+            }
+            _ => out.push(Segment {
+                value,
+                valid_from: from,
+                valid_to: to,
+            }),
+        }
+    }
+    out
+}
+
+/// The valid-time timeline of a *derived* value: a chain of cardinality-One hops walked from
+/// `subject` (every intermediate value must be a node), answering "over which intervals did the
+/// composed path resolve to which value". The validity of a derived value is the **intersection of
+/// the contributing rows' intervals**, so each hop intersects the segments so far with the next
+/// predicate's timeline on the node each segment resolved to — the interval form of composing
+/// [`point_one_asof`] per hop, agreeing with it at every instant. A segment whose intermediate
+/// value is not a node contributes nothing (a broken path derives nothing there).
+pub fn derived_timeline(snap: &Snapshot, subject: NodeId, hops: &[FieldId]) -> Vec<Segment> {
+    let Some((&first, rest)) = hops.split_first() else {
+        return Vec::new();
+    };
+    let mut segs = point_one_timeline(snap, subject, first);
+    for &p in rest {
+        // memoized per source node: many segments often resolve to the same few nodes
+        let mut inner: HashMap<NodeId, Vec<Segment>> = HashMap::new();
+        let mut next: Vec<Segment> = Vec::new();
+        for seg in &segs {
+            let ObjKey::Node(n) = &seg.value else {
+                continue;
+            };
+            for is in inner
+                .entry(*n)
+                .or_insert_with(|| point_one_timeline(snap, *n, p))
+                .iter()
+            {
+                let from = seg.valid_from.max(is.valid_from);
+                let to = match (seg.valid_to, is.valid_to) {
+                    (None, x) | (x, None) => x,
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                };
+                if to.is_none_or(|t| from < t) {
+                    next.push(Segment {
+                        value: is.value.clone(),
+                        valid_from: from,
+                        valid_to: to,
+                    });
+                }
+            }
+        }
+        next.sort_by_key(|s| s.valid_from);
+        // re-coalesce: adjacent segments may carry the same value after the intersection
+        let mut merged: Vec<Segment> = Vec::new();
+        for s in next {
+            match merged.last_mut() {
+                Some(last) if last.valid_to == Some(s.valid_from) && last.value == s.value => {
+                    last.valid_to = s.valid_to;
+                }
+                _ => merged.push(s),
+            }
+        }
+        segs = merged;
+    }
+    segs
+}
+
 /// A coarse, deterministic confidence tier for a `point` answer — see [`confidence_signals`].
 /// Deliberately three buckets, not a continuous score: the engine reports only what it can observe
 /// from provenance and valid-time, and leaves calibration to a policy layer.
@@ -1261,5 +1365,216 @@ mod tests {
             expand_rel(&s, &c, 1, linked, 16),
             [1, 2, 3, 4].into_iter().collect()
         );
+    }
+
+    fn set_one_at(s: u64, p: u32, o: u64, vf: i64, seq: u64) -> Op {
+        Op::SetOne {
+            subject: s,
+            predicate: p,
+            object: ObjKey::Node(o),
+            valid_from: vf,
+            valid_to: None,
+            ok: ok(seq),
+        }
+    }
+
+    /// Dense point-probe agreement: at every step in `[lo, hi)`, the segment covering `t` (if any)
+    /// must carry exactly the value the point-wise as-of composition derives at `t`.
+    fn assert_probe_agreement(
+        snap: &Snapshot,
+        subject: u64,
+        hops: &[FieldId],
+        segs: &[Segment],
+        lo: i64,
+        hi: i64,
+        step: i64,
+    ) {
+        let mut t = lo;
+        while t < hi {
+            let mut cur = Some(ObjKey::Node(subject));
+            for &p in hops {
+                cur = match cur {
+                    Some(ObjKey::Node(n)) => point_one_asof(snap, n, p, t),
+                    _ => None,
+                };
+            }
+            let covering = segs
+                .iter()
+                .find(|s| s.valid_from <= t && s.valid_to.is_none_or(|to| t < to))
+                .map(|s| s.value.clone());
+            assert_eq!(covering, cur, "timeline disagrees with as-of at t={t}");
+            t += step;
+        }
+    }
+
+    #[test]
+    fn one_timeline_supersession_close_and_late_correction() {
+        // 10 from 1000, superseded by 11 at 5000, closed at 8000
+        let ops = vec![
+            set_one_at(1, 5, 10, 1000, 0),
+            set_one_at(1, 5, 11, 5000, 1),
+            Op::CloseOne {
+                subject: 1,
+                predicate: 5,
+                valid_from: 8000,
+                ok: ok(2),
+            },
+        ];
+        let s = fold(&ops).observe();
+        let segs = point_one_timeline(&s, 1, 5);
+        assert_eq!(
+            segs,
+            vec![
+                Segment {
+                    value: ObjKey::Node(10),
+                    valid_from: 1000,
+                    valid_to: Some(5000)
+                },
+                Segment {
+                    value: ObjKey::Node(11),
+                    valid_from: 5000,
+                    valid_to: Some(8000)
+                },
+            ]
+        );
+        assert_probe_agreement(&s, 1, &[5], &segs, 0, 10_000, 100);
+
+        // a late-arriving correction (later write, earlier valid_from) re-slices the middle exactly
+        // as it re-answers as-of
+        let mut ops = ops;
+        ops.push(set_one_at(1, 5, 12, 3000, 3));
+        let s = fold(&ops).observe();
+        let segs = point_one_timeline(&s, 1, 5);
+        assert_eq!(
+            segs,
+            vec![
+                Segment {
+                    value: ObjKey::Node(10),
+                    valid_from: 1000,
+                    valid_to: Some(3000)
+                },
+                Segment {
+                    value: ObjKey::Node(12),
+                    valid_from: 3000,
+                    valid_to: Some(5000)
+                },
+                Segment {
+                    value: ObjKey::Node(11),
+                    valid_from: 5000,
+                    valid_to: Some(8000)
+                },
+            ]
+        );
+        assert_probe_agreement(&s, 1, &[5], &segs, 0, 10_000, 100);
+        // an untouched key has no timeline
+        assert_eq!(point_one_timeline(&s, 99, 5), Vec::new());
+    }
+
+    #[test]
+    fn derived_timeline_intersects_hop_intervals() {
+        // person 1: member-of dept 100 from 1000, then dept 200 from 6000 (bounded to 9000);
+        // dept 100: manager 10 from 1000, then 12 from 3000; dept 200: manager 11 from 0.
+        // manager names: 10 = "Ada" then "Ada L." from 2000; 11 = "Bob"; 12 = "Carol".
+        const MEMBER: u32 = 1;
+        const MANAGER: u32 = 2;
+        const NAME: u32 = 3;
+        let text = |s: &str| ObjKey::Text(s.to_string());
+        let named = |s: u64, p: u32, v: &str, vf: i64, seq: u64| Op::SetOne {
+            subject: s,
+            predicate: p,
+            object: text(v),
+            valid_from: vf,
+            valid_to: None,
+            ok: ok(seq),
+        };
+        let s = fold(&[
+            set_one_at(1, MEMBER, 100, 1000, 0),
+            Op::SetOne {
+                subject: 1,
+                predicate: MEMBER,
+                object: ObjKey::Node(200),
+                valid_from: 6000,
+                valid_to: Some(9000),
+                ok: ok(1),
+            },
+            set_one_at(100, MANAGER, 10, 1000, 2),
+            set_one_at(100, MANAGER, 12, 3000, 3),
+            set_one_at(200, MANAGER, 11, 0, 4),
+            named(10, NAME, "Ada", 0, 5),
+            named(10, NAME, "Ada L.", 2000, 6),
+            named(11, NAME, "Bob", 0, 7),
+            named(12, NAME, "Carol", 0, 8),
+        ])
+        .observe();
+
+        // 2-hop: who is 1's manager, over time — the derived interval is the intersection. Note the
+        // 4th segment: when the bounded dept-200 stint expires at 9000, the OLDER open dept-100 row
+        // covers again (as-of picks the greatest covering valid_from), so its manager resurfaces —
+        // the timeline surfaces exactly what repeated as-of probes would.
+        let segs = derived_timeline(&s, 1, &[MEMBER, MANAGER]);
+        assert_eq!(
+            segs,
+            vec![
+                Segment {
+                    value: ObjKey::Node(10),
+                    valid_from: 1000,
+                    valid_to: Some(3000)
+                },
+                Segment {
+                    value: ObjKey::Node(12),
+                    valid_from: 3000,
+                    valid_to: Some(6000)
+                },
+                Segment {
+                    value: ObjKey::Node(11),
+                    valid_from: 6000,
+                    valid_to: Some(9000)
+                },
+                Segment {
+                    value: ObjKey::Node(12),
+                    valid_from: 9000,
+                    valid_to: None
+                },
+            ]
+        );
+        assert_probe_agreement(&s, 1, &[MEMBER, MANAGER], &segs, 0, 11_000, 50);
+
+        // 3-hop with a value-typed final hop: the manager's NAME splits segment one further (Ada →
+        // Ada L. at 2000) — boundaries from all three contributing histories interleave
+        let segs = derived_timeline(&s, 1, &[MEMBER, MANAGER, NAME]);
+        assert_eq!(
+            segs,
+            vec![
+                Segment {
+                    value: text("Ada"),
+                    valid_from: 1000,
+                    valid_to: Some(2000)
+                },
+                Segment {
+                    value: text("Ada L."),
+                    valid_from: 2000,
+                    valid_to: Some(3000)
+                },
+                Segment {
+                    value: text("Carol"),
+                    valid_from: 3000,
+                    valid_to: Some(6000)
+                },
+                Segment {
+                    value: text("Bob"),
+                    valid_from: 6000,
+                    valid_to: Some(9000)
+                },
+                Segment {
+                    value: text("Carol"),
+                    valid_from: 9000,
+                    valid_to: None
+                },
+            ]
+        );
+        assert_probe_agreement(&s, 1, &[MEMBER, MANAGER, NAME], &segs, 0, 11_000, 50);
+
+        // empty hop list derives nothing
+        assert_eq!(derived_timeline(&s, 1, &[]), Vec::new());
     }
 }

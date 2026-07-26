@@ -185,6 +185,30 @@ exactly `{"one": null}`; when omitted the shape is unchanged. It distinguishes "
 from "never written", so a writer can defend the close during late-arrival repair: a late fact
 older than the close must not silently resurrect the ended value.
 
+### `timeline`
+
+Answer **"over which intervals / when was"** instead of "as of T": the full valid-time timeline of
+a value — one predicate's own history, or a value *derived* through a chain of `one`-predicates
+(the validity of a derived value is the **intersection of the contributing rows' intervals**).
+
+```jsonc
+// request — hops is a chain of one-cardinality predicates walked left→right from the subject
+{"op": "timeline", "subject": 1, "hops": ["member-of", "manager-of"]}
+// response — sorted, non-overlapping; valid_to null = still in effect
+{"segments": [
+  {"value": {"node": 10}, "valid_from": 1000, "valid_to": 3000},
+  {"value": {"node": 12}, "valid_from": 3000, "valid_to": null}
+]}
+```
+
+- Agrees with the point-wise composition at every instant: for any `T` inside a segment,
+  `point … valid_at: T` composed along the same hops returns that segment's value; instants no
+  segment covers read as absent. Supersessions split segments, a `close` ends one with no
+  successor, and a late-arriving correction re-slices exactly as it re-answers as-of.
+- Every intermediate hop value must be a node (a broken path derives nothing over that interval);
+  the final value may be a node or a literal. Segment count is bounded by the contributing history
+  rows.
+
 ### `expand`
 
 One-or-multi-hop neighbourhood via a predicate, honouring its relationship properties.
