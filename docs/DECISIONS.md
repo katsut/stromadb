@@ -299,6 +299,32 @@
 - **Evidence:** reproduces a hand-checked 8-subject fixture exactly, including the as-of *stale* case the
   agent got wrong ~100% of the time. Follow-ups: stored/named rules and incremental (live) maintenance.
 
+### D26. Conformance verdicts are maintained incrementally via support-set tracking
+- **Context:** `conformance` re-derives every subject's verdict per call. A watcher (a review queue, a
+  live panel) polling a stored rule re-paid O(subjects) each time and had to diff client-side. The hard
+  part is the derived paths: a verdict depends on reads at *intermediate* nodes (the assignee's
+  department's manager), so "which subjects does this write affect" is not answerable from the write's
+  subject alone.
+- **Decision:** judging a subject records every `(node, predicate)` it read — its **support set** — and
+  maintenance inverts that: a write to a key re-judges exactly the subjects whose last judgment read it;
+  node-type touches guard the subject universe (`materialize_tracked_with_nodes`). Any write that could
+  change a verdict must change a key the last judgment read (a branch not consulted cannot have
+  influenced it, and what makes it consultable touches a recorded key first). Every write-path tail
+  drain goes through one choke point that feeds every watched rule; changes land in a bounded per-rule
+  journal behind a cursor (`conformance_watch` / `conformance_changes`), with `resync` on cursor
+  fall-behind. Maintenance is unfiltered; the caller's label mask applies at read time, like the
+  one-shot op.
+- **Why:** the maintained map provably equals a full evaluation while the update cost tracks the blast
+  radius, not the graph.
+- **Evidence:** property test — 2,500 random events (supersessions, closes, late-arriving corrections,
+  mid-stream subjects) with a full-evaluate oracle after every event. `examples/conformance_ivm.rs`:
+  single-subject writes stay near-flat at 1.6→16.5µs from 1K→100K subjects while full re-evaluation
+  grows 171µs→29.9ms (106×→1,812×); a manager transfer costs O(its department's issues), not O(all
+  issues).
+- **Known limits:** watches are in-memory (re-watch after reopen; re-declaring a rule invalidates its
+  watch); the journal is bounded (fall too far behind → resync); maintenance cost is paid on the write
+  path in proportion to watched rules × blast radius.
+
 ## DONE SLO (the "unchanging core" bar) — measured
 
 | leg | target | measured |

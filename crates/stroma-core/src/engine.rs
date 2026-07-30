@@ -154,6 +154,19 @@ impl Engine {
     /// touched — the driver for incremental Live-Query maintenance (`incremental::Maintained`):
     /// re-check only the rules whose inputs changed instead of recomputing over the whole graph.
     pub fn materialize_tracked(&mut self) -> std::collections::BTreeSet<(NodeId, FieldId)> {
+        self.materialize_tracked_with_nodes().0
+    }
+
+    /// Like [`Engine::materialize_tracked`], additionally returning the nodes whose **attributes**
+    /// (type / label) the tail touched. Maintenance that keys its subject universe off a node type
+    /// (`incremental::MaintainedConformance`) needs these too: a node entering or leaving the
+    /// subject type carries no graph-key touch of its own.
+    pub fn materialize_tracked_with_nodes(
+        &mut self,
+    ) -> (
+        std::collections::BTreeSet<(NodeId, FieldId)>,
+        std::collections::BTreeSet<NodeId>,
+    ) {
         let (keys, nodes) = self
             .changelog
             .replay_range_into_tracked(self.watermark, &mut self.base);
@@ -170,9 +183,7 @@ impl Engine {
         }
         self.watermark = self.changelog.head();
         self.changelog.mark_materialized(self.watermark);
-        // Public contract unchanged: graph keys only (node-attr touches are internal to the snapshot
-        // refresh; incremental::Maintained keys off `(subject, predicate)`).
-        keys
+        (keys, nodes)
     }
 
     /// The effective fold: materialized base merged with the bounded un-materialized tail.
