@@ -294,6 +294,126 @@ fn conformance_by_stored_rule_name() {
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
+// Live maintenance end-to-end: watch a stored rule, write, poll the diffs — the maintained map
+// stays equal to the one-shot op, changes come out as old→new verdict pairs (including the
+// one-upstream-write cascade through the as-of hop), and the watch is invalidated by a rule
+// re-declaration and by a reopen (it is in-memory by design).
+#[test]
+fn conformance_watch_streams_verdict_diffs() {
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "stroma_conformance_live_test_{}",
+            std::process::id()
+        ))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(FIXTURE).unwrap();
+    let rule_def = json!({ "rule_def": { "name": "release-approval", "rule": rule_body() } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+
+    // only stored rules can be watched
+    let err = db
+        .query(&json!({"op":"conformance_watch","rule_name":"no-such"}))
+        .unwrap_err();
+    assert!(err.contains("no-such"), "unexpected: {err}");
+
+    // watch: full verdicts + cursor, identical to the one-shot op
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    let baseline = verdict_map(&db.query(&rule()).unwrap());
+    assert_eq!(verdict_map(&w), baseline);
+    let cursor = w["cursor"].as_u64().unwrap();
+
+    // nothing changed yet
+    let c = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}))
+        .unwrap();
+    assert_eq!(c["changes"], json!([]));
+
+    // an approval lands on the ABSENT issue (1003, anchored at 1200 → Alice is the manager then)
+    db.ingest_str(concat!(
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-at\",\"object\":{\"int\":1200}}}\n",
+    ))
+    .unwrap();
+    let c = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}))
+        .unwrap();
+    let changes = c["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["subject"], json!(1003));
+    assert_eq!(changes[0]["old"]["verdict"], json!("ABSENT"));
+    assert_eq!(changes[0]["new"]["verdict"], json!("OK"));
+    let cursor = c["cursor"].as_u64().unwrap();
+
+    // ONE upstream write cascades: a late-arriving manager transfer of the Platform department at
+    // valid-time 1100 re-decides every issue anchored in [1100, 5000) — 1001, 1003, 1008 flip
+    // OK → MISMATCH (stale: Alice held the role, but not as-of their anchors any more), while
+    // anchors ≥ 5000 (1005, 1007) and the other department's issues stay put.
+    db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"manager-of\",\"object\":{\"node\":102},\"valid_from\":1100}}\n",
+    )
+    .unwrap();
+    let c = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}))
+        .unwrap();
+    let mut flipped: Vec<u64> = c["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["subject"].as_u64().unwrap())
+        .collect();
+    flipped.sort_unstable();
+    assert_eq!(flipped, vec![1001, 1003, 1008]);
+    for d in c["changes"].as_array().unwrap() {
+        assert_eq!(d["old"]["verdict"], json!("OK"));
+        assert_eq!(d["new"]["verdict"], json!("MISMATCH"));
+        assert_eq!(d["new"]["kind"], json!("stale"));
+    }
+    let cursor = c["cursor"].as_u64().unwrap();
+
+    // the maintained map still equals a full one-shot evaluation
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    assert_eq!(verdict_map(&w), verdict_map(&db.query(&rule()).unwrap()));
+
+    // post-authz on the read side: hide 1001 behind label 3 — a masked watcher no longer sees it
+    db.ingest_str("{\"node\":{\"id\":1001,\"label\":3}}\n")
+        .unwrap();
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval","allowed_labels":1}))
+        .unwrap();
+    assert!(
+        !verdict_map(&w).contains_key(&1001),
+        "label-3 subject must be hidden from a label-0 watcher"
+    );
+
+    // re-declaring the rule invalidates the watch (the watcher re-registers against the new rule)
+    db.ingest_str(&rule_def.to_string()).unwrap();
+    let err = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}))
+        .unwrap_err();
+    assert!(err.contains("not watched"), "unexpected: {err}");
+
+    // the watch is in-memory: gone after a reopen, and re-watchable
+    drop(db); // release the directory lock
+    let db = Db::open(&dir).unwrap();
+    let err = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}))
+        .unwrap_err();
+    assert!(err.contains("not watched"), "unexpected: {err}");
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    assert_eq!(verdict_map(&w), verdict_map(&db.query(&rule()).unwrap()));
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 // The two rule-expressiveness extensions end-to-end through the JSON boundary: a node-valued scope
 // (`equals: {"node": N}` — the documented object form) and `distinct_from` (a must-differ derived
 // path, e.g. a self-approval ban), including the stored `rule_def` replay of the new field.

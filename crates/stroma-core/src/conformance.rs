@@ -191,10 +191,17 @@ struct Walk {
     final_asof_hop: Option<(NodeId, FieldId)>,
 }
 
-/// Walk a derived path of one-cardinality hops left→right from `s`. A hop with an as-of anchor
-/// reads the valid-time value of that hop at the anchor's integer value on the ORIGINAL subject
-/// `s`. An empty path derives nothing (no expectation), same as a broken one.
-fn walk(snap: &Snapshot, cat: &Catalog, s: NodeId, hops: &[Hop]) -> Walk {
+/// Walk a derived path of one-cardinality hops left→right from `s`, reporting every
+/// `(node, predicate)` read to `rec` — the read's support set, for incremental maintenance. A hop
+/// with an as-of anchor reads the valid-time value of that hop at the anchor's integer value on
+/// the ORIGINAL subject `s`. An empty path derives nothing (no expectation), same as a broken one.
+fn walk(
+    snap: &Snapshot,
+    cat: &Catalog,
+    s: NodeId,
+    hops: &[Hop],
+    rec: &mut impl FnMut(NodeId, FieldId),
+) -> Walk {
     if hops.is_empty() {
         return Walk {
             end: None,
@@ -211,13 +218,20 @@ fn walk(snap: &Snapshot, cat: &Catalog, s: NodeId, hops: &[Hop]) -> Walk {
         final_asof_hop = None;
         cur = match (&hop.as_of, pid) {
             (_, None) => None,
-            (None, Some(p)) => node_of(point_one(snap, node, p)),
+            (None, Some(p)) => {
+                rec(node, p);
+                node_of(point_one(snap, node, p))
+            }
             (Some(anchor), Some(p)) => {
-                let t = cat
-                    .field_id(anchor)
-                    .and_then(|ap| int_of(point_one(snap, s, ap)));
+                let t = cat.field_id(anchor).and_then(|ap| {
+                    rec(s, ap);
+                    int_of(point_one(snap, s, ap))
+                });
                 as_of = t;
                 final_asof_hop = Some((node, p));
+                // recorded whether or not the anchor resolved: once it does, this is the read that
+                // answers (and the key ever_held probes for the stale sub-classification)
+                rec(node, p);
                 t.and_then(|at| node_of(point_one_asof(snap, node, p, at)))
             }
         };
@@ -231,9 +245,24 @@ fn walk(snap: &Snapshot, cat: &Catalog, s: NodeId, hops: &[Hop]) -> Walk {
 
 /// The verdict for a single subject `s`.
 fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
+    judge_traced(snap, cat, rule, s, &mut |_, _| {})
+}
+
+/// [`judge`], additionally reporting every `(node, predicate)` the judgment read to `rec` — the
+/// verdict's **support set**. Any write that could change this subject's verdict must change at
+/// least one reported key (reads are recorded exactly as performed: a branch the judgment did not
+/// consult cannot have influenced it, and the write that makes it consultable touches a recorded
+/// key first). This is what keyed-incremental maintenance re-judges on.
+pub(crate) fn judge_traced(
+    snap: &Snapshot,
+    cat: &Catalog,
+    rule: &Rule,
+    s: NodeId,
+    rec: &mut impl FnMut(NodeId, FieldId),
+) -> Verdict {
     // scope: out-of-scope subjects are not judged.
     if let Some(scope) = &rule.scope
-        && !cond_holds(snap, cat, s, scope)
+        && !cond_holds_traced(snap, cat, s, scope, rec)
     {
         return Verdict {
             subject: s,
@@ -249,16 +278,17 @@ fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
     // The two derived paths: `required` = the value the actual must equal, `distinct_from` = the
     // value it must NOT equal. When both carry an as-of anchor, the required path's instant is the
     // one reported.
-    let req = walk(snap, cat, s, &rule.required);
-    let dis = walk(snap, cat, s, &rule.distinct_from);
+    let req = walk(snap, cat, s, &rule.required, rec);
+    let dis = walk(snap, cat, s, &rule.distinct_from, rec);
     let required = req.end.map(ObjKey::Node);
     let distinct = dis.end.map(ObjKey::Node);
     let as_of = req.as_of.or(dis.as_of);
 
     // actual = the observed value on S.
-    let actual = cat
-        .field_id(&rule.actual)
-        .and_then(|p| point_one(snap, s, p));
+    let actual = cat.field_id(&rule.actual).and_then(|p| {
+        rec(s, p);
+        point_one(snap, s, p)
+    });
 
     let (outcome, mismatch_kind) = match &actual {
         // absent: no actual value. If an absence condition is declared and holds, it is a gap;
@@ -267,7 +297,7 @@ fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
             if rule
                 .absent_when
                 .as_ref()
-                .is_some_and(|c| cond_holds(snap, cat, s, c))
+                .is_some_and(|c| cond_holds_traced(snap, cat, s, c, rec))
             {
                 (Outcome::Absent, None)
             } else {
@@ -318,9 +348,18 @@ fn ever_held(snap: &Snapshot, node: NodeId, predicate: FieldId, value: NodeId) -
         })
 }
 
-fn cond_holds(snap: &Snapshot, cat: &Catalog, s: NodeId, cond: &Cond) -> bool {
+fn cond_holds_traced(
+    snap: &Snapshot,
+    cat: &Catalog,
+    s: NodeId,
+    cond: &Cond,
+    rec: &mut impl FnMut(NodeId, FieldId),
+) -> bool {
     cat.field_id(&cond.predicate)
-        .and_then(|p| point_one(snap, s, p))
+        .and_then(|p| {
+            rec(s, p);
+            point_one(snap, s, p)
+        })
         .is_some_and(|v| v == cond.equals)
 }
 

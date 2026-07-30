@@ -28,7 +28,7 @@
 //! embed: {node,vector}.
 //! Query request (JSON): {"op":"point"|"expand"|"search", ...} — see [`Db::query`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,6 +48,7 @@ use stromadb_core::conformance;
 use stromadb_core::engine::Engine;
 use stromadb_core::fact::{FieldId, NodeId};
 use stromadb_core::fold::{ObjKey, Snapshot};
+use stromadb_core::incremental::{MaintainedConformance, VerdictDiff};
 use stromadb_core::ir::{Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run};
 use stromadb_core::ivf::IvfPq;
 use stromadb_core::query;
@@ -180,7 +181,34 @@ struct WriteState {
     index: Arc<Option<IvfPq>>,
     /// Whether the last index build retrained the quantizers (vs reusing them) — /stats observability.
     index_retrained: bool,
+    /// Stored rules under live maintenance (`conformance_watch`): the maintained verdict map plus a
+    /// bounded diff journal, fed by every tail drain (see [`WriteState::materialize_live`]).
+    live_rules: HashMap<String, LiveRule>,
     n_max: usize,
+}
+
+/// Diff-journal entries retained per watched rule; a cursor older than the retained window gets a
+/// `resync` answer instead of silently missing changes.
+const LIVE_LOG_CAP: usize = 1024;
+
+/// A stored conformance rule under live maintenance.
+struct LiveRule {
+    maintained: MaintainedConformance,
+    /// `(durable head after the batch, that batch's verdict changes)`, oldest first.
+    log: VecDeque<(u64, Vec<VerdictDiff>)>,
+    /// Heads at or below this may have been dropped from the journal — cursors behind it resync.
+    truncated_to: u64,
+}
+
+impl LiveRule {
+    fn push(&mut self, head: u64, diffs: Vec<VerdictDiff>) {
+        if self.log.len() >= LIVE_LOG_CAP
+            && let Some((h, _)) = self.log.pop_front()
+        {
+            self.truncated_to = h;
+        }
+        self.log.push_back((head, diffs));
+    }
 }
 
 /// An immutable, pinned read view. A read clones the `Arc<ReadState>` then runs entirely on it with
@@ -272,6 +300,7 @@ impl Db {
             dim,
             index: Arc::new(None),
             index_retrained: false,
+            live_rules: HashMap::new(),
             n_max,
         };
         w.rebuild_index();
@@ -340,6 +369,7 @@ impl Db {
         w.dim = 0;
         w.index = Arc::new(None);
         w.index_retrained = false;
+        w.live_rules.clear();
         self.publish(&w);
         Ok(())
     }
@@ -351,6 +381,9 @@ impl Db {
     /// trigger. Returns the covered seqno plus the resulting file sizes for observability.
     pub fn compact(&self) -> DbResult<CompactionStats> {
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        // engine compact drains the tail internally — route any remaining tail through the live
+        // feed first so watched rules never miss a touch
+        w.materialize_live();
         let covered = w.eng.compact().map_err(|e| format!("compact: {e}"))?;
         let wal = w.dir.join("wal.log");
         let size = |p: &std::path::Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
@@ -399,8 +432,111 @@ impl Db {
     /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
     ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
     pub fn query(&self, req: &Value) -> DbResult<Value> {
+        // The two live-maintenance ops run against the write-side registry (they mutate / read the
+        // maintained state under the write lock); everything else is a lock-free read on the
+        // pinned view.
+        match req["op"].as_str() {
+            Some("conformance_watch") => return self.conformance_watch(req),
+            Some("conformance_changes") => return self.conformance_changes(req),
+            _ => {}
+        }
         let rs = self.read_state();
         rs.query(req)
+    }
+
+    /// Put a stored rule under live maintenance (idempotent) and return its full current verdicts
+    /// plus a `cursor`. From then on every ingest keeps the verdict map current incrementally
+    /// (O(touched), not O(subjects)) and journals the changes; poll them with
+    /// `conformance_changes`. The watch is in-memory: re-watch after a reopen.
+    fn conformance_watch(&self, req: &Value) -> DbResult<Value> {
+        let name = req["rule_name"]
+            .as_str()
+            .ok_or("conformance_watch.rule_name missing (only stored rules can be watched)")?;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        w.materialize_live(); // seed from a fully drained state
+        let rule = w
+            .schema
+            .rules
+            .get(name)
+            .cloned()
+            .ok_or(format!("unknown rule_name: {name}"))?;
+        let missing = conformance::unresolved_names(&rule, &w.schema.cat);
+        if !missing.is_empty() {
+            return Err(format!(
+                "unknown name(s) in conformance rule: {}",
+                missing.join(", ")
+            ));
+        }
+        let head = w.eng.durable_head();
+        if !w.live_rules.contains_key(name) {
+            let snap = w.eng.snapshot_arc();
+            let maintained = MaintainedConformance::new(rule, &snap, &w.schema.cat);
+            w.live_rules.insert(
+                name.to_string(),
+                LiveRule {
+                    maintained,
+                    log: VecDeque::new(),
+                    truncated_to: head,
+                },
+            );
+        }
+        let snap = w.eng.snapshot_arc();
+        let verdicts: Vec<Value> = w.live_rules[name]
+            .maintained
+            .verdicts()
+            .values()
+            .filter(|v| label_visible(&snap, v.subject, labels))
+            .map(verdict_json)
+            .collect();
+        Ok(json!({ "verdicts": verdicts, "cursor": head }))
+    }
+
+    /// The verdict changes of a watched rule since `cursor` (a head returned by `conformance_watch`
+    /// or a previous call), plus the new cursor. When the cursor has fallen behind the bounded
+    /// journal, answers `{"resync": true}` — re-watch (or take the full verdicts) instead of
+    /// trusting a gap.
+    fn conformance_changes(&self, req: &Value) -> DbResult<Value> {
+        let name = req["rule_name"]
+            .as_str()
+            .ok_or("conformance_changes.rule_name missing")?;
+        let cursor = req["cursor"]
+            .as_u64()
+            .ok_or("conformance_changes.cursor missing")?;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
+        w.materialize_live(); // usually a no-op: ingest drains on return
+        let head = w.eng.durable_head();
+        let snap = w.eng.snapshot_arc();
+        let Some(lr) = w.live_rules.get(name) else {
+            return Err(format!(
+                "rule not watched: {name} — call conformance_watch first"
+            ));
+        };
+        if cursor < lr.truncated_to {
+            return Ok(json!({ "resync": true, "cursor": head }));
+        }
+        let changes: Vec<Value> = lr
+            .log
+            .iter()
+            .filter(|(h, _)| *h > cursor)
+            .flat_map(|(_, diffs)| diffs.iter())
+            .filter(|d| label_visible(&snap, d.subject, labels))
+            .map(|d| {
+                json!({
+                    "subject": d.subject,
+                    "old": d.old.as_ref().map(verdict_json),
+                    "new": d.new.as_ref().map(verdict_json),
+                })
+            })
+            .collect();
+        Ok(json!({ "changes": changes, "cursor": head }))
     }
 
     /// Pin and return the current read view (an `Arc<ReadState>`). Cheap — a momentary lock + an
@@ -631,6 +767,11 @@ impl WriteState {
                 // A named conformance rule: parse + store (names are validated at evaluation, not
                 // here — the referenced predicates may be declared later), persist for replay.
                 apply_rule_def(Arc::make_mut(&mut self.schema), &v)?;
+                // a re-declaration invalidates any live watch on the old declaration — the watcher
+                // re-registers (and re-seeds) against the new rule
+                if let Some(name) = v["rule_def"]["name"].as_str() {
+                    self.live_rules.remove(name);
+                }
                 self.append_line("rules.jsonl", line)?;
             } else if let Some(n) = v.get("node") {
                 if self.apply_node(n)? {
@@ -854,7 +995,7 @@ impl WriteState {
         }
         self.flush(&mut batch)?;
         self.eng.sync().map_err(|e| format!("fsync: {e}"))?;
-        self.eng.materialize();
+        self.materialize_live();
         s.durable_head = self.eng.durable_head();
         self.suppressed_total += s.suppressed;
         if touched_nodes {
@@ -911,8 +1052,26 @@ impl WriteState {
             .write_batch(std::mem::take(batch))
             .map_err(|e| format!("backpressure: {e:?}"))?;
         self.eng.sync().map_err(|e| format!("fsync: {e}"))?;
-        self.eng.materialize();
+        self.materialize_live();
         Ok(())
+    }
+
+    /// Drain the engine tail and keep every watched rule current. Every tail drain on the write
+    /// path MUST go through here — a drain that bypassed the feed would silently detach the
+    /// maintained verdict maps from the graph (their support keys would never fire again).
+    fn materialize_live(&mut self) {
+        let (keys, nodes) = self.eng.materialize_tracked_with_nodes();
+        if self.live_rules.is_empty() || (keys.is_empty() && nodes.is_empty()) {
+            return;
+        }
+        let snap = self.eng.snapshot_arc();
+        let head = self.eng.durable_head();
+        for lr in self.live_rules.values_mut() {
+            let diffs = lr.maintained.apply(&snap, &self.schema.cat, &keys, &nodes);
+            if !diffs.is_empty() {
+                lr.push(head, diffs);
+            }
+        }
     }
 
     fn embed(&mut self, jsonl: &str) -> DbResult<usize> {
@@ -1745,20 +1904,7 @@ impl ReadState {
             .map(|m| m as u32)
             .unwrap_or(u32::MAX);
         let verdicts = conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels);
-        let out: Vec<Value> = verdicts
-            .into_iter()
-            .map(|v| {
-                json!({
-                    "subject": v.subject,
-                    "verdict": v.verdict.as_str(),
-                    "kind": v.mismatch_kind.map(|k| k.as_str()),
-                    "required": v.required.map(fmt_obj),
-                    "distinct": v.distinct.map(fmt_obj),
-                    "actual": v.actual.map(fmt_obj),
-                    "as_of": v.as_of,
-                })
-            })
-            .collect();
+        let out: Vec<Value> = verdicts.iter().map(verdict_json).collect();
         Ok(json!({ "verdicts": out }))
     }
 
@@ -2168,6 +2314,28 @@ fn parse_conformance_cond(v: &Value) -> DbResult<Option<conformance::Cond>> {
         value_key(&v["equals"])?
     };
     Ok(Some(conformance::Cond { predicate, equals }))
+}
+
+/// One verdict in the wire shape shared by the `conformance` op, `conformance_watch`, and the
+/// `conformance_changes` diff entries.
+fn verdict_json(v: &conformance::Verdict) -> Value {
+    json!({
+        "subject": v.subject,
+        "verdict": v.verdict.as_str(),
+        "kind": v.mismatch_kind.map(|k| k.as_str()),
+        "required": v.required.clone().map(fmt_obj),
+        "distinct": v.distinct.clone().map(fmt_obj),
+        "actual": v.actual.clone().map(fmt_obj),
+        "as_of": v.as_of,
+    })
+}
+
+/// Whether `node` is visible to a principal with `allowed_labels` (unlabeled = public) — the same
+/// bit-test the read ops apply.
+fn label_visible(snap: &Snapshot, node: NodeId, allowed_labels: u32) -> bool {
+    snap.node_labels
+        .get(&node)
+        .is_none_or(|&l| (allowed_labels >> l) & 1 == 1)
 }
 
 fn fmt_obj(o: ObjKey) -> Value {

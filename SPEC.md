@@ -281,6 +281,35 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
 This composes a multi-hop, as-of check the caller would otherwise assemble by hand — deterministically,
 post-authz, with no reasoner.
 
+### `conformance_watch` / `conformance_changes`
+
+Keep a **stored** rule's verdicts live instead of re-paying a full evaluation per poll: after a
+watch, every ingest updates the verdict map **incrementally** — only the subjects whose inputs
+changed are re-judged (support-set tracking: a judgment records every `(node, predicate)` it read,
+including reads on intermediate nodes of the derived paths, so one upstream write re-judges exactly
+the subjects whose paths run through it) — and journals the changes.
+
+```jsonc
+// watch (idempotent): full current verdicts + a cursor
+{"op": "conformance_watch", "rule_name": "release-approval"}
+// → {"verdicts": [ …same shape as conformance… ], "cursor": 41}
+
+// poll: the verdict changes since a cursor, as old→new pairs
+{"op": "conformance_changes", "rule_name": "release-approval", "cursor": 41}
+// → {"changes": [ {"subject": 1003, "old": {…"verdict":"ABSENT"…}, "new": {…"verdict":"OK"…}} ],
+//    "cursor": 44}
+```
+
+- `old: null` = the subject just entered the rule's subject type; `new: null` = it left it.
+- The maintained map always equals a full one-shot `conformance` evaluation (property-tested), and
+  the update cost is O(touched) per ingest, not O(subjects) per poll.
+- The change journal is bounded: a cursor that has fallen behind it gets `{"resync": true}` —
+  re-watch (or read the full verdicts) instead of trusting a gap.
+- `allowed_labels` filters both surfaces per caller, exactly like `conformance` (maintenance itself
+  is unfiltered; visibility is decided at read time).
+- The watch is **in-memory**: re-watch after a process restart. Re-declaring the rule (`rule_def`
+  with the same name) invalidates its watch — re-watch to pick up the new declaration.
+
 ### `completeness`
 
 Report, per node of a type, the required predicates that are **absent**.
