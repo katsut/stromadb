@@ -1690,6 +1690,82 @@ fn timeline_op_returns_derived_segments() {
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
+// A timeline answer carries an additive weakest-link `confidence`: the minimum tier over every
+// (node, predicate) history the walk read, with a pointer to the bottleneck hop. Absent answers
+// (no segments) omit the field, mirroring `point`'s omission rule.
+#[test]
+fn timeline_confidence_is_weakest_link_over_hops() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_timeline_conf_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // 3-hop chain 1 —works-in→ 100 —part-of→ 500 —led-by→ 20, every hop corroborated by two
+    // distinct sources agreeing on the same value.
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Department\"}}\n",
+        "{\"type_def\":{\"name\":\"Division\"}}\n",
+        "{\"pred_def\":{\"name\":\"works-in\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Department\"}}\n",
+        "{\"pred_def\":{\"name\":\"part-of\",\"cardinality\":\"one\",\"domain\":\"Department\",\"range\":\"Division\"}}\n",
+        "{\"pred_def\":{\"name\":\"led-by\",\"cardinality\":\"one\",\"domain\":\"Division\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":20,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":100,\"type\":\"Department\",\"label\":0}}\n",
+        "{\"node\":{\"id\":500,\"type\":\"Division\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"works-in\",\"object\":{\"node\":100},\"valid_from\":10,\"source\":\"hr\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"works-in\",\"object\":{\"node\":100},\"valid_from\":20,\"source\":\"wiki\"}}\n",
+        "{\"fact\":{\"subject\":100,\"predicate\":\"part-of\",\"object\":{\"node\":500},\"valid_from\":10,\"source\":\"hr\"}}\n",
+        "{\"fact\":{\"subject\":100,\"predicate\":\"part-of\",\"object\":{\"node\":500},\"valid_from\":20,\"source\":\"wiki\"}}\n",
+        "{\"fact\":{\"subject\":500,\"predicate\":\"led-by\",\"object\":{\"node\":20},\"valid_from\":10,\"source\":\"hr\"}}\n",
+        "{\"fact\":{\"subject\":500,\"predicate\":\"led-by\",\"object\":{\"node\":20},\"valid_from\":20,\"source\":\"wiki\"}}\n",
+    ))
+    .unwrap();
+
+    // every support corroborated → high; the weakest raw signals travel with the tier
+    let r = db
+        .query(&json!({"op":"timeline","subject":1,"hops":["works-in","part-of","led-by"]}))
+        .unwrap();
+    assert_eq!(r["segments"][0]["value"], json!({"node": 20}));
+    assert_eq!(r["confidence"]["tier"], json!("high"));
+    assert_eq!(r["confidence"]["corroboration"], json!(2));
+    assert!(r["confidence"]["weakest"]["node"].is_u64());
+
+    // a reference `now` with a tight max_age makes every support stale → low, age exposed
+    let r = db
+        .query(&json!({"op":"timeline","subject":1,"hops":["works-in","part-of","led-by"],"now":1000,"max_age":100}))
+        .unwrap();
+    assert_eq!(r["confidence"]["tier"], json!("low"));
+    assert!(r["confidence"]["age"].is_i64());
+
+    // downgrade ONE middle hop: a source-less later write wins LWW on (100, part-of) — the whole
+    // 3-hop answer drops to low and `weakest` points at exactly that hop
+    db.ingest_str(
+        "{\"fact\":{\"subject\":100,\"predicate\":\"part-of\",\"object\":{\"node\":500},\"valid_from\":30}}\n",
+    )
+    .unwrap();
+    let r = db
+        .query(&json!({"op":"timeline","subject":1,"hops":["works-in","part-of","led-by"]}))
+        .unwrap();
+    assert_eq!(r["segments"][0]["value"], json!({"node": 20}));
+    assert_eq!(r["confidence"]["tier"], json!("low"));
+    assert_eq!(
+        r["confidence"]["weakest"],
+        json!({"node": 100, "predicate": "part-of"})
+    );
+
+    // an absent answer (subject with no facts) has no segments and no confidence
+    let r = db
+        .query(&json!({"op":"timeline","subject":2,"hops":["works-in","part-of","led-by"]}))
+        .unwrap();
+    assert_eq!(r["segments"], json!([]));
+    assert!(r.get("confidence").is_none());
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 #[test]
 fn index_rebuild_reuses_quantizers_until_drift_or_growth() {
     let dir = std::env::temp_dir()
