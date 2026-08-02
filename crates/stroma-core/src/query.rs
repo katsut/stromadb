@@ -125,12 +125,27 @@ pub fn point_one_timeline(snap: &Snapshot, subject: NodeId, predicate: FieldId) 
 /// [`point_one_asof`] per hop, agreeing with it at every instant. A segment whose intermediate
 /// value is not a node contributes nothing (a broken path derives nothing there).
 pub fn derived_timeline(snap: &Snapshot, subject: NodeId, hops: &[FieldId]) -> Vec<Segment> {
+    derived_timeline_traced(snap, subject, hops, &mut |_, _| {})
+}
+
+/// [`derived_timeline`] with read tracing: `rec` is called once per distinct `(node, predicate)`
+/// history the walk reads — the answer's support set. Callers use it to derive an answer-level
+/// confidence (weakest link over the supports); the segments returned are identical to the
+/// untraced form.
+pub fn derived_timeline_traced(
+    snap: &Snapshot,
+    subject: NodeId,
+    hops: &[FieldId],
+    rec: &mut impl FnMut(NodeId, FieldId),
+) -> Vec<Segment> {
     let Some((&first, rest)) = hops.split_first() else {
         return Vec::new();
     };
+    rec(subject, first);
     let mut segs = point_one_timeline(snap, subject, first);
     for &p in rest {
-        // memoized per source node: many segments often resolve to the same few nodes
+        // memoized per source node: many segments often resolve to the same few nodes — the
+        // memoization also makes `rec` fire once per distinct support key
         let mut inner: HashMap<NodeId, Vec<Segment>> = HashMap::new();
         let mut next: Vec<Segment> = Vec::new();
         for seg in &segs {
@@ -139,7 +154,10 @@ pub fn derived_timeline(snap: &Snapshot, subject: NodeId, hops: &[FieldId]) -> V
             };
             for is in inner
                 .entry(*n)
-                .or_insert_with(|| point_one_timeline(snap, *n, p))
+                .or_insert_with(|| {
+                    rec(*n, p);
+                    point_one_timeline(snap, *n, p)
+                })
                 .iter()
             {
                 let from = seg.valid_from.max(is.valid_from);
@@ -174,8 +192,9 @@ pub fn derived_timeline(snap: &Snapshot, subject: NodeId, hops: &[FieldId]) -> V
 
 /// A coarse, deterministic confidence tier for a `point` answer — see [`confidence_signals`].
 /// Deliberately three buckets, not a continuous score: the engine reports only what it can observe
-/// from provenance and valid-time, and leaves calibration to a policy layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// from provenance and valid-time, and leaves calibration to a policy layer. Ordered
+/// `Low < Medium < High` so a multi-support answer can take the minimum (weakest link).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
     Low,
     Medium,
@@ -1576,5 +1595,27 @@ mod tests {
 
         // empty hop list derives nothing
         assert_eq!(derived_timeline(&s, 1, &[]), Vec::new());
+
+        // the traced form returns identical segments and records exactly the histories the walk
+        // read — the subject's first hop plus each distinct (intermediate node, predicate)
+        let mut supports: std::collections::BTreeSet<(NodeId, FieldId)> =
+            std::collections::BTreeSet::new();
+        let traced = derived_timeline_traced(&s, 1, &[MEMBER, MANAGER, NAME], &mut |n, p| {
+            supports.insert((n, p));
+        });
+        assert_eq!(traced, segs);
+        assert_eq!(
+            supports,
+            [
+                (1, MEMBER),
+                (100, MANAGER),
+                (200, MANAGER),
+                (10, NAME),
+                (11, NAME),
+                (12, NAME),
+            ]
+            .into_iter()
+            .collect()
+        );
     }
 }

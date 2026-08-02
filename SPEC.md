@@ -208,6 +208,16 @@ a value — one predicate's own history, or a value *derived* through a chain of
 - Every intermediate hop value must be a node (a broken path derives nothing over that interval);
   the final value may be a node or a literal. Segment count is bounded by the contributing history
   rows.
+- A non-empty answer also carries an additive **weakest-link `confidence`**: the minimum coarse
+  tier over every `(node, predicate)` history the walk read (its support set), with the weakest
+  support's raw signals and a `weakest` pointer naming the bottleneck hop. Optional `now` /
+  `max_age` freshness inputs work as in `point`; an empty answer omits the field.
+
+```jsonc
+// appended to the response when segments is non-empty
+{"confidence": {"tier": "low", "corroboration": 2, "sources": 2,
+                "weakest": {"node": 100, "predicate": "part-of"}}}
+```
 
 ### `expand`
 

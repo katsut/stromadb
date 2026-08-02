@@ -52,12 +52,14 @@ fn tools() -> Value {
         },
         {
             "name": "timeline",
-            "description": "Answer \"over which intervals / when was\" instead of probing valid_at repeatedly: the full valid-time timeline of a value reached through a chain of one-cardinality predicates walked from a subject (one entry = that predicate's own history). Returns sorted, non-overlapping segments `{value, valid_from, valid_to}` (`valid_to: null` = still in effect); for any instant inside a segment, the equivalent point/valid_at composition returns that segment's value, and instants no segment covers read as absent.",
+            "description": "Answer \"over which intervals / when was\" instead of probing valid_at repeatedly: the full valid-time timeline of a value reached through a chain of one-cardinality predicates walked from a subject (one entry = that predicate's own history). Returns sorted, non-overlapping segments `{value, valid_from, valid_to}` (`valid_to: null` = still in effect); for any instant inside a segment, the equivalent point/valid_at composition returns that segment's value, and instants no segment covers read as absent. A non-empty answer also carries a weakest-link `confidence`: the minimum coarse tier over every history the walk read, with a `weakest` pointer naming the bottleneck hop.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "subject": { "type": "integer", "description": "subject node id the hop chain starts from" },
-                    "hops": { "type": "array", "items": { "type": "string" }, "description": "chain of one-cardinality predicate names, walked left to right (e.g. [\"member-of\",\"manager-of\"] = the subject's manager over time)" }
+                    "hops": { "type": "array", "items": { "type": "string" }, "description": "chain of one-cardinality predicate names, walked left to right (e.g. [\"member-of\",\"manager-of\"] = the subject's manager over time)" },
+                    "now": { "type": "integer", "description": "reference time for the confidence freshness signal (with max_age)" },
+                    "max_age": { "type": "integer", "description": "age beyond which a support fact counts as stale for confidence" }
                 },
                 "required": ["subject", "hops"]
             }

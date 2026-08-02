@@ -1277,7 +1277,16 @@ impl ReadState {
                             .ok_or(format!("unknown predicate: {name}"))?,
                     );
                 }
-                let segments: Vec<Value> = query::derived_timeline(&self.snap, subject, &hops)
+                // Trace the walk's support set: every (node, predicate) history it reads. The
+                // answer's confidence is the weakest link over those supports (min tier), so a
+                // three-hop answer resting on one source-less hop reads as low even when the other
+                // hops corroborate.
+                let mut supports: BTreeSet<(u64, u32)> = BTreeSet::new();
+                let segs =
+                    query::derived_timeline_traced(&self.snap, subject, &hops, &mut |n, p| {
+                        supports.insert((n, p));
+                    });
+                let segments: Vec<Value> = segs
                     .into_iter()
                     .map(|s| {
                         json!({
@@ -1287,7 +1296,40 @@ impl ReadState {
                         })
                     })
                     .collect();
-                Ok(json!({ "segments": segments }))
+                let mut resp = json!({ "segments": segments });
+                // Additive confidence, same omission rule as `point`: an absent answer (no
+                // segments) carries none, keeping the shape unchanged. The weakest support's raw
+                // signals travel with the tier, plus a pointer to *which* hop is the bottleneck.
+                if !resp["segments"].as_array().unwrap().is_empty() {
+                    let now = req["now"].as_i64();
+                    let max_age = req["max_age"].as_i64();
+                    let weakest = supports
+                        .iter()
+                        .map(|&(n, p)| {
+                            (
+                                query::confidence_signals(&self.snap, n, p, now, max_age),
+                                n,
+                                p,
+                            )
+                        })
+                        .min_by_key(|(c, ..)| c.tier)
+                        .expect("hops is non-empty, so at least one support was recorded");
+                    let (c, n, p) = weakest;
+                    let mut conf = json!({
+                        "tier": c.tier.as_str(),
+                        "corroboration": c.corroboration,
+                        "sources": c.corroboration,
+                        "weakest": {
+                            "node": n,
+                            "predicate": self.schema.cat.name(p),
+                        },
+                    });
+                    if let Some(age) = c.age {
+                        conf["age"] = json!(age);
+                    }
+                    resp["confidence"] = conf;
+                }
+                Ok(resp)
             }
             "search" => {
                 let t = self.run_hybrid(req)?;
