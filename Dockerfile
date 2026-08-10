@@ -17,9 +17,10 @@ COPY --from=build /src/target/release/stroma-serve /usr/local/bin/
 COPY --from=build /src/target/release/stroma       /usr/local/bin/
 COPY --from=build /src/target/release/stroma-mcp    /usr/local/bin/
 USER stroma
-# A fresh /data volume is initialized on first run (stroma-serve calls open_or_init).
+# A fresh /data volume is initialized on first run (the server calls open_or_init).
 ENV STROMA_DB=/data \
     STROMA_ADDR=0.0.0.0:7687
 VOLUME /data
 EXPOSE 7687
-ENTRYPOINT ["stroma-serve"]
+# The unified binary: `stroma serve` runs the same code as the stroma-serve binary (also shipped).
+ENTRYPOINT ["stroma", "serve"]
