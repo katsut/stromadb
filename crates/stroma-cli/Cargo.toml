@@ -8,7 +8,7 @@ repository.workspace = true
 readme.workspace = true
 keywords = ["graph", "database", "cli", "knowledge-graph", "graphrag"]
 categories = ["command-line-utilities", "database"]
-description = "StromaDB command-line interface (`stroma` binary): init, ingest, embed, query, stats."
+description = "StromaDB command-line interface (`stroma` binary): init, ingest, embed, query, stats, serve, up."
 
 [[bin]]
 name = "stroma"
@@ -16,4 +16,5 @@ path = "src/main.rs"
 
 [dependencies]
 stromadb-store = { path = "../stroma-db", version = "0.2.0" }
+stromadb-serve = { path = "../stroma-serve", version = "0.2.0" }
 serde_json = "1"

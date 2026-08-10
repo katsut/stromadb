@@ -1,5 +1,7 @@
-//! `stroma` — the StromaDB CLI: init / ingest / embed / query / stats / serve. A thin frontend over
-//! the `stromadb-store` directory-backed database (which owns the on-disk layout and query dispatch).
+//! `stroma` — the StromaDB CLI: init / ingest / embed / query / stats / serve / up. A thin frontend
+//! over the `stromadb-store` directory-backed database (which owns the on-disk layout and query
+//! dispatch); `serve` and `up` run the full HTTP surface in-process (`stromadb-serve` as a library),
+//! so `cargo install stromadb` alone yields the whole application.
 
 use std::path::Path;
 use std::process::exit;
@@ -70,11 +72,25 @@ fn cmd_query(dir: &Path, args: &[String]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stroma <init|ingest|embed|query|stats|serve> --db <dir> [...]";
+    let usage = "usage: stroma <init|ingest|embed|query|stats|serve|up> --db <dir> [...]";
     let cmd = args
         .first()
         .map(|s| s.as_str())
         .unwrap_or_else(|| die(usage));
+    // `serve` / `up` hand the raw flags to the serving library (it does its own flag/env parsing,
+    // e.g. --addr, --api-token). `up` is the just-run-it verb: same server, but a fresh directory
+    // defaults to ./stroma-db instead of littering the current directory with db files.
+    if cmd == "serve" || cmd == "up" {
+        let mut serve_args: Vec<String> = args[1..].to_vec();
+        if cmd == "up"
+            && !serve_args.iter().any(|a| a == "--db")
+            && std::env::var("STROMA_DB").is_err()
+        {
+            serve_args.extend(["--db".into(), "./stroma-db".into()]);
+        }
+        stromadb_serve::run(&serve_args);
+        return;
+    }
     let db_dir = parse_flag(&args, "--db").unwrap_or_else(|| ".".into());
     let dir = Path::new(&db_dir);
     let rest: Vec<String> = args
@@ -112,7 +128,6 @@ fn main() {
             let db = Db::open(dir).unwrap_or_else(|e| die(&e));
             println!("{}", serde_json::to_string_pretty(&db.stats()).unwrap());
         }
-        "serve" => die("run the `stroma-serve` binary for the HTTP surface (this CLI is offline)"),
         _ => die(usage),
     }
 }
