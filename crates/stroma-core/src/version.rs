@@ -1,10 +1,10 @@
-//! Cross-store version vector + read modes (CAP result contract, R-3).
+//! Cross-store version vector + read modes (the result contract's consistency stamp).
 //!
 //! Reads span the authoritative changelog and derived stores that lag (here: the vector index).
 //! A read pins a version vector — sampled as one consistent cut — exposing the skew. Two modes:
 //! **strict** (read the derived store at its watermark = fully consistent, newest tail excluded) and
-//! **fresh** (latest + a brute-force tail that closes index/structure split-brain). Validated in
-//! Phase 0 (`poc-crossstore-snapshot`).
+//! **fresh** (latest + a brute-force tail that closes index/structure split-brain). Validated by
+//! the `poc-crossstore-snapshot` pre-implementation spike.
 
 /// A version vector across stores. MVP axes: the changelog seqno (authority) and the vector-index
 /// watermark (derived). Invariant: `vector_watermark <= changelog_seqno` (no dangling).

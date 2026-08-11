@@ -1,4 +1,4 @@
-//! The engine: write-append + read-merge over the changelog and fold (CAP-1, CAP-4).
+//! The engine: write-append + read-merge over the changelog and fold.
 //!
 //! Writes are appended to the changelog (the version authority). A read merges the materialized
 //! `base` fold with the bounded un-materialized tail on demand — so partial updates are not

@@ -3,7 +3,7 @@
 //! Every write is appended and assigned a monotonic `seqno` — the version authority. The seqno is
 //! the basis of the fold's [`OrderKey`] (so deterministic replay reproduces the exact same state),
 //! and the watermark other (derived) stores chase. Under overload the changelog returns explicit
-//! [`Backpressure`] rather than stalling silently (CAP-1).
+//! [`Backpressure`] rather than stalling silently.
 //!
 //! This is the semantics layer. Durability is optional and slots in behind the same
 //! append/replay/watermark contract: [`Changelog::open`] recovers from a framed WAL (see [`crate::wal`])

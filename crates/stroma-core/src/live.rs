@@ -1,13 +1,13 @@
-//! Live Query: registered queries whose result *diffs* are pushed as the graph changes (CAP-5).
+//! Live Query: registered queries whose result *diffs* are pushed as the graph changes.
 //!
 //! A live query is any function from a [`Snapshot`] to a node set (the monotonic/bounded-diff class:
 //! filter / expand / equi-join / windowed aggregate). On each engine change the registry re-evaluates
-//! and emits only the delta (added/removed) — the same query operators as one-shot reads (CAP-10,
-//! single algebra).
+//! and emits only the delta (added/removed) — the same query operators as one-shot reads (single
+//! algebra).
 //!
 //! This MVP recomputes-and-diffs (correct, simple). The efficient differential-dataflow backend
-//! (validated in Phase 0 `poc-rkyv-ivm`: incremental arrangements over rkyv zero-copy facts) slots
-//! in behind the same register/diff contract for hot-path efficiency.
+//! (validated by the `poc-rkyv-ivm` pre-implementation spike: incremental arrangements over rkyv
+//! zero-copy facts) slots in behind the same register/diff contract for hot-path efficiency.
 
 use std::collections::BTreeSet;
 
@@ -48,7 +48,7 @@ struct Live {
     last: BTreeSet<NodeId>,
 }
 
-/// A bounded registry of live queries (CAP-5: live-query count is capped).
+/// A bounded registry of live queries (the live-query count is capped).
 pub struct LiveQueries {
     next: QueryId,
     queries: Vec<Live>,

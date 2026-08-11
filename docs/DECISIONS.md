@@ -162,11 +162,11 @@
   reads indexed ∪ a brute-forced tail, closing index/structure split-brain. The 2-tuple holds *iff*
   embeddings are stamped with their node's changelog seqno and `vector_watermark` is the contiguous
   embedded prefix.
-- **Why (H3):** a naive scalar watermark left ~1/5000 dangling refs under async embedding; the contiguous
+- **Why:** a naive scalar watermark left ~1/5000 dangling refs under async embedding; the contiguous
   prefix + fresh brute-force is always complete.
 - **Evidence:** injection spike `poc-multiclock-vv` (results in the design history).
 
-### D8. Type-aware hybrid with a recall-completeness clause (H2)
+### D8. Type-aware hybrid with a recall-completeness clause
 - **Decision:** a type-ANN operator returns `ANN(probed) ∪ brute-force(unprobed type-T)`, with the
   brute-force tail **bounded by a budget**. The recall tail (missed type-T members in unprobed cells) is a
   distinct axis from the watermark tail.
@@ -174,7 +174,7 @@
   completeness tail restores it without an unbounded scan.
 - **Evidence:** `poc-filtered-ann-recall`; `IvfPq::search_complete`.
 
-### D9. Authz is scoped, not shared-index + post-filter (H4)
+### D9. Authz is scoped, not shared-index + post-filter
 - **Decision:** the authz+type predicate is applied **before** a candidate is scored; a principal never
   computes distance against data it can't see.
 - **Why:** a shared index + post-authz filter leaks the unauthorized-near count through timing and top-k
@@ -184,8 +184,8 @@
 ## Vector backend
 
 ### D10. IVF-PQ + exact re-rank (hot codes / cold raw)
-- **Context:** the A1 envelope has 0.5M–5M × 768-dim vectors; raw f32 is 1.5–15 GB — too big for the hot
-  RAM budget.
+- **Context:** the capacity envelope has 0.5M–5M × 768-dim vectors; raw f32 is 1.5–15 GB — too big for the
+  hot RAM budget.
 - **Decision:** PQ-compress each vector to `m` bytes (hot, ~48 MB @ m=96, 32×) for candidate generation;
   re-rank the top-`rerank_r` candidates by **exact** distance over the raw vectors (cold tier). IVF routes
   a query to its `nprobe` nearest cells.
@@ -325,13 +325,13 @@
   watch); the journal is bounded (fall too far behind → resync); maintenance cost is paid on the write
   path in proportion to watched rules × blast radius.
 
-## DONE SLO (the "unchanging core" bar) — measured
+## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |
 |---|---|---|
 | Durability | 0 data loss; cold-start replay < 10s @5M | 0 loss; RTO **0.81s** |
 | Type-aware hybrid | filtered recall@10 ≥ 0.9 @ type-sel 50%; authz-on warm hybrid p99 < 2ms | recall ~1.0; p99 **<1ms** (hard data) |
-| Integration | C2b open-loop, real ANN + real durability | 0.5M read p99 **1.84ms** (warm raw); 0 data loss; live diffs; version vector consistent |
+| Integration | integrated open-loop (`c2b_integrated`), real ANN + real durability | 0.5M read p99 **1.84ms** (warm raw); 0 data loss; live diffs; version vector consistent |
 
 ## License
 

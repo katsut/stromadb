@@ -1,5 +1,5 @@
 //! Fold determinism: out-of-order / multi-source / redelivered diffs converge to one snapshot.
-//! Ports the Phase 0 `poc-fold-determinism` properties onto the engine's `fold` types.
+//! Ports the `poc-fold-determinism` spike's properties onto the engine's `fold` types.
 
 use proptest::prelude::*;
 use stromadb_core::{Cardinality, ObjKey, Op, OrderKey, Snapshot, fold};

@@ -1,9 +1,9 @@
-//! Composable operator IR — one-shot server-side evaluation (CAP-10) with authz injection and the
+//! Composable operator IR — one-shot server-side evaluation with authz injection and the
 //! result contract (token budget + as_of). Runs on the frozen read contracts (query ops, hybrid,
 //! version vector); the same operators back Live Query (single algebra).
 //!
 //! authz is injected at the HEAD of every pipeline and threaded into each source as a *scoped*
-//! filter (per H4: a principal only ever scores authorized nodes — no shared-index post-filter leak).
+//! filter (a principal only ever scores authorized nodes — no shared-index post-filter leak).
 //! Every result is bounded (`max_nodes`) and stamped with the version vector.
 
 use crate::fact::{FieldId, NodeId};
@@ -15,13 +15,13 @@ use crate::version::{ReadMode, VersionVector};
 
 /// Default IVF probe / re-rank depth for the IR read path — the operating point measured on
 /// overlapping-cluster data (`examples/ann_nprobe_curve`): nprobe=8 + R=256 gives recall@10 ~1.0 at
-/// authz-on warm p99 <1ms. Re-rank depth is the cheap recall lever (raw reads cost ~0.3ms, #19).
+/// authz-on warm p99 <1ms. Re-rank depth is the cheap recall lever (raw reads measured ~0.3ms).
 const IR_NPROBE: usize = 8;
 const IR_RERANK_R: usize = 256;
 
 /// The vector backend the IR read path depends on — swappable under the frozen IR contract
 /// (`vector::VectorIndex` = exact oracle; `ivf::IvfPq` = production IVF-PQ + re-rank). `keep` combines
-/// authz + type and is applied *before* scoring (H4 scoped, no post-filter leak); `scope` is the
+/// authz + type and is applied *before* scoring (scoped — no post-filter leak); `scope` is the
 /// seqno watermark (`Some` = strict indexed-prefix, `None` = fresh). Distances: smaller = nearer.
 pub trait AnnBackend {
     fn ann_search(
@@ -227,7 +227,7 @@ pub fn run<A: AnnBackend>(
             (ids, scores)
         }
         Source::TypeAnn { q, target_type, k } => {
-            // authz + type + version scoped in one filtered search (no shared-index leak, H4).
+            // authz + type + version scoped in one filtered search (no shared-index leak).
             let scope = match pipeline.mode {
                 ReadMode::Strict => Some(vv.vector_watermark),
                 ReadMode::Fresh => None,

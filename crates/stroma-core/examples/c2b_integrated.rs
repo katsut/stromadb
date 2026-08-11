@@ -1,7 +1,8 @@
-//! #20 C2b: the integration seam under realistic load — durable changelog Engine (write + fsync) +
+//! The integration seam under realistic load — durable changelog Engine (write + fsync) +
 //! real IVF-PQ reads (type-aware hybrid via the query-IR) + Live Query (IVM) maintenance, all on one
-//! coordinated-omission open-loop timeline. Re-measures the C2b tail with the REAL backends (not the
-//! in-memory/exact stand-ins the Phase-0 spike used) and checks 0 data loss on cold reopen.
+//! coordinated-omission open-loop timeline. Re-measures the integrated-load tail with the REAL
+//! backends (not the in-memory/exact stand-ins an earlier spike used) and checks 0 data loss on
+//! cold reopen.
 //!
 //! Each epoch performs a durable write chunk (append + fsync) + incremental embeddings + materialize +
 //! snapshot + live-query re-eval (the "stall"), then serves a batch of hybrid reads. Read latency is
@@ -23,7 +24,7 @@ use stromadb_core::version::{ReadMode, VersionVector};
 mod util;
 use util::{centers, gen_vecs, percentile as pct};
 
-const N: usize = 100_000; // set higher (e.g. 500_000) for the A1 representative-scale re-measure
+const N: usize = 100_000; // set higher (e.g. 500_000) for the representative-scale re-measure
 const DIM: usize = 768;
 const M: usize = 96;
 const TRAIN: usize = 20_000;
@@ -35,7 +36,7 @@ const EPOCHS: usize = 40;
 const READS_PER_EPOCH: usize = 500;
 const WRITE_EDGES: usize = 200; // durable edges appended per epoch
 const NEW_DOCS: usize = 20; // embeddings added per epoch
-const LIVE_QUERIES: usize = 30; // A1: 30 concurrent live queries
+const LIVE_QUERIES: usize = 30; // 30 concurrent live queries
 
 fn main() {
     let ctr = centers(NC, DIM);
@@ -142,7 +143,7 @@ fn main() {
         mode: ReadMode::Fresh,
     };
 
-    println!("=== #20 C2b integrated open-loop (durable Engine + IVF-PQ + IVM) ===");
+    println!("=== integrated open-loop (durable Engine + IVF-PQ + IVM) ===");
     println!(
         "build       : {build_s:.1}s  ({N} docs, {} seed edges, {LIVE_QUERIES} live queries)",
         2 * N

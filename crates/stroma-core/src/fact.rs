@@ -2,7 +2,7 @@
 //!
 //! `Fact = ⟨subject, predicate, object, valid-time, transaction-time, provenance, confidence⟩`.
 //! Nodes and edges are projections of facts; every capability operates on this unit
-//! (see SPEC / conceptual-model §1).
+//! (see SPEC §1, Data model).
 
 /// Interned id for a predicate or entity-type name (the Field-ID catalog, see [`crate::catalog`]).
 pub type FieldId = u32;
@@ -41,7 +41,7 @@ impl ValidTime {
 }
 
 /// Whether a fact is a primary assertion or a derived (LLM/hypothesis) value. Queries default to
-/// asserted; derived is returned only on explicit request (conceptual-model §1).
+/// asserted; derived is returned only on explicit request (SPEC §1, Data model).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProvenanceKind {
     Asserted,

@@ -1,6 +1,6 @@
 //! Read primitives over a folded [`Snapshot`]: point lookup and 1–2 hop expand.
 //!
-//! These are the symbolic-core read operators (CAP-2). They operate on the merged snapshot the
+//! These are the symbolic-core read operators. They operate on the merged snapshot the
 //! engine produces (read-merge, see [`crate::engine`]); physical co-location (CSR adjacency) is a
 //! later optimization that does not change these contracts.
 

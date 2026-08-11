@@ -1,6 +1,6 @@
-//! Durability SLO probe on the *real* engine (not a standalone spike): drive the A1 representative
+//! Durability SLO probe on the *real* engine (not a standalone spike): drive the representative
 //! point (~5M facts) through `Engine::open` → `write_batch` → `sync` (group commit), then cold-restart
-//! and measure recovery. Checks the locked DONE SLO: 0 data loss + cold-start replay < 10s @5M.
+//! and measure recovery. Checks the durability SLO: 0 data loss + cold-start replay < 10s @5M.
 //!
 //! Run: `cargo run --release --example durability_slo -p stromadb-core`
 
@@ -8,7 +8,7 @@ use std::time::Instant;
 use stromadb_core::{Engine, ObjKey, WriteKind};
 
 const FACTS: u64 = 5_000_000;
-const SUBJECTS: u64 = 625_000; // avg degree 8 (A1)
+const SUBJECTS: u64 = 625_000; // avg degree 8
 const BATCH: usize = 50_000; // ETL chunk = one append+sync (group commit)
 
 fn edge(i: u64) -> (u32, WriteKind) {
@@ -52,7 +52,7 @@ fn main() {
 
     let bytes_per_rec = wal_bytes as f64 / FACTS as f64;
     let logical = 20.0; // subject(8)+predicate(4)+object(8)
-    println!("=== durability SLO — real engine @ A1 representative ({FACTS} facts) ===");
+    println!("=== durability SLO — real engine @ representative scale ({FACTS} facts) ===");
     println!(
         "write+fsync : {write_s:.2}s  ({:.2}M facts/s, {} chunks of {BATCH})",
         FACTS as f64 / write_s / 1e6,
