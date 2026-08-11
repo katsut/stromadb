@@ -184,7 +184,7 @@ impl IvfPq {
         Self::topk(exact, k)
     }
 
-    /// Recall-complete top-k (H2): the probed result unioned with a bounded brute-force over matching
+    /// Recall-complete top-k: the probed result unioned with a bounded brute-force over matching
     /// postings in *unprobed* cells. `tail_budget` caps how many extra postings may be scored — if the
     /// matching tail fits the budget, coverage is complete; otherwise the tail is bounded (the knob).
     /// Returns `(results, tail_scored, tail_truncated)` so callers can see whether completeness held.

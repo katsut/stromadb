@@ -1,5 +1,5 @@
 //! The type catalog: Field-ID interning + predicate/type definitions + minimal constraint
-//! validation at the ingest boundary (conceptual-model §1, §4; SPEC CAP-6).
+//! validation at the ingest boundary (SPEC §1–2, data model + ingest).
 //!
 //! The catalog is the *declarative* half of the schema — a lightweight ontology: vocabulary
 //! (predicates, types) and structural rules (cardinality, relationship properties, domain/range),

@@ -1,12 +1,11 @@
-//! Type-aware hybrid search (CAP-3) + version-vector read modes (CAP-3 recall
-//! completeness, R-3).
+//! Type-aware hybrid search + version-vector read modes (recall completeness).
 //!
 //! Plain ANN is type-blind: it returns vector-near results regardless of graph type, so a query
 //! for type T is polluted by semantically-near wrong-type distractors. Type-aware hybrid filters the
 //! ANN candidates by type (0 type violations). [`search`] additionally resolves the vector axis of a
 //! version vector: **strict** reads the indexed prefix only; **fresh** reads indexed ∪ brute-force
-//! tail, closing index/structure split-brain. Validated in Phase 0 (`poc-quality-hybrid`,
-//! `poc-crossstore-snapshot`).
+//! tail, closing index/structure split-brain. Validated by the `poc-quality-hybrid` and
+//! `poc-crossstore-snapshot` pre-implementation spikes.
 
 use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
@@ -66,7 +65,7 @@ mod tests {
         vec![v, 0.0, 0.0, 0.0]
     }
 
-    /// Constructed bench (the CAP-3 failure mode): wrong-type distractors sit closer to the query
+    /// Constructed bench (the type-blindness failure mode): wrong-type distractors sit closer to the query
     /// than the relevant type-T nodes. Plain ANN is fooled; type-aware is not.
     #[test]
     fn type_aware_beats_plain_ann() {

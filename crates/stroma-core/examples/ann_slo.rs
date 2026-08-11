@@ -1,7 +1,7 @@
-//! Hybrid-search SLO probe on the real IVF-PQ index at ~A1 representative scale.
-//! Checks the locked DONE SLO hybrid-search leg: filtered recall@10 ≥ 0.9 @ type-selectivity 50%,
-//! and authz-on warm hybrid p99 < 2ms. Also reports PQ compression (the A1 RAM load-bearing claim)
-//! and recall-completeness with a bounded tail (H2).
+//! Hybrid-search SLO probe on the real IVF-PQ index at representative scale (0.5M × 768-d).
+//! Checks the hybrid-search SLO: filtered recall@10 ≥ 0.9 @ type-selectivity 50%,
+//! and authz-on warm hybrid p99 < 2ms. Also reports PQ compression (the RAM load-bearing claim)
+//! and recall-completeness with a bounded tail.
 //!
 //! Run: `cargo run --release --example ann_slo -p stromadb-core`
 
@@ -139,7 +139,7 @@ fn main() {
         if p(0.99) < 2.0 { "PASS" } else { "FAIL" }
     );
 
-    // --- recall-completeness (H2): probed ∪ bounded brute-force tail ---
+    // --- recall-completeness: probed ∪ bounded brute-force tail ---
     let mut comp = 0.0;
     let mut trunc = 0;
     for (q, tr) in queries.iter().zip(&truth) {

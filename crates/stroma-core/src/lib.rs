@@ -1,7 +1,7 @@
 //! StromaDB core engine.
 //!
-//! A real-time GraphRAG engine. This crate is built up epic by epic from the
-//! Phase 0-validated design (see `SPEC.md` / `docs/ARCHITECTURE.md`):
+//! A real-time GraphRAG engine. This crate is built up layer by layer from a
+//! spike-validated design (see `SPEC.md` / `docs/ARCHITECTURE.md`):
 //! Fact model + type catalog (here) → fold/changelog → read-merge → type-aware hybrid →
 //! version-vector snapshots → IVM/Live Query → composable IR.
 

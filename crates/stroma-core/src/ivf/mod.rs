@@ -5,23 +5,23 @@
 //!   only its `nprobe` nearest cells. The approximation knob — more probes → higher recall, more work.
 //! - **PQ** (product quantization, **non-residual**): each raw vector is split into `m` subvectors,
 //!   each encoded to one byte against a 256-entry codebook (asymmetric distance / ADC). A 768-dim f32
-//!   vector (3072 B) becomes `m` bytes — the compression that fits the A1 vector footprint in RAM (raw
+//!   vector (3072 B) becomes `m` bytes — the compression that fits the vector footprint in RAM (raw
 //!   1.5 GB → ~48 MB @ m=96). This is the **hot** tier. Non-residual (vs classic IVFADC residual) makes
 //!   the ADC table cell-independent → computed once per query, so candidate-gen cost stops scaling with
 //!   `nprobe` (the p99 driver, #19). Codes are stored struct-of-arrays per cell for cache locality.
 //! - **Exact re-rank**: PQ ranking alone caps recall@10 below 0.9 in high dim (quantization error
 //!   swamps fine ranking; non-residual caps lower still). [`IvfPq::search_rerank`] generates top-
 //!   `rerank_r` candidates with PQ (cheap), then re-scores just those with the **raw** vectors —
-//!   recall@10 → ~1.0. Re-rank depth `rerank_r` is the cheap recall lever (raw reads ~0.3 ms, #19), so
-//!   the operating point is a moderate `nprobe` + generous `rerank_r` (measured: nprobe=8, R=256 →
+//!   recall@10 → ~1.0. Re-rank depth `rerank_r` is the cheap recall lever (raw reads measured ~0.3 ms),
+//!   so the operating point is a moderate `nprobe` + generous `rerank_r` (measured: nprobe=8, R=256 →
 //!   recall ~1.0, warm p99 <1 ms even on overlapping-cluster data). Raw is the **cold** tier (in-RAM
-//!   here; mmap/SSD-backed later — A1 sizing).
+//!   here; mmap/SSD-backed later — capacity sizing).
 //!
 //! Three orthogonal scoping axes ride on top, matching the frozen contracts:
-//! - **seqno watermark** (H3 / version vector): `max_seqno` reads the indexed prefix (strict) or all.
-//! - **authz** (H4): postings carry an authz label; unauthorized postings are skipped *before* scoring
+//! - **seqno watermark** (version vector): `max_seqno` reads the indexed prefix (strict) or all.
+//! - **authz**: postings carry an authz label; unauthorized postings are skipped *before* scoring
 //!   (structurally scoped — no distance is computed for them, so no timing/completeness leak).
-//! - **recall completeness** (H2): [`IvfPq::search_complete`] merges the probed result with a bounded
+//! - **recall completeness**: [`IvfPq::search_complete`] merges the probed result with a bounded
 //!   brute-force over matching postings in *unprobed* cells (`ANN(probed) ∪ brute-force(unprobed)`).
 //!
 //! Module layout: `build` (training + ingestion), `search` (ADC scoring + probe paths), and `drift`

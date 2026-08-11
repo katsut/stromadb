@@ -33,7 +33,7 @@ fn set_nocache(_file: &File) -> bool {
     false
 }
 
-const N: usize = 100_000; // set higher (e.g. 500_000) for the A1 representative-scale run
+const N: usize = 100_000; // set higher (e.g. 500_000) for the representative-scale run
 const DIM: usize = 768;
 const M: usize = 96;
 const TRAIN: usize = 20_000;

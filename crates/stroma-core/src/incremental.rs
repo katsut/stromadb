@@ -1,5 +1,5 @@
 //! Keyed-incremental Live Query maintenance — the efficient realization of the Live Query contract
-//! (CAP-5) for the completeness/rule class: instead of recomputing a standing rule over the whole
+//! for the completeness/rule class: instead of recomputing a standing rule over the whole
 //! graph on every change (recompute-and-diff, [`crate::live`]), re-check only the subjects whose
 //! inputs actually changed.
 //!

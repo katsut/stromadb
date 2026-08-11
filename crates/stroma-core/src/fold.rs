@@ -2,7 +2,7 @@
 //!
 //! Each key's state is a **join-semilattice** (commutative + associative + idempotent merge), so the
 //! fold converges under any arrival order / source partition / redelivery — the basis for
-//! deterministic replay and audit (algebra validated in Phase 0 `poc-fold-determinism`).
+//! deterministic replay and audit (algebra validated by the `poc-fold-determinism` spike).
 //!
 //! Cardinality (from the [`Catalog`]) drives behaviour: `One` → LWW-Register with history (supersede);
 //! `Many` → OR-Set whose per-element rows carry valid-time (accumulate; a `CloseMany` row ends an
