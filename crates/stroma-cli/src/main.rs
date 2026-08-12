@@ -9,6 +9,8 @@ use std::process::exit;
 use serde_json::{Value, json};
 use stromadb_store::Db;
 
+mod import;
+
 fn die(msg: &str) -> ! {
     eprintln!("error: {msg}");
     exit(1)
@@ -72,7 +74,7 @@ fn cmd_query(dir: &Path, args: &[String]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stroma <init|ingest|embed|query|stats|serve|up> --db <dir> [...]";
+    let usage = "usage: stroma <init|ingest|import|embed|query|stats|serve|up> --db <dir> [...]";
     let cmd = args
         .first()
         .map(|s| s.as_str())
@@ -123,6 +125,99 @@ fn main() {
             let db = Db::open(dir).unwrap_or_else(|e| die(&e));
             let n = db.embed_str(&read_file(file)).unwrap_or_else(|e| die(&e));
             println!("embedded: {n} vectors");
+        }
+        // CSV → graph, the mechanical mapping: `stroma import people.csv --db ./db --type Person
+        // --id id [--valid-from hired] [--valid-to left] [--edge dept:Department:member-of]...
+        // [--skip col]... [--source hr]`. Unmapped columns import as literal predicates.
+        "import" => {
+            let file = rest
+                .first()
+                .filter(|f| !f.starts_with("--"))
+                .unwrap_or_else(|| {
+                    die("usage: stroma import <file.csv> --db <dir> --type <Type> --id <col> [...]")
+                });
+            let bytes = std::fs::read(file).unwrap_or_else(|e| die(&format!("read {file}: {e}")));
+            let text = String::from_utf8(bytes).unwrap_or_else(|_| {
+                die(&format!(
+                    "{file} is not UTF-8 — convert it first (e.g. `iconv -f SHIFT_JIS -t UTF-8`)"
+                ))
+            });
+            let (headers, rows) =
+                import::parse_csv(&text).unwrap_or_else(|e| die(&format!("{file}: {e}")));
+            let node_type =
+                parse_flag(&args, "--type").unwrap_or_else(|| die("import requires --type <Type>"));
+            let id_col =
+                parse_flag(&args, "--id").unwrap_or_else(|| die("import requires --id <column>"));
+            let vf = parse_flag(&args, "--valid-from");
+            let vt = parse_flag(&args, "--valid-to");
+            // repeatable flags: every occurrence of --edge / --skip
+            let all_flags = |name: &str| -> Vec<String> {
+                args.iter()
+                    .enumerate()
+                    .filter(|(_, a)| *a == name)
+                    .filter_map(|(i, _)| args.get(i + 1).cloned())
+                    .collect()
+            };
+            let skips = all_flags("--skip");
+            let mut edges: Vec<(String, String, String)> = Vec::new();
+            for e in all_flags("--edge") {
+                let parts: Vec<&str> = e.split(':').collect();
+                let [col, ty, pred] = parts[..] else {
+                    die(&format!(
+                        "--edge must be <column>:<TargetType>:<predicate>, got {e:?}"
+                    ));
+                };
+                edges.push((col.into(), ty.into(), pred.into()));
+            }
+            let roles = headers
+                .iter()
+                .map(|h| {
+                    let role = if *h == id_col {
+                        import::Role::Id
+                    } else if vf.as_deref() == Some(h) {
+                        import::Role::ValidFrom
+                    } else if vt.as_deref() == Some(h) {
+                        import::Role::ValidTo
+                    } else if let Some((_, ty, pred)) = edges.iter().find(|(c, _, _)| c == h) {
+                        import::Role::Edge {
+                            target_type: ty.clone(),
+                            predicate: pred.clone(),
+                        }
+                    } else if skips.contains(h) {
+                        import::Role::Skip
+                    } else {
+                        import::Role::Literal
+                    };
+                    (h.clone(), role)
+                })
+                .collect();
+            for wanted in [Some(&id_col), vf.as_ref(), vt.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                if !headers.contains(wanted) {
+                    die(&format!(
+                        "column {wanted:?} is not in the header: {headers:?}"
+                    ));
+                }
+            }
+            let mapping = import::Mapping {
+                node_type,
+                roles,
+                source: parse_flag(&args, "--source"),
+            };
+            let jsonl = import::compile(&mapping, &headers, &rows).unwrap_or_else(|e| die(&e));
+            let db = Db::open(dir).unwrap_or_else(|e| die(&e));
+            let s = db.ingest_str(&jsonl).unwrap_or_else(|e| die(&e));
+            println!(
+                "imported {} rows: {} defs, {} nodes, {} facts, {} suppressed (durable_head={})",
+                rows.len(),
+                s.defs,
+                s.nodes,
+                s.facts,
+                s.suppressed,
+                s.durable_head
+            );
         }
         "query" => cmd_query(dir, &rest),
         "stats" => {

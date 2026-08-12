@@ -50,6 +50,8 @@
   #qresult .qerr { color:#ff7a90; font:12px var(--mono); }
   #qresult .qsum { font:13px/1.5 var(--sans); color:var(--fg-dim); } #qresult .qsum b { color:var(--fg); font-weight:600; }
   #qresult .qraw { margin-top:9px; } #qresult .qraw summary { cursor:pointer; font:11px var(--mono); color:var(--mut); list-style:revert; } #qresult .qraw summary:hover { color:var(--fg-dim); } #qresult .qraw pre { margin-top:6px; }
+  .imp-col { display:flex; align-items:center; gap:8px; padding:5px 0; border-bottom:1px solid color-mix(in oklab,var(--line) 55%,transparent); }
+  .imp-col b { font:12px var(--mono); } .imp-edge { display:flex; gap:5px; }
   #qhopsWrap .qchips { margin-top:6px; display:flex; flex-wrap:wrap; gap:5px; }
   #qhopsWrap .qchip { cursor:pointer; font:10.5px var(--mono); color:var(--accent); border:1px solid color-mix(in oklab,var(--accent) 40%,var(--line)); border-radius:100px; padding:2px 8px; }
   #qhopsWrap .qchip:hover { background:color-mix(in oklab,var(--accent) 14%,transparent); }
@@ -196,6 +198,7 @@
       <button class="tab active" id="tabExplore" data-tab="explore" data-i18n="explore">Explore</button>
       <button class="tab" id="tabQuery" data-tab="query" data-i18n="queryTitle">Query</button>
       <button class="tab" id="tabCompose" data-tab="compose" data-i18n="composeTitle">Compose</button>
+      <button class="tab" id="tabImport" data-tab="import" data-i18n="importTitle">Import</button>
       <span class="tabs-sp"></span>
       <button class="caret-btn" id="askCollapse" title="collapse">▾</button>
     </div>
@@ -246,6 +249,20 @@
       <button class="primary" id="composeRun" data-i18n="run">Run</button>
       <div id="qresult2"></div>
     </div>
+    <div class="tab-body hidden" id="paneImport">
+      <div class="tip" data-i18n="importIntro" style="margin-top:0">Load a CSV: pick each column's role, map date columns onto valid time, and the rows become typed facts.</div>
+      <input id="csvFile" type="file" accept=".csv,text/csv">
+      <div id="importMap" class="hidden">
+        <div class="row">
+          <div><label data-i18n="importType">node type</label><input id="impType" placeholder="Person"></div>
+          <div><label data-i18n="importSource">source (optional)</label><input id="impSource" placeholder="hr"></div>
+        </div>
+        <div id="impCols"></div>
+        <div id="impWarn"></div>
+        <button class="primary" id="impRun" data-i18n="importRun">Import</button>
+      </div>
+      <div id="impResult"></div>
+    </div>
   </section>
 
   <span class="renderer-tag" id="rtag"></span>
@@ -265,19 +282,19 @@ const api = (p,b) => fetch(p, b?{method:'POST',body:JSON.stringify(b)}:{}).then(
 
 // ---------- i18n (EN / JA / ZH) ----------
 const I18N = {
-  en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.", queryTitle:"Query", queryOp:"what do you want to find?", queryNode:"node", queryK:"results", qopPoint:"a property value", qopExpand:"linked neighbours", qopNode:"everything about a node", qopSimilar:"similar nodes (by vector)", qopTimeline:"a value over time (timeline)", qopConformance:"rule verdicts (conformance)", queryAsOf:"as of (blank = now)", queryHops:"hop chain (one-cardinality predicates, walked left→right)", queryRule:"stored rule", needHops:"enter at least one predicate for the hop chain.", noRules:"no stored rules — declare one with a rule_def ingest line.", nSegments:"{n} segment(s) — hover a bar for its interval", noSegments:"no segments — nothing was in effect on that path.", nVerdicts:"{n} subject(s) evaluated", noVerdicts:"no subjects in scope for this rule.", tlOpen:"now", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · {na} not applicable", cfAbsent:"missing — required: {req}", cfMismatch:"actual {act} ≠ required {req}", run:"Run", rolesIntro:"Each node has a sensitivity label. A role is a set of labels you're allowed to see; switch “view as” to explore the graph as someone with that access — nodes outside the role vanish. (Exploration aid, not authentication.)", labelsInUse:"labels in this data", noLabels:"no sensitivity labels in this data — every node is public.", roleSees:"“{role}” sees {n} of {m} nodes", scope:"scope", scopeTitle:"Visibility scope", scopeIntro:"Each node has a sensitivity label. Toggle which labels are visible — hidden ones (and edges to them) drop from every view. Exploration aid, not authentication.", scopeAll:"all", scopeNone:"none", scopeSees:"showing {n} of {m} nodes", restrictedScope:"hidden under the current scope.", embedding:"embedding", noVector:"this node has no embedding to search by.", noValue:"no value — this node has nothing for that property.", valuesW:"values", nLinked:"{n} linked node(s) — click to open", noLinked:"no linked nodes for that predicate.", nodeSummary:"a {type} with {n} propertie(s)", nSimilar:"{n} similar node(s) — click to open", noSimilar:"no similar nodes found.", rawJson:"raw JSON", provTip:"provenance — the source this value was ingested from", confTip:"confidence — how well-corroborated this value is (distinct agreeing sources)", findNode:"find node", findPh:"free-word search…", findNone:"no matches.", composeTitle:"Compose", composeIntro:"Chain steps into one query. Edit the example — each step shows how many nodes remain.", addStep:"+ add step", cStartNodes:"start from node", cStartSimilar:"start from nodes similar to", cFollow:"follow", cKeep:"keep only", cStart:"start", cStep:"step",
+  en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.", queryTitle:"Query", queryOp:"what do you want to find?", queryNode:"node", queryK:"results", qopPoint:"a property value", qopExpand:"linked neighbours", qopNode:"everything about a node", qopSimilar:"similar nodes (by vector)", qopTimeline:"a value over time (timeline)", qopConformance:"rule verdicts (conformance)", queryAsOf:"as of (blank = now)", queryHops:"hop chain (one-cardinality predicates, walked left→right)", queryRule:"stored rule", needHops:"enter at least one predicate for the hop chain.", noRules:"no stored rules — declare one with a rule_def ingest line.", nSegments:"{n} segment(s) — hover a bar for its interval", noSegments:"no segments — nothing was in effect on that path.", nVerdicts:"{n} subject(s) evaluated", noVerdicts:"no subjects in scope for this rule.", tlOpen:"now", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · {na} not applicable", cfAbsent:"missing — required: {req}", cfMismatch:"actual {act} ≠ required {req}", importTitle:"Import", importIntro:"Load a CSV: pick each column's role, map date columns onto valid time, and the rows become typed facts.", importType:"node type", importSource:"source (optional)", importRun:"Import", impRoleLiteral:"property", impRoleId:"row id", impRoleEdge:"edge →", impRoleSkip:"skip", impTargetPh:"TargetType", impPredPh:"predicate", impNotUtf8:"not UTF-8 — convert the file first (e.g. from Excel, save as CSV UTF-8).", impBadQuote:"unterminated quoted field.", impEmpty:"empty file.", impNeedType:"enter a node type.", impNeedId:"exactly one column must be the row id.", impNeedEdge:"edge columns need a target type and a predicate.", impEmptyId:"row {n}: empty id cell.", impBadDate:"row {n}: bad date in {c}.", impCardConflict:"\"{p}\" already exists with a different cardinality — the engine will reject it.", impRangeConflict:"\"{p}\" already exists with a different range — the engine will reject it.", impDone:"imported <b>{rows}</b> rows → {facts} facts, {nodes} nodes ({sup} no-ops skipped)", impDoneToast:"{n} facts imported", run:"Run", rolesIntro:"Each node has a sensitivity label. A role is a set of labels you're allowed to see; switch “view as” to explore the graph as someone with that access — nodes outside the role vanish. (Exploration aid, not authentication.)", labelsInUse:"labels in this data", noLabels:"no sensitivity labels in this data — every node is public.", roleSees:"“{role}” sees {n} of {m} nodes", scope:"scope", scopeTitle:"Visibility scope", scopeIntro:"Each node has a sensitivity label. Toggle which labels are visible — hidden ones (and edges to them) drop from every view. Exploration aid, not authentication.", scopeAll:"all", scopeNone:"none", scopeSees:"showing {n} of {m} nodes", restrictedScope:"hidden under the current scope.", embedding:"embedding", noVector:"this node has no embedding to search by.", noValue:"no value — this node has nothing for that property.", valuesW:"values", nLinked:"{n} linked node(s) — click to open", noLinked:"no linked nodes for that predicate.", nodeSummary:"a {type} with {n} propertie(s)", nSimilar:"{n} similar node(s) — click to open", noSimilar:"no similar nodes found.", rawJson:"raw JSON", provTip:"provenance — the source this value was ingested from", confTip:"confidence — how well-corroborated this value is (distinct agreeing sources)", findNode:"find node", findPh:"free-word search…", findNone:"no matches.", composeTitle:"Compose", composeIntro:"Chain steps into one query. Edit the example — each step shows how many nodes remain.", addStep:"+ add step", cStartNodes:"start from node", cStartSimilar:"start from nodes similar to", cFollow:"follow", cKeep:"keep only", cStart:"start", cStep:"step",
        theme:"Toggle light / dark", signOut:"Sign out", collapseSidebar:"collapse sidebar", expandSidebar:"expand sidebar", back:"back to previous focus", liveOn:"live updates on (click to pause)", livePaused:"paused (click to resume)", labels:"toggle labels", zoomIn:"zoom in", zoomOut:"zoom out", fit:"fit", help:"controls", allEdges:"all edges", egAnalyst:"e.g. analyst",
        connecting:"connecting…", live:"LIVE", paused:"paused", offline:"offline", nodes:"nodes", vec:"vec", head:"head", signedIn:"signed in", viewAsPill:"view as",
        lgFocus:"focus", lgDeep:"deep", hop:"hop",
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”" },
-  ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。", queryTitle:"クエリ", queryOp:"何を調べる？", queryNode:"ノード", queryK:"件数", qopPoint:"プロパティの値", qopExpand:"つながっている隣接ノード", qopNode:"ノードの全情報", qopSimilar:"似ているノード（ベクトル）", qopTimeline:"値の変遷（タイムライン）", qopConformance:"ルール判定（conformance）", queryAsOf:"時点指定（空＝現在）", queryHops:"ホップ連鎖（one-cardinality 述語を左→右に辿る）", queryRule:"保存済みルール", needHops:"ホップ連鎖に述語を1つ以上入力してください。", noRules:"保存済みルールなし — rule_def の ingest 行で宣言できます。", nSegments:"{n} 区間 — バーにホバーで期間表示", noSegments:"区間なし — そのパスで有効だった値はありません。", nVerdicts:"{n} 件を判定", noVerdicts:"このルールの対象がありません。", tlOpen:"現在", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · 対象外 {na}", cfAbsent:"欠落 — 要求値: {req}", cfMismatch:"実際 {act} ≠ 要求 {req}", run:"実行", rolesIntro:"各ノードには機密度ラベルが付きます。ロールは「見てよいラベルの集合」。「表示ロール」を切り替えると、その権限を持つ人の視点でグラフを探索でき、ロール外のノードは消えます。（探索補助であり認証ではありません）", labelsInUse:"このデータのラベル", noLabels:"このデータに機密度ラベルはありません — 全ノードが公開です。", roleSees:"「{role}」は {m} 中 {n} ノードを閲覧可", scope:"表示範囲", scopeTitle:"表示範囲（可視ラベル）", scopeIntro:"各ノードには機密度ラベルが付きます。表示するラベルをトグルで切替 — 隠したラベル（とそこへの辺）は全ビューから消えます。探索補助であり認証ではありません。", scopeAll:"全て", scopeNone:"なし", scopeSees:"{m} 中 {n} ノードを表示", restrictedScope:"現在の表示範囲では非表示。", embedding:"埋め込み", noVector:"このノードには検索に使う埋め込みがありません。", noValue:"値なし — このノードにそのプロパティはありません。", valuesW:"件の値", nLinked:"{n} 個の隣接ノード — クリックで開く", noLinked:"その述語での隣接ノードはありません。", nodeSummary:"{type}（プロパティ {n} 件）", nSimilar:"似ているノード {n} 件 — クリックで開く", noSimilar:"似ているノードは見つかりませんでした。", rawJson:"生 JSON", provTip:"来歴 — この値を取り込んだソース", confTip:"確信度 — この値の裏付けの強さ（合意する独立ソース数）", findNode:"ノード検索", findPh:"フリーワード検索…", findNone:"該当なし。", composeTitle:"合成", composeIntro:"ステップを鎖にして1本のクエリに。例を編集してみて — 各段で残るノード数が出ます。", addStep:"＋ステップ追加", cStartNodes:"このノードから始める", cStartSimilar:"似たノードから始める", cFollow:"辿る", cKeep:"型で絞る", cStart:"起点", cStep:"段",
+  ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。", queryTitle:"クエリ", queryOp:"何を調べる？", queryNode:"ノード", queryK:"件数", qopPoint:"プロパティの値", qopExpand:"つながっている隣接ノード", qopNode:"ノードの全情報", qopSimilar:"似ているノード（ベクトル）", qopTimeline:"値の変遷（タイムライン）", qopConformance:"ルール判定（conformance）", queryAsOf:"時点指定（空＝現在）", queryHops:"ホップ連鎖（one-cardinality 述語を左→右に辿る）", queryRule:"保存済みルール", needHops:"ホップ連鎖に述語を1つ以上入力してください。", noRules:"保存済みルールなし — rule_def の ingest 行で宣言できます。", nSegments:"{n} 区間 — バーにホバーで期間表示", noSegments:"区間なし — そのパスで有効だった値はありません。", nVerdicts:"{n} 件を判定", noVerdicts:"このルールの対象がありません。", tlOpen:"現在", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · 対象外 {na}", cfAbsent:"欠落 — 要求値: {req}", cfMismatch:"実際 {act} ≠ 要求 {req}", importTitle:"インポート", importIntro:"CSV を読み込み、各列の役割を選ぶだけ。日付列を valid time に割り付ければ、行が型付きファクトになります。", importType:"ノード型", importSource:"ソース（任意）", importRun:"インポート", impRoleLiteral:"プロパティ", impRoleId:"行 ID", impRoleEdge:"エッジ →", impRoleSkip:"無視", impTargetPh:"相手の型", impPredPh:"述語", impNotUtf8:"UTF-8 ではありません — 先に変換してください（Excel なら「CSV UTF-8」で保存）。", impBadQuote:"引用符が閉じていません。", impEmpty:"空のファイルです。", impNeedType:"ノード型を入力してください。", impNeedId:"行 ID の列をちょうど1つ選んでください。", impNeedEdge:"エッジ列には相手の型と述語が必要です。", impEmptyId:"{n} 行目: ID セルが空です。", impBadDate:"{n} 行目: {c} の日付が不正です。", impCardConflict:"「{p}」は別の cardinality で定義済み — エンジンが拒否します。", impRangeConflict:"「{p}」は別の range で定義済み — エンジンが拒否します。", impDone:"<b>{rows}</b> 行を取り込み → ファクト {facts}・ノード {nodes}（no-op {sup} 件スキップ）", impDoneToast:"ファクト {n} 件を取り込みました", run:"実行", rolesIntro:"各ノードには機密度ラベルが付きます。ロールは「見てよいラベルの集合」。「表示ロール」を切り替えると、その権限を持つ人の視点でグラフを探索でき、ロール外のノードは消えます。（探索補助であり認証ではありません）", labelsInUse:"このデータのラベル", noLabels:"このデータに機密度ラベルはありません — 全ノードが公開です。", roleSees:"「{role}」は {m} 中 {n} ノードを閲覧可", scope:"表示範囲", scopeTitle:"表示範囲（可視ラベル）", scopeIntro:"各ノードには機密度ラベルが付きます。表示するラベルをトグルで切替 — 隠したラベル（とそこへの辺）は全ビューから消えます。探索補助であり認証ではありません。", scopeAll:"全て", scopeNone:"なし", scopeSees:"{m} 中 {n} ノードを表示", restrictedScope:"現在の表示範囲では非表示。", embedding:"埋め込み", noVector:"このノードには検索に使う埋め込みがありません。", noValue:"値なし — このノードにそのプロパティはありません。", valuesW:"件の値", nLinked:"{n} 個の隣接ノード — クリックで開く", noLinked:"その述語での隣接ノードはありません。", nodeSummary:"{type}（プロパティ {n} 件）", nSimilar:"似ているノード {n} 件 — クリックで開く", noSimilar:"似ているノードは見つかりませんでした。", rawJson:"生 JSON", provTip:"来歴 — この値を取り込んだソース", confTip:"確信度 — この値の裏付けの強さ（合意する独立ソース数）", findNode:"ノード検索", findPh:"フリーワード検索…", findNone:"該当なし。", composeTitle:"合成", composeIntro:"ステップを鎖にして1本のクエリに。例を編集してみて — 各段で残るノード数が出ます。", addStep:"＋ステップ追加", cStartNodes:"このノードから始める", cStartSimilar:"似たノードから始める", cFollow:"辿る", cKeep:"型で絞る", cStart:"起点", cStep:"段",
        theme:"ライト/ダーク切替", signOut:"サインアウト", collapseSidebar:"サイドバーを閉じる", expandSidebar:"サイドバーを開く", back:"前の焦点に戻る", liveOn:"ライブ更新中（クリックで一時停止）", livePaused:"一時停止中（クリックで再開）", labels:"ラベル表示切替", zoomIn:"拡大", zoomOut:"縮小", fit:"全体表示", help:"操作説明", allEdges:"全ての辺", egAnalyst:"例: analyst",
        connecting:"接続中…", live:"ライブ", paused:"一時停止", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
        lgFocus:"焦点", lgDeep:"遠方", hop:"ホップ",
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用" },
-  zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。", queryTitle:"查询", queryOp:"想查找什么？", queryNode:"节点", queryK:"结果数", qopPoint:"属性值", qopExpand:"相连的邻居", qopNode:"节点的全部信息", qopSimilar:"相似节点（向量）", qopTimeline:"值的变迁（时间线）", qopConformance:"规则判定（conformance）", queryAsOf:"截至时点（留空=当前）", queryHops:"跳链（one-cardinality 谓词，从左到右）", queryRule:"已存规则", needHops:"请为跳链输入至少一个谓词。", noRules:"没有已存规则 — 可通过 rule_def ingest 行声明。", nSegments:"{n} 个区间 — 悬停查看时段", noSegments:"无区间 — 该路径上没有生效过的值。", nVerdicts:"已判定 {n} 个主体", noVerdicts:"该规则没有适用主体。", tlOpen:"现在", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · 不适用 {na}", cfAbsent:"缺失 — 要求值: {req}", cfMismatch:"实际 {act} ≠ 要求 {req}", run:"运行", rolesIntro:"每个节点带有敏感度标签。角色是你被允许看到的标签集合；切换“查看身份”即可以该权限者的视角浏览图，角色之外的节点会隐藏。（探索辅助，非身份验证）", labelsInUse:"本数据中的标签", noLabels:"本数据没有敏感度标签 — 所有节点均公开。", roleSees:"“{role}”可见 {m} 中的 {n} 个节点", scope:"可见范围", scopeTitle:"可见范围（标签）", scopeIntro:"每个节点带有敏感度标签。切换要显示的标签 — 隐藏的标签（及其边）会从所有视图中移除。探索辅助，非身份验证。", scopeAll:"全部", scopeNone:"无", scopeSees:"显示 {m} 中的 {n} 个节点", restrictedScope:"在当前可见范围下已隐藏。", embedding:"嵌入向量", noVector:"该节点没有可用于搜索的嵌入向量。", noValue:"无值 — 该节点没有该属性。", valuesW:"个值", nLinked:"{n} 个相连节点 — 点击打开", noLinked:"该谓词下没有相连节点。", nodeSummary:"一个 {type}，含 {n} 个属性", nSimilar:"{n} 个相似节点 — 点击打开", noSimilar:"未找到相似节点。", rawJson:"原始 JSON", provTip:"来源 — 该值摄取自的数据源", confTip:"置信度 — 该值的佐证程度（独立一致来源数）", findNode:"查找节点", findPh:"自由词搜索…", findNone:"无匹配。", composeTitle:"合成", composeIntro:"把步骤连成一条查询。编辑示例 — 每步显示剩余节点数。", addStep:"+ 添加步骤", cStartNodes:"从该节点开始", cStartSimilar:"从相似节点开始", cFollow:"沿着", cKeep:"仅保留类型", cStart:"起点", cStep:"步",
+  zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。", queryTitle:"查询", queryOp:"想查找什么？", queryNode:"节点", queryK:"结果数", qopPoint:"属性值", qopExpand:"相连的邻居", qopNode:"节点的全部信息", qopSimilar:"相似节点（向量）", qopTimeline:"值的变迁（时间线）", qopConformance:"规则判定（conformance）", queryAsOf:"截至时点（留空=当前）", queryHops:"跳链（one-cardinality 谓词，从左到右）", queryRule:"已存规则", needHops:"请为跳链输入至少一个谓词。", noRules:"没有已存规则 — 可通过 rule_def ingest 行声明。", nSegments:"{n} 个区间 — 悬停查看时段", noSegments:"无区间 — 该路径上没有生效过的值。", nVerdicts:"已判定 {n} 个主体", noVerdicts:"该规则没有适用主体。", tlOpen:"现在", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · 不适用 {na}", cfAbsent:"缺失 — 要求值: {req}", cfMismatch:"实际 {act} ≠ 要求 {req}", importTitle:"导入", importIntro:"载入 CSV：为每列选择角色，把日期列映射到 valid time，行即成为类型化事实。", importType:"节点类型", importSource:"来源（可选）", importRun:"导入", impRoleLiteral:"属性", impRoleId:"行 ID", impRoleEdge:"边 →", impRoleSkip:"忽略", impTargetPh:"目标类型", impPredPh:"谓词", impNotUtf8:"不是 UTF-8 — 请先转换（Excel 请另存为 CSV UTF-8）。", impBadQuote:"引号未闭合。", impEmpty:"文件为空。", impNeedType:"请输入节点类型。", impNeedId:"必须且只能选择一列作为行 ID。", impNeedEdge:"边列需要目标类型和谓词。", impEmptyId:"第 {n} 行：ID 单元格为空。", impBadDate:"第 {n} 行：{c} 的日期无效。", impCardConflict:"“{p}” 已以不同 cardinality 定义 — 引擎会拒绝。", impRangeConflict:"“{p}” 已以不同 range 定义 — 引擎会拒绝。", impDone:"已导入 <b>{rows}</b> 行 → {facts} 事实、{nodes} 节点（跳过 {sup} 个 no-op）", impDoneToast:"已导入 {n} 条事实", run:"运行", rolesIntro:"每个节点带有敏感度标签。角色是你被允许看到的标签集合；切换“查看身份”即可以该权限者的视角浏览图，角色之外的节点会隐藏。（探索辅助，非身份验证）", labelsInUse:"本数据中的标签", noLabels:"本数据没有敏感度标签 — 所有节点均公开。", roleSees:"“{role}”可见 {m} 中的 {n} 个节点", scope:"可见范围", scopeTitle:"可见范围（标签）", scopeIntro:"每个节点带有敏感度标签。切换要显示的标签 — 隐藏的标签（及其边）会从所有视图中移除。探索辅助，非身份验证。", scopeAll:"全部", scopeNone:"无", scopeSees:"显示 {m} 中的 {n} 个节点", restrictedScope:"在当前可见范围下已隐藏。", embedding:"嵌入向量", noVector:"该节点没有可用于搜索的嵌入向量。", noValue:"无值 — 该节点没有该属性。", valuesW:"个值", nLinked:"{n} 个相连节点 — 点击打开", noLinked:"该谓词下没有相连节点。", nodeSummary:"一个 {type}，含 {n} 个属性", nSimilar:"{n} 个相似节点 — 点击打开", noSimilar:"未找到相似节点。", rawJson:"原始 JSON", provTip:"来源 — 该值摄取自的数据源", confTip:"置信度 — 该值的佐证程度（独立一致来源数）", findNode:"查找节点", findPh:"自由词搜索…", findNone:"无匹配。", composeTitle:"合成", composeIntro:"把步骤连成一条查询。编辑示例 — 每步显示剩余节点数。", addStep:"+ 添加步骤", cStartNodes:"从该节点开始", cStartSimilar:"从相似节点开始", cFollow:"沿着", cKeep:"仅保留类型", cStart:"起点", cStep:"步",
        theme:"切换明暗", signOut:"退出登录", collapseSidebar:"收起侧边栏", expandSidebar:"展开侧边栏", back:"返回上一焦点", liveOn:"实时更新中（点击暂停）", livePaused:"已暂停（点击恢复）", labels:"切换标签", zoomIn:"放大", zoomOut:"缩小", fit:"适配", help:"操作说明", allEdges:"所有边", egAnalyst:"例: analyst",
        connecting:"连接中…", live:"实时", paused:"暂停", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
        lgFocus:"焦点", lgDeep:"更远", hop:"跳",
@@ -682,15 +699,124 @@ function setLivePill(){ const b=$('livePill'); if(!b) return; b.classList.toggle
 $('livePill').onclick=()=>{ liveOn=!liveOn; setLivePill(); if(liveOn && lastReq){ (async()=>{ try{ const res=await api('/query',lastReq); if(!res.error) loadGraph(res.nodes,res.edges,true); }catch(x){} })(); } };
 // Explore | Query are peers — two tabs of one "ask the graph" panel
 // Explore | Query | Compose are peer tabs of one "ask the graph" panel
-const PANES={explore:'paneExplore', query:'paneQuery', compose:'paneCompose'};
-const TABS={explore:'tabExplore', query:'tabQuery', compose:'tabCompose'};
+const PANES={explore:'paneExplore', query:'paneQuery', compose:'paneCompose', import:'paneImport'};
+const TABS={explore:'tabExplore', query:'tabQuery', compose:'tabCompose', import:'tabImport'};
 function setTab(name){
   for(const k in PANES){ $(TABS[k]).classList.toggle('active', k===name); $(PANES[k]).classList.toggle('hidden', k!==name); }
   $('askPanel').classList.remove('collapsed');
   if(name==='compose' && !compose.ran) runCompose();
 }
-$('tabExplore').onclick=()=>setTab('explore'); $('tabQuery').onclick=()=>setTab('query'); $('tabCompose').onclick=()=>setTab('compose');
+$('tabExplore').onclick=()=>setTab('explore'); $('tabQuery').onclick=()=>setTab('query'); $('tabCompose').onclick=()=>setTab('compose'); $('tabImport').onclick=()=>setTab('import');
 $('askCollapse').onclick=()=>$('askPanel').classList.toggle('collapsed');
+
+// ---------- import: CSV → mapping → ingest JSONL (the console twin of `stroma import`) ----------
+// Node ids are the same deterministic 48-bit FNV-1a over `type \0 raw` the CLI computes, so a file
+// imported here and one imported there line up in one graph.
+function importNodeId(type, raw){ let h=0xcbf29ce484222325n; const M=0x100000001b3n, MASK=(1n<<48n)-1n;
+  for(const b of new TextEncoder().encode(type+'\0'+raw)){ h^=BigInt(b); h=(h*M)&0xffffffffffffffffn; }
+  return Number(h&MASK); }
+function importParseDate(s){ s=s.trim(); const m=s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if(!m) return null; const [,y,mo,d,h,mi,se]=m.map(x=>x===undefined?0:+x);
+  if(mo<1||mo>12||d<1||d>31||h>23||mi>59||se>59) return null;
+  return Math.floor(Date.UTC(y,mo-1,d,h,mi,se)/1000); }
+function importDetect(cells){ const v=cells.map(c=>c.trim()).filter(Boolean); if(!v.length) return 'text';
+  if(v.every(x=>/^-?\d+$/.test(x))) return 'int';
+  if(v.every(x=>x!==''&&!isNaN(Number(x)))) return 'float';
+  if(v.every(x=>importParseDate(x)!==null)) return 'date';
+  return 'text'; }
+function importParseCsv(text){ if(text.charCodeAt(0)===0xFEFF) text=text.slice(1);
+  const rows=[]; let row=[], f='', q=false;
+  for(let i=0;i<text.length;i++){ const c=text[i];
+    if(q){ if(c==='"'&&text[i+1]==='"'){ f+='"'; i++; } else if(c==='"') q=false; else f+=c; }
+    else if(c==='"') q=true;
+    else if(c===',') { row.push(f); f=''; }
+    else if(c==='\r') {}
+    else if(c==='\n'){ row.push(f); f=''; if(row.some(x=>x!=='')) rows.push(row); row=[]; }
+    else f+=c; }
+  if(q) throw new Error(t('impBadQuote'));
+  if(f!==''||row.length){ row.push(f); if(row.some(x=>x!=='')) rows.push(row); }
+  if(!rows.length) throw new Error(t('impEmpty'));
+  return { headers: rows[0].map(h=>h.trim()), rows: rows.slice(1) }; }
+let _imp=null; // { headers, rows }
+$('csvFile').onchange=async e=>{ const file=e.target.files[0]; if(!file) return;
+  const buf=new Uint8Array(await file.arrayBuffer());
+  let text; try{ text=new TextDecoder('utf-8',{fatal:true}).decode(buf); }
+  catch{ $('impResult').innerHTML=`<div class="qerr">${t('impNotUtf8')}</div>`; return; }
+  try{ _imp=importParseCsv(text); }catch(x){ $('impResult').innerHTML=`<div class="qerr">${esc(x.message)}</div>`; return; }
+  $('impResult').innerHTML=''; $('importMap').classList.remove('hidden');
+  if(!$('impType').value) $('impType').value=file.name.replace(/\.csv$/i,'').replace(/[^A-Za-z0-9_-]/g,'') || 'Row';
+  renderImportCols(); };
+function renderImportCols(){ const {headers, rows}=_imp;
+  const colCells=i=>rows.map(r=>r[i]??'');
+  $('impCols').innerHTML=headers.map((h,i)=>{ const ty=importDetect(colCells(i)); const isDate=ty==='date';
+    return `<div class="imp-col row" data-i="${i}">
+      <div style="flex:1"><b>${esc(h)}</b> <span style="color:var(--mut);font-size:11px">${ty}</span></div>
+      <div><select class="imp-role" data-i="${i}">
+        <option value="literal">${t('impRoleLiteral')}</option>
+        <option value="id"${i===0?' selected':''}>${t('impRoleId')}</option>
+        <option value="edge">${t('impRoleEdge')}</option>
+        <option value="valid_from"${isDate&&/start|from|hired|begin/i.test(h)?' selected':''}>valid_from</option>
+        <option value="valid_to"${isDate&&/end|to|left|until/i.test(h)?' selected':''}>valid_to</option>
+        <option value="skip">${t('impRoleSkip')}</option>
+      </select></div>
+      <div class="imp-edge hidden"><input class="imp-target" placeholder="${t('impTargetPh')}" style="width:110px"><input class="imp-pred" placeholder="${t('impPredPh')}" value="${esc(h)}" style="width:110px"></div>
+    </div>`; }).join('');
+  $('impCols').querySelectorAll('.imp-role').forEach(s=>{ const sync=()=>{ s.closest('.imp-col').querySelector('.imp-edge').classList.toggle('hidden', s.value!=='edge'); importWarn(); };
+    s.onchange=sync; sync(); }); importWarn(); }
+// pre-flight conflict check against the live schema: an existing predicate with a different
+// cardinality/range would be rejected by the engine — surface it before the click
+function importWarn(){ if(!_imp) return; const warns=[];
+  const preds=(_schema&&_schema.predicates)||[];
+  $('impCols').querySelectorAll('.imp-col').forEach(col=>{ const i=+col.dataset.i; const role=col.querySelector('.imp-role').value;
+    const name= role==='edge' ? col.querySelector('.imp-pred').value.trim() : _imp.headers[i];
+    if(role!=='literal'&&role!=='edge') return;
+    const ex=preds.find(p=>p.name===name); if(!ex) return;
+    if(ex.card!=='one') warns.push(t('impCardConflict',{p:name}));
+    else if(role==='edge'&&ex.range&&ex.range.value) warns.push(t('impRangeConflict',{p:name}));
+    else if(role==='literal'&&ex.range&&ex.range.type) warns.push(t('impRangeConflict',{p:name})); });
+  $('impWarn').innerHTML=warns.length?`<div class="qerr" style="margin:6px 0">${warns.map(esc).join('<br>')}</div>`:''; }
+function compileImport(){ const {headers, rows}=_imp; const type=$('impType').value.trim();
+  if(!type) throw new Error(t('impNeedType'));
+  const roles=[...$('impCols').querySelectorAll('.imp-col')].map(col=>({ i:+col.dataset.i,
+    role: col.querySelector('.imp-role').value,
+    target: (col.querySelector('.imp-target')||{}).value?.trim(),
+    pred: (col.querySelector('.imp-pred')||{}).value?.trim() }));
+  const ids=roles.filter(r=>r.role==='id'); if(ids.length!==1) throw new Error(t('impNeedId'));
+  for(const r of roles.filter(r=>r.role==='edge')) if(!r.target||!r.pred) throw new Error(t('impNeedEdge'));
+  const source=$('impSource').value.trim();
+  const litTy=roles.map(r=>r.role==='literal'?importDetect(rows.map(x=>x[r.i]??'')):null);
+  const lines=[], nodes=new Set(), facts=[];
+  const J=JSON.stringify;
+  const types=new Set([type]); roles.forEach(r=>{ if(r.role==='edge') types.add(r.target); });
+  for(const tn of types) lines.push(`{"type_def":{"name":${J(tn)}}}`);
+  roles.forEach(r=>{ const h=headers[r.i];
+    if(r.role==='literal'){ const rv=litTy[roles.indexOf(r)]; const range=rv==='int'||rv==='date'?'int':rv==='float'?'float':'text';
+      lines.push(`{"pred_def":{"name":${J(h)},"cardinality":"one","domain":${J(type)},"range_value":"${range}"${h==='name'||h==='title'?',"display":true':''}}}`); }
+    if(r.role==='edge') lines.push(`{"pred_def":{"name":${J(r.pred)},"cardinality":"one","domain":${J(type)},"range":${J(r.target)}}}`); });
+  const vfR=roles.find(r=>r.role==='valid_from'), vtR=roles.find(r=>r.role==='valid_to');
+  rows.forEach((row,rn)=>{ const cell=i=>(row[i]??'').trim();
+    const raw=cell(roles.find(r=>r.role==='id').i); if(!raw) throw new Error(t('impEmptyId',{n:rn+2}));
+    const subj=importNodeId(type, raw); nodes.add(`{"node":{"id":${subj},"type":${J(type)}}}`);
+    let vtj='';
+    for(const [r,key] of [[vfR,'valid_from'],[vtR,'valid_to']]){ if(!r) continue; const v=cell(r.i); if(!v) continue;
+      const ts=importParseDate(v)??(/^-?\d+$/.test(v)?+v:null);
+      if(ts===null) throw new Error(t('impBadDate',{n:rn+2,c:headers[r.i]})); vtj+=`,"${key}":${ts}`; }
+    const srcj=source?`,"source":${J(source)}`:'';
+    for(const r of roles){ const v=cell(r.i); if(!v) continue;
+      if(r.role==='literal'){ const rv=litTy[roles.indexOf(r)];
+        const obj=rv==='int'?`{"int":${v}}`:rv==='date'?`{"int":${importParseDate(v)}}`:rv==='float'?`{"float":${v}}`:`{"text":${J(v)}}`;
+        facts.push(`{"fact":{"subject":${subj},"predicate":${J(headers[r.i])},"object":${obj}${vtj}${srcj}}}`); }
+      if(r.role==='edge'){ const tgt=importNodeId(r.target, v); nodes.add(`{"node":{"id":${tgt},"type":${J(r.target)}}}`);
+        facts.push(`{"fact":{"subject":${subj},"predicate":${J(r.pred)},"object":{"node":${tgt}}${vtj}${srcj}}}`); } } });
+  return [...lines, ...nodes, ...facts].join('\n')+'\n'; }
+$('impRun').onclick=async ()=>{ if(!_imp) return; const box=$('impResult');
+  let jsonl; try{ jsonl=compileImport(); }catch(x){ box.innerHTML=`<div class="qerr">${esc(x.message)}</div>`; return; }
+  box.innerHTML=`<div class="qerr" style="color:var(--mut)">${t('loading')}</div>`;
+  try{ const r=await fetch('/ingest',{method:'POST',body:jsonl}).then(x=>x.json());
+    if(r.error){ box.innerHTML=`<div class="qerr">${esc(r.error)}</div>`; return; }
+    box.innerHTML=`<div class="qsum">${t('impDone',{rows:_imp.rows.length,facts:r.facts,nodes:r.nodes,sup:r.suppressed})}</div>`;
+    await loadSchema(); fillPredSelects(); renderScope(); toast(t('impDoneToast',{n:r.facts}));
+  }catch(x){ box.innerHTML=`<div class="qerr">${esc(x)}</div>`; } };
 
 // ---------- compose: a step-builder over the pipeline op (source → steps) ----------
 // opens pre-filled with an example so it's "edit", not "build from scratch"
