@@ -79,11 +79,12 @@ fn main() {
         .unwrap_or_else(|| die(usage));
     // `serve` / `up` hand the raw flags to the serving library (it does its own flag/env parsing,
     // e.g. --addr, --api-token). `up` is the just-run-it verb: same server, but a fresh directory
-    // defaults to ./stroma-db instead of littering the current directory with db files.
+    // defaults to ./stroma-db instead of littering the current directory with db files (`--demo`
+    // is left alone — the server gives the demo its own directory under the OS temp dir).
     if cmd == "serve" || cmd == "up" {
         let mut serve_args: Vec<String> = args[1..].to_vec();
         if cmd == "up"
-            && !serve_args.iter().any(|a| a == "--db")
+            && !serve_args.iter().any(|a| a == "--db" || a == "--demo")
             && std::env::var("STROMA_DB").is_err()
         {
             serve_args.extend(["--db".into(), "./stroma-db".into()]);

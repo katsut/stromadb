@@ -1,0 +1,105 @@
+{"type_def":{"name":"Person"}}
+{"type_def":{"name":"Department"}}
+{"type_def":{"name":"Project"}}
+{"type_def":{"name":"Issue"}}
+{"type_def":{"name":"Doc"}}
+{"source_def":{"name":"hr"}}
+{"source_def":{"name":"wiki"}}
+{"source_def":{"name":"approval-log"}}
+{"pred_def":{"name":"name","cardinality":"one","domain":"Person","range_value":"text","display":true}}
+{"pred_def":{"name":"dept-name","cardinality":"one","domain":"Department","range_value":"text","display":true}}
+{"pred_def":{"name":"project-name","cardinality":"one","domain":"Project","range_value":"text","display":true}}
+{"pred_def":{"name":"title","cardinality":"one","domain":"Issue","range_value":"text","display":true}}
+{"pred_def":{"name":"content","cardinality":"one","domain":"Doc","range_value":"text"}}
+{"pred_def":{"name":"member-of","cardinality":"one","domain":"Person","range":"Department"}}
+{"pred_def":{"name":"manager-of","cardinality":"one","domain":"Department","range":"Person"}}
+{"pred_def":{"name":"works-on","cardinality":"many","domain":"Person","range":"Project"}}
+{"pred_def":{"name":"issue-type","cardinality":"one","domain":"Issue","range_value":"text"}}
+{"pred_def":{"name":"status","cardinality":"one","domain":"Issue","range_value":"text"}}
+{"pred_def":{"name":"assigned-to","cardinality":"one","domain":"Issue","range":"Person"}}
+{"pred_def":{"name":"approved-by","cardinality":"one","domain":"Issue","range":"Person"}}
+{"pred_def":{"name":"approved-at","cardinality":"one","domain":"Issue","range_value":"int"}}
+{"node":{"id":1,"type":"Person"}}
+{"node":{"id":2,"type":"Person"}}
+{"node":{"id":3,"type":"Person"}}
+{"node":{"id":4,"type":"Person"}}
+{"node":{"id":5,"type":"Person"}}
+{"node":{"id":6,"type":"Person"}}
+{"node":{"id":100,"type":"Department"}}
+{"node":{"id":200,"type":"Department"}}
+{"node":{"id":300,"type":"Department"}}
+{"node":{"id":400,"type":"Project"}}
+{"node":{"id":401,"type":"Project"}}
+{"node":{"id":1001,"type":"Issue"}}
+{"node":{"id":1002,"type":"Issue"}}
+{"node":{"id":1003,"type":"Issue"}}
+{"node":{"id":1004,"type":"Issue"}}
+{"node":{"id":1005,"type":"Issue"}}
+{"node":{"id":2001,"type":"Doc"}}
+{"node":{"id":2002,"type":"Doc"}}
+{"node":{"id":2003,"type":"Doc"}}
+{"node":{"id":2004,"type":"Doc"}}
+{"node":{"id":2005,"type":"Doc"}}
+{"node":{"id":2006,"type":"Doc"}}
+{"fact":{"subject":1,"predicate":"name","object":{"text":"Alice"},"source":"hr"}}
+{"fact":{"subject":1,"predicate":"name","object":{"text":"Alice"},"source":"wiki"}}
+{"fact":{"subject":2,"predicate":"name","object":{"text":"Bob"},"source":"hr"}}
+{"fact":{"subject":3,"predicate":"name","object":{"text":"Carol"}}}
+{"fact":{"subject":4,"predicate":"name","object":{"text":"Dave"},"source":"hr"}}
+{"fact":{"subject":5,"predicate":"name","object":{"text":"Eve"},"source":"hr"}}
+{"fact":{"subject":6,"predicate":"name","object":{"text":"Frank"},"source":"hr"}}
+{"fact":{"subject":100,"predicate":"dept-name","object":{"text":"Engineering"},"source":"hr"}}
+{"fact":{"subject":200,"predicate":"dept-name","object":{"text":"Sales"},"source":"hr"}}
+{"fact":{"subject":300,"predicate":"dept-name","object":{"text":"Operations"},"source":"hr"}}
+{"fact":{"subject":400,"predicate":"project-name","object":{"text":"Atlas"},"source":"wiki"}}
+{"fact":{"subject":401,"predicate":"project-name","object":{"text":"Beacon"},"source":"wiki"}}
+{"fact":{"subject":1,"predicate":"member-of","object":{"node":100},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":1,"predicate":"member-of","object":{"node":200},"valid_from":1719792000,"source":"hr"}}
+{"fact":{"subject":1,"predicate":"member-of","object":{"node":300},"valid_from":1735689600,"source":"hr"}}
+{"fact":{"subject":2,"predicate":"member-of","object":{"node":100},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":3,"predicate":"member-of","object":{"node":100},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":4,"predicate":"member-of","object":{"node":200},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":5,"predicate":"member-of","object":{"node":300},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":6,"predicate":"member-of","object":{"node":100},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":100,"predicate":"manager-of","object":{"node":2},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":100,"predicate":"manager-of","object":{"node":3},"valid_from":1735689600,"source":"hr"}}
+{"fact":{"subject":200,"predicate":"manager-of","object":{"node":4},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":300,"predicate":"manager-of","object":{"node":5},"valid_from":1704067200,"source":"hr"}}
+{"fact":{"subject":1,"predicate":"works-on","object":{"node":400},"props":{"role":{"text":"lead"}}}}
+{"fact":{"subject":2,"predicate":"works-on","object":{"node":400}}}
+{"fact":{"subject":2,"predicate":"works-on","object":{"node":401}}}
+{"fact":{"subject":3,"predicate":"works-on","object":{"node":401},"props":{"role":{"text":"lead"}}}}
+{"fact":{"subject":6,"predicate":"works-on","object":{"node":400}}}
+{"fact":{"subject":1001,"predicate":"title","object":{"text":"Release 24.6 — search rollout"}}}
+{"fact":{"subject":1001,"predicate":"issue-type","object":{"text":"release"}}}
+{"fact":{"subject":1001,"predicate":"status","object":{"text":"released"}}}
+{"fact":{"subject":1001,"predicate":"assigned-to","object":{"node":6}}}
+{"fact":{"subject":1001,"predicate":"approved-by","object":{"node":2},"valid_from":1717200000,"source":"approval-log"}}
+{"fact":{"subject":1001,"predicate":"approved-at","object":{"int":1717200000},"valid_from":1717200000,"source":"approval-log"}}
+{"fact":{"subject":1002,"predicate":"title","object":{"text":"Release 24.6.1 — hotfix"}}}
+{"fact":{"subject":1002,"predicate":"issue-type","object":{"text":"release"}}}
+{"fact":{"subject":1002,"predicate":"status","object":{"text":"released"}}}
+{"fact":{"subject":1002,"predicate":"assigned-to","object":{"node":2}}}
+{"fact":{"subject":1002,"predicate":"approved-by","object":{"node":2},"valid_from":1718409600,"source":"approval-log"}}
+{"fact":{"subject":1002,"predicate":"approved-at","object":{"int":1718409600},"valid_from":1718409600,"source":"approval-log"}}
+{"fact":{"subject":1003,"predicate":"title","object":{"text":"Release 25.2 — billing pipeline"}}}
+{"fact":{"subject":1003,"predicate":"issue-type","object":{"text":"release"}}}
+{"fact":{"subject":1003,"predicate":"status","object":{"text":"released"}}}
+{"fact":{"subject":1003,"predicate":"assigned-to","object":{"node":6}}}
+{"fact":{"subject":1003,"predicate":"approved-by","object":{"node":2},"valid_from":1738368000,"source":"approval-log"}}
+{"fact":{"subject":1003,"predicate":"approved-at","object":{"int":1738368000},"valid_from":1738368000,"source":"approval-log"}}
+{"fact":{"subject":1004,"predicate":"title","object":{"text":"Release 25.3 — mobile beta"}}}
+{"fact":{"subject":1004,"predicate":"issue-type","object":{"text":"release"}}}
+{"fact":{"subject":1004,"predicate":"status","object":{"text":"released"}}}
+{"fact":{"subject":1004,"predicate":"assigned-to","object":{"node":5}}}
+{"fact":{"subject":1005,"predicate":"title","object":{"text":"Refactor the import pipeline"}}}
+{"fact":{"subject":1005,"predicate":"issue-type","object":{"text":"task"}}}
+{"fact":{"subject":1005,"predicate":"status","object":{"text":"in-progress"}}}
+{"fact":{"subject":1005,"predicate":"assigned-to","object":{"node":1}}}
+{"fact":{"subject":2001,"predicate":"content","object":{"text":"Vacation policy: request time off two weeks ahead; your manager approves in the HR portal."},"source":"wiki"}}
+{"fact":{"subject":2002,"predicate":"content","object":{"text":"Remote work guidelines: overlap four hours with your team; equipment requests go through Operations."},"source":"wiki"}}
+{"fact":{"subject":2003,"predicate":"content","object":{"text":"Onboarding checklist: accounts on day one, a buddy for the first month, and a 30-day review with your manager."},"source":"wiki"}}
+{"fact":{"subject":2004,"predicate":"content","object":{"text":"Incident response runbook: page the on-call engineer, open a war room, and post status updates every 30 minutes."},"source":"wiki"}}
+{"fact":{"subject":2005,"predicate":"content","object":{"text":"Postmortem template: timeline of the incident, root cause, action items with owners and due dates."},"source":"wiki"}}
+{"fact":{"subject":2006,"predicate":"content","object":{"text":"On-call handbook: rotation schedule, escalation ladder, and how to hand over an open incident."},"source":"wiki"}}
+{"rule_def":{"name":"release-approval","rule":{"subject_type":"Issue","scope":{"predicate":"issue-type","equals":"release"},"required":{"hops":[{"predicate":"assigned-to"},{"predicate":"member-of"},{"predicate":"manager-of","as_of":"approved-at"}]},"distinct_from":{"hops":[{"predicate":"assigned-to"}]},"actual":"approved-by","absent_when":{"predicate":"status","equals":"released"}}}}

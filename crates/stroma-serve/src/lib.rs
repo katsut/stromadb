@@ -144,6 +144,18 @@ fn opt(args: &[String], name: &str, env: &str, default: &str) -> String {
 
 const UI_HTML: &str = include_str!("ui.html");
 
+/// The bundled demo dataset (`--demo`): a small org graph sized so every headline read fires on the
+/// first screen — three department transfers (multi-segment timelines), a manager change, releases
+/// whose approvals include a self-approval and a stale approval plus one missing sign-off (mixed
+/// conformance verdicts), names corroborated by zero/one/two sources (confidence tiers), and six
+/// docs with pre-computed 8-d embeddings (offline vector search).
+pub mod demo {
+    /// Schema + nodes + facts + the stored `release-approval` rule (JSONL ingest lines).
+    pub const GRAPH_JSONL: &str = include_str!("../data/demo.jsonl");
+    /// Pre-computed document embeddings (JSONL embed lines) — no external model needed.
+    pub const EMBED_JSONL: &str = include_str!("../data/demo-embed.jsonl");
+}
+
 fn json_response(status: u16, body: &Value) -> Response<std::io::Cursor<Vec<u8>>> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     Response::from_string(body.to_string())
@@ -240,11 +252,31 @@ fn handle(db: &SharedDb, req: &mut Request) -> (u16, Value) {
 /// failure). Called by the `stroma-serve` binary and by the `stroma serve` / `stroma up`
 /// subcommands, so one install carries the whole application.
 pub fn run(args: &[String]) {
-    let dir = opt(args, "--db", "STROMA_DB", ".");
+    let demo = args.iter().any(|a| a == "--demo");
+    // --demo with no explicit location gets its own directory under the OS temp dir, so trying
+    // the demo never litters the working directory; an explicit --db / $STROMA_DB still wins.
+    let dir = if demo && !args.iter().any(|a| a == "--db") && std::env::var("STROMA_DB").is_err() {
+        std::env::temp_dir()
+            .join("stroma-demo")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        opt(args, "--db", "STROMA_DB", ".")
+    };
     let addr = opt(args, "--addr", "STROMA_ADDR", "127.0.0.1:7687");
     let n_max: usize = opt(args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
         .parse()
         .unwrap_or(stromadb_store::DEFAULT_N_MAX);
+    // --demo mints a bearer token when none is configured, so the printed MCP snippet works
+    // out of the box without disabling the auth gate.
+    let api_token = {
+        let configured = opt(args, "--api-token", "STROMA_API_TOKEN", "");
+        if demo && configured.is_empty() {
+            new_token().unwrap_or_default()
+        } else {
+            configured
+        }
+    };
     let auth = Arc::new(Auth {
         user: opt(args, "--admin-user", "STROMA_ADMIN_USER", "admin"),
         pass: opt(
@@ -253,7 +285,7 @@ pub fn run(args: &[String]) {
             "STROMA_ADMIN_PASSWORD",
             "password",
         ),
-        api_token: opt(args, "--api-token", "STROMA_API_TOKEN", ""),
+        api_token,
         allow_reset: args.iter().any(|a| a == "--allow-reset")
             || std::env::var("STROMA_ALLOW_RESET").is_ok_and(|v| v == "1" || v == "true"),
         no_auth: args.iter().any(|a| a == "--no-auth")
@@ -269,6 +301,18 @@ pub fn run(args: &[String]) {
             exit(1);
         }
     };
+    // Seed the sample graph exactly once: only an empty database is written to, so restarting
+    // --demo (or pointing it at real data by mistake) never duplicates or disturbs anything.
+    if demo && db.durable_head() == 0 {
+        if let Err(e) = db.ingest_str(demo::GRAPH_JSONL) {
+            eprintln!("error: demo ingest: {e}");
+            exit(1);
+        }
+        if let Err(e) = db.embed_str(demo::EMBED_JSONL) {
+            eprintln!("error: demo embeddings: {e}");
+            exit(1);
+        }
+    }
     let server = match Server::http(&addr) {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -282,6 +326,31 @@ pub fn run(args: &[String]) {
         .clamp(2, 32);
     eprintln!("stromadb serving on http://{addr}  (db: {dir}, {workers} workers)");
     eprintln!("console: open http://{addr}/ in a browser");
+    if demo {
+        eprintln!();
+        eprintln!(
+            "demo: sample org graph loaded — 6 people, 3 departments (with transfers), 5 issues, 6 docs"
+        );
+        // never echo a custom password to the log — only the well-known default
+        if auth.pass == "password" {
+            eprintln!("  console login: {} / password", auth.user);
+        }
+        eprintln!("  try these in the console's Query tab:");
+        eprintln!("    1. a property value — node 1, predicate member-of, as of 2024-09-01");
+        eprintln!("       (Alice's department back then; blank = where she is now)");
+        eprintln!("    2. a value over time — node 1, hops: member-of, manager-of");
+        eprintln!("       (who Alice's manager was, over time — three intervals)");
+        eprintln!("    3. rule verdicts — stored rule: release-approval");
+        eprintln!("       (one OK, a self-approval, a stale approval, and a missing sign-off)");
+        if !auth.api_token.is_empty() {
+            eprintln!("  connect an agent to the same live graph (MCP over HTTP):");
+            eprintln!(
+                "    claude mcp add stroma --transport http http://{addr}/mcp --header \"Authorization: Bearer {}\"",
+                auth.api_token
+            );
+        }
+        eprintln!();
+    }
     if auth.no_auth {
         eprintln!(
             "WARNING: auth gate DISABLED (--no-auth / $STROMA_NO_AUTH) — local dev only, never expose this server."
