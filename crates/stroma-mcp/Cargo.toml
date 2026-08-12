@@ -15,5 +15,5 @@ name = "stroma-mcp"
 path = "src/main.rs"
 
 [dependencies]
-stromadb-store = { path = "../stroma-db", version = "0.2.0" }
+stromadb-store = { path = "../stroma-db", version = "0.3.0" }
 serde_json = "1"
