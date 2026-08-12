@@ -38,7 +38,6 @@
 //! var overrides the default.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 
@@ -73,13 +72,13 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// 24 random bytes from the OS CSPRNG, hex-encoded — the session token.
-fn new_token() -> String {
+/// 24 random bytes from the OS CSPRNG (via `getrandom`, so every supported platform gets real
+/// entropy), hex-encoded — the session token. Fails closed: a CSPRNG error yields `None` and the
+/// caller refuses to mint a session rather than falling back to predictable bytes.
+fn new_token() -> Option<String> {
     let mut buf = [0u8; 24];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
-    }
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    getrandom::fill(&mut buf).ok()?;
+    Some(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Length-checked constant-time string equality (avoids per-byte early-exit timing leaks).
@@ -317,7 +316,14 @@ pub fn run(args: &[String]) {
                     let ok = ct_eq(v["user"].as_str().unwrap_or(""), &auth.user)
                         && ct_eq(v["password"].as_str().unwrap_or(""), &auth.pass);
                     if ok {
-                        let tok = new_token();
+                        // fail closed: no OS entropy → no session, never a predictable token
+                        let Some(tok) = new_token() else {
+                            let _ = req.respond(json_response(
+                                500,
+                                &json!({ "error": "no OS entropy available to mint a session token" }),
+                            ));
+                            continue;
+                        };
                         sessions
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -435,5 +441,21 @@ pub fn run(args: &[String]) {
     }
     for h in handles {
         let _ = h.join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::new_token;
+
+    // Two minted tokens are present, distinct, and never the all-zero fallback the old
+    // /dev/urandom path could silently produce on platforms without that device.
+    #[test]
+    fn session_tokens_are_random_and_nonzero() {
+        let a = new_token().expect("OS CSPRNG available");
+        let b = new_token().expect("OS CSPRNG available");
+        assert_eq!(a.len(), 48);
+        assert_ne!(a, b);
+        assert_ne!(a, "0".repeat(48));
     }
 }
