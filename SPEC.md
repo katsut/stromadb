@@ -380,6 +380,15 @@ Read the properties on a specific edge.
   leak the existence of facts the caller can't see).
 - Access is **ABAC label-based**: a node's `label` is a bitmask, and a request's `allowed_labels`
   bitmask scopes what it may read (default: all). Tenant namespace isolation is the outermost boundary.
+- Subject-addressed reads (`point`, `expand`, `timeline`) are post-authz too: a subject outside the
+  caller's labels answers `denied` (point/expand) or empty (timeline), and node-valued answers
+  outside them read as absent — a direct id probe must not leak what a search would hide.
+- **Named API tokens** (the serving layer): each registered token carries a client name, an optional
+  `allowed_labels` cap, and an optional read-only bit. The cap is **intersected** with the request's
+  own `allowed_labels` (a client can narrow itself, never widen); writes arriving on a named token
+  have unset `source` fields stamped with the token's name, so *which client asserted a fact* is
+  queryable provenance like any other; read-only tokens get a clear error on any write. The same
+  tokens govern HTTP and MCP. The single legacy `--api-token` remains an unnamed, unrestricted entry.
 
 ---
 
