@@ -1534,7 +1534,10 @@ impl ReadState {
             })
             .collect();
         preds.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-        json!({ "predicates": preds, "labels": labels_in_use(&self.snap) })
+        // Stored rule names, so a client can offer "run rule X" without knowing the declarations.
+        let mut rules: Vec<&str> = self.schema.rules.keys().map(|s| s.as_str()).collect();
+        rules.sort_unstable();
+        json!({ "predicates": preds, "labels": labels_in_use(&self.snap), "rules": rules })
     }
 
     /// Whole-graph view: every declared node and its node-valued edges, authz-scoped and capped at

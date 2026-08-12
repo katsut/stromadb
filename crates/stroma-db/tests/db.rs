@@ -763,6 +763,16 @@ fn node_detail_props_and_authz() {
     // labels 0 and 3 are assigned in this graph
     assert_eq!(r["labels"], json!([0, 3]));
 
+    // stored rule names surface in the schema (sorted), so a client can offer "run rule X"
+    assert_eq!(r["rules"], json!([]));
+    db.ingest_str(concat!(
+        "{\"rule_def\":{\"name\":\"b-rule\",\"rule\":{\"subject_type\":\"Person\",\"required\":{\"hops\":[{\"predicate\":\"age\"}]},\"actual\":\"age\"}}}\n",
+        "{\"rule_def\":{\"name\":\"a-rule\",\"rule\":{\"subject_type\":\"Person\",\"required\":{\"hops\":[{\"predicate\":\"age\"}]},\"actual\":\"age\"}}}\n",
+    ))
+    .unwrap();
+    let r = db.query(&json!({"op":"schema"})).unwrap();
+    assert_eq!(r["rules"], json!(["a-rule", "b-rule"]));
+
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
