@@ -22,3 +22,4 @@ path = "src/main.rs"
 stromadb-store = { path = "../stroma-db", version = "0.2.0" }
 serde_json = "1"
 tiny_http = "0.12"
+getrandom = "0.3"
