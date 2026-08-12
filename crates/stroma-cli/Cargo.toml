@@ -15,6 +15,6 @@ name = "stroma"
 path = "src/main.rs"
 
 [dependencies]
-stromadb-store = { path = "../stroma-db", version = "0.2.0" }
-stromadb-serve = { path = "../stroma-serve", version = "0.2.0" }
+stromadb-store = { path = "../stroma-db", version = "0.3.0" }
+stromadb-serve = { path = "../stroma-serve", version = "0.3.0" }
 serde_json = "1"
