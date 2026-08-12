@@ -126,20 +126,48 @@ fn tools() -> Value {
     ])
 }
 
-fn call_tool(db: &Db, name: &str, args: &Value) -> Result<Value, String> {
+/// The caller's identity/visibility scope, resolved by the transport's auth layer (a named API
+/// token, or full access for the stdio binary and the legacy single token). Applied inside the
+/// dispatch so no tool can skip it.
+#[derive(Clone, Debug, Default)]
+pub struct Scope {
+    /// Stamped as the provenance of writes whose lines carry no `source` (None = no stamping).
+    pub default_source: Option<String>,
+    /// ABAC label bitmask capping every read: a request's own `allowed_labels` is intersected
+    /// with this, never widened. `None` = unrestricted.
+    pub allowed_labels: Option<u64>,
+    /// Writes (`ingest`) are rejected with a clear error.
+    pub read_only: bool,
+}
+
+impl Scope {
+    /// Intersect the request's `allowed_labels` (absent = all) with the scope's cap.
+    pub fn cap_labels(&self, req: &mut Value) {
+        if let Some(cap) = self.allowed_labels {
+            let asked = req["allowed_labels"].as_u64().unwrap_or(u64::MAX);
+            req["allowed_labels"] = json!(asked & cap);
+        }
+    }
+}
+
+fn call_tool(db: &Db, name: &str, args: &Value, scope: &Scope) -> Result<Value, String> {
     match name {
         "schema" | "point" | "expand" | "timeline" | "search" | "retrieve_context"
         | "conformance" => {
             let mut req = args.clone();
             req["op"] = json!(name);
+            scope.cap_labels(&mut req);
             db.query(&req)
         }
         "stats" => Ok(db.stats()),
         "ingest" => {
+            if scope.read_only {
+                return Err("this token is read-only: ingest is not allowed".into());
+            }
             let jsonl = args["jsonl"]
                 .as_str()
                 .ok_or("ingest requires a `jsonl` string")?;
-            let s = db.ingest_str(jsonl)?;
+            let s = db.ingest_str_as(jsonl, scope.default_source.as_deref())?;
             Ok(
                 json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "durable_head": s.durable_head }),
             )
@@ -157,8 +185,15 @@ fn rpc_result(id: &Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-/// Handle one JSON-RPC message; returns `Some(response)` for requests, `None` for notifications.
+/// [`handle_message_scoped`] with an unrestricted scope — the stdio binary (one process, one
+/// user) and any caller that authenticated with full access.
 pub fn handle_message(db: &Db, msg: &Value) -> Option<Value> {
+    handle_message_scoped(db, msg, &Scope::default())
+}
+
+/// Handle one JSON-RPC message under the caller's [`Scope`]; returns `Some(response)` for
+/// requests, `None` for notifications.
+pub fn handle_message_scoped(db: &Db, msg: &Value, scope: &Scope) -> Option<Value> {
     let method = msg["method"].as_str().unwrap_or("");
     // Notifications have no id and expect no response (`?` returns None here).
     let id = msg.get("id").cloned()?;
@@ -179,7 +214,7 @@ pub fn handle_message(db: &Db, msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params["name"].as_str().unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match call_tool(db, name, &args) {
+            match call_tool(db, name, &args, scope) {
                 Ok(v) => rpc_result(
                     &id,
                     json!({ "content": [{ "type": "text", "text": v.to_string() }] }),

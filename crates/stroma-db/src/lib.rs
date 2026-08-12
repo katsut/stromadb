@@ -184,6 +184,9 @@ struct WriteState {
     /// Stored rules under live maintenance (`conformance_watch`): the maintained verdict map plus a
     /// bounded diff journal, fed by every tail drain (see [`WriteState::materialize_live`]).
     live_rules: HashMap<String, LiveRule>,
+    /// Per-batch default provenance ([`Db::ingest_str_as`]): stamped on fact/retract/close lines
+    /// that carry no `source` of their own. Set for the duration of one ingest call, then cleared.
+    default_source: Option<String>,
     n_max: usize,
 }
 
@@ -301,6 +304,7 @@ impl Db {
             index: Arc::new(None),
             index_retrained: false,
             live_rules: HashMap::new(),
+            default_source: None,
             n_max,
         };
         w.rebuild_index();
@@ -397,8 +401,22 @@ impl Db {
     /// Ingest a JSONL batch (type_def / pred_def / rule_def / node / fact / retract / close).
     /// Durable on return; the updated read view is published atomically before this returns.
     pub fn ingest_str(&self, jsonl: &str) -> DbResult<IngestStats> {
+        self.ingest_str_as(jsonl, None)
+    }
+
+    /// [`Db::ingest_str`] with a default provenance: facts (and retracts/closes) whose lines carry
+    /// no `source` are stamped with `default_source` — how a serving layer records *which client*
+    /// asserted a write. An explicit per-line `source` always wins; `None` = today's behavior.
+    pub fn ingest_str_as(
+        &self,
+        jsonl: &str,
+        default_source: Option<&str>,
+    ) -> DbResult<IngestStats> {
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
-        let s = w.ingest(jsonl)?;
+        w.default_source = default_source.map(str::to_string);
+        let s = w.ingest(jsonl);
+        w.default_source = None;
+        let s = s?;
         self.publish(&w);
         Ok(s)
     }
@@ -799,9 +817,15 @@ impl WriteState {
                 let object = obj_key(&f["object"])?;
                 let valid_from = f["valid_from"].as_i64().unwrap_or(0);
                 let valid_to = f["valid_to"].as_i64();
-                // per-fact provenance: intern the optional source name to its stable Field-ID (absent
-                // → 0). Interned once and reused for this fact's edge-property writes too.
-                let source = self.source_id(f.get("source").and_then(|x| x.as_str()))?;
+                // per-fact provenance: intern the optional source name to its stable Field-ID
+                // (absent → the batch's default_source if set, else 0). Interned once and reused
+                // for this fact's edge-property writes too.
+                let src_name = f
+                    .get("source")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string)
+                    .or_else(|| self.default_source.clone());
+                let source = self.source_id(src_name.as_deref())?;
                 // No-op suppression (append-on-change): a re-assertion identical to current state is
                 // skipped, so the changelog grows with change, not with observation frequency (a
                 // connector re-sync re-emits unchanged facts wholesale). One head read per incoming
@@ -923,7 +947,12 @@ impl WriteState {
                     None => return Err(format!("unknown predicate: {pname}")),
                 };
                 let valid_from = c["valid_from"].as_i64().unwrap_or(0);
-                let source = self.source_id(c.get("source").and_then(|x| x.as_str()))?;
+                let src_name = c
+                    .get("source")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string)
+                    .or_else(|| self.default_source.clone());
+                let source = self.source_id(src_name.as_deref())?;
                 let clean = !dirty.contains(&(subject, predicate));
                 // No-op suppression: the (element's) winner is already a close at the same boundary.
                 let kind = if many {
@@ -984,7 +1013,12 @@ impl WriteState {
                     ));
                 }
                 let object = obj_key(&r["object"])?;
-                let source = self.source_id(r.get("source").and_then(|x| x.as_str()))?;
+                let src_name = r
+                    .get("source")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string)
+                    .or_else(|| self.default_source.clone());
+                let source = self.source_id(src_name.as_deref())?;
                 let removed = self
                     .eng
                     .retract_edge(source, subject, predicate, object)
@@ -1154,6 +1188,16 @@ impl ReadState {
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
+                // post-authz: a subject outside the caller's labels answers `denied` (same contract
+                // as the node view); a node-valued answer outside them reads as absent.
+                let labels = req["allowed_labels"]
+                    .as_u64()
+                    .map(|m| m as u32)
+                    .unwrap_or(u32::MAX);
+                if !label_visible(&self.snap, subject, labels) {
+                    return Ok(json!({ "denied": true }));
+                }
+                let node_ok = |o: &ObjKey| !matches!(o, ObjKey::Node(n) if !label_visible(&self.snap, *n, labels));
                 // optional valid-time as-of: `"valid_at": T` returns the One-value in effect at T
                 // (respecting the [valid_from, valid_to) interval); absent = current functional value.
                 let valid_at = req["valid_at"].as_i64();
@@ -1162,7 +1206,8 @@ impl ReadState {
                         let obj = match valid_at {
                             Some(at) => query::point_one_asof(&self.snap, subject, pid, at),
                             None => query::point_one(&self.snap, subject, pid),
-                        };
+                        }
+                        .filter(node_ok);
                         // Provenance of the current functional value: the winning version's source
                         // name (omitted when unset, or for an as-of/historical read). Additive — the
                         // `one` shape is unchanged.
@@ -1227,10 +1272,10 @@ impl ReadState {
                         // `valid_at` so a client can tell a supporting server from an older one
                         // that would silently answer with the current set.
                         Some(at) => {
-                            json!({ "many": query::point_many_asof(&self.snap, subject, pid, at).into_iter().map(fmt_obj).collect::<Vec<_>>(), "valid_at": at })
+                            json!({ "many": query::point_many_asof(&self.snap, subject, pid, at).into_iter().filter(node_ok).map(fmt_obj).collect::<Vec<_>>(), "valid_at": at })
                         }
                         None => {
-                            json!({ "many": query::point_many(&self.snap, subject, pid).into_iter().map(fmt_obj).collect::<Vec<_>>() })
+                            json!({ "many": query::point_many(&self.snap, subject, pid).into_iter().filter(node_ok).map(fmt_obj).collect::<Vec<_>>() })
                         }
                     },
                 })
@@ -1245,6 +1290,16 @@ impl ReadState {
                     .cat
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
+                // post-authz, same contract as point: an out-of-labels subject is denied, and
+                // out-of-labels nodes drop from the result set.
+                let labels = req["allowed_labels"]
+                    .as_u64()
+                    .map(|m| m as u32)
+                    .unwrap_or(u32::MAX);
+                if !label_visible(&self.snap, subject, labels) {
+                    return Ok(json!({ "denied": true }));
+                }
+                let vis = |n: &u64| label_visible(&self.snap, *n, labels);
                 // Honor the predicate's declared relationship properties (symmetric / inverse /
                 // transitive); `max_depth` bounds the transitive closure (default 16). Optional
                 // `valid_at` answers every hop from the state in effect at T (echoed back, same
@@ -1252,10 +1307,10 @@ impl ReadState {
                 let max_depth = req["max_depth"].as_u64().map(|d| d as usize).unwrap_or(16);
                 Ok(match req["valid_at"].as_i64() {
                     Some(at) => {
-                        json!({ "nodes": query::expand_rel_asof(&self.snap, &self.schema.cat, subject, pid, max_depth, at).into_iter().collect::<Vec<_>>(), "valid_at": at })
+                        json!({ "nodes": query::expand_rel_asof(&self.snap, &self.schema.cat, subject, pid, max_depth, at).into_iter().filter(vis).collect::<Vec<_>>(), "valid_at": at })
                     }
                     None => {
-                        json!({ "nodes": query::expand_rel(&self.snap, &self.schema.cat, subject, pid, max_depth).into_iter().collect::<Vec<_>>() })
+                        json!({ "nodes": query::expand_rel(&self.snap, &self.schema.cat, subject, pid, max_depth).into_iter().filter(vis).collect::<Vec<_>>() })
                     }
                 })
             }
@@ -1284,6 +1339,16 @@ impl ReadState {
                             .ok_or(format!("unknown predicate: {name}"))?,
                     );
                 }
+                // post-authz, same contract as point: an out-of-labels subject answers empty, and
+                // segments whose value is an out-of-labels node are dropped (an interval naming a
+                // hidden node would leak its existence).
+                let labels = req["allowed_labels"]
+                    .as_u64()
+                    .map(|m| m as u32)
+                    .unwrap_or(u32::MAX);
+                if !label_visible(&self.snap, subject, labels) {
+                    return Ok(json!({ "segments": [] }));
+                }
                 // Trace the walk's support set: every (node, predicate) history it reads. The
                 // answer's confidence is the weakest link over those supports (min tier), so a
                 // three-hop answer resting on one source-less hop reads as low even when the other
@@ -1295,6 +1360,7 @@ impl ReadState {
                     });
                 let segments: Vec<Value> = segs
                     .into_iter()
+                    .filter(|s| !matches!(&s.value, ObjKey::Node(n) if !label_visible(&self.snap, *n, labels)))
                     .map(|s| {
                         json!({
                             "value": fmt_obj(s.value),
