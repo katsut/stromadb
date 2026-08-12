@@ -2,92 +2,86 @@
 
 **StromaDB** is a source-available, Rust **real-time GraphRAG engine optimized for LLMs**:
 it fuses **meaning (vectors) × structure (typed graph) × time (bitemporal)** so an LLM can retrieve
-relevant, structurally-correct context in low-ms — over a graph that is updated by a live stream.
+relevant, structurally-correct, point-in-time context in low-ms — over a graph that is updated by a
+live stream.
 
 ![The StromaDB web console: a GPU-rendered graph explorer with type-aware vector search and node inspection](docs/console.png)
 
-<sub>The built-in console (`stroma-serve` at `http://localhost:7687/`): explore a neighbourhood, run a type-aware vector search, inspect a node down to its embedding, and compose queries — all live.</sub>
+<sub>The built-in console at `http://localhost:7687/`: explore a neighbourhood, run an as-of read, a
+timeline, or a rule evaluation, import a CSV, and inspect a node down to its embedding — all live.</sub>
 
-It targets the **bounded scale of a single organization** (per-org graph is bounded), which is what
-makes low-cost *and* high-performance achievable at once: the hot working set fits in memory, the
-footprint is small, and idle tenants can scale to zero.
-
-> Status: **core engine implemented and measured** — durable changelog (framed WAL, group-commit
-> fsync), IVF-PQ vector index with exact re-rank, typed hybrid reads, a composable query IR
-> (point / type-ANN / expand / filter / top-k), incremental Live Query maintenance, and a `stroma`
-> CLI. Pre-1.0: single-node, single-threaded serving; see [docs/DECISIONS.md](docs/DECISIONS.md) for
-> known limitations and roadmap. A `stroma` CLI and a `stroma-serve` HTTP surface ship alongside the
-> engine. Source-available (Elastic License v2).
-
-## Why
-
-Real-time LLM retrieval needs a graph that ingests a stream instantly and answers
-**type-aware hybrid** queries cheaply. Existing options don't fit this shape:
-
-- Vector DBs are **type-blind** — they return semantically near but structurally wrong results
-  (a "Python" skill, doc, and person all look alike to pure ANN).
-- Property graphs (Neo4j/…) are batch-oriented, not stream-native.
-- `Postgres + pgvector` splits meaning from structure across separate I/O paths and contends on
-  stream updates.
-
-StromaDB is built for LLM retrieval: stream-native, vector + typed-graph, low-cost, bounded-scale.
-
-## Core capabilities
-
-- **Type-aware hybrid search** — ANN candidates filtered/reranked by graph type, so disjoint-type
-  mis-fusion is rejected.
-- **Typed property graph** — first-class typed edges with per-edge **properties** (a level, a role, an
-  allocation) in a separate store, ingested alongside facts (`"props": {…}`) and read back per edge;
-  ingest applies minimal constraint checks (domain/range, cardinality).
-- **Stream ingest, no write stalls** — append-only changelog; explicit backpressure under overload.
-- **Composable operator query IR** — `point / type-ANN / expand / filter / top-k` composed as a
-  pipeline (filters cover type, current value, and **valid-time as-of** value). Standing queries are
-  maintained incrementally: recompute-and-diff generally, plus **keyed-incremental** maintenance for
-  completeness/rule queries (O(touched), verified equal to a full recompute). Unifying one-shot and
-  Live evaluation under one algebra is the design direction; full differential-dataflow maintenance of
-  arbitrary pipelines is on the roadmap.
-- **Temporal reads** — facts carry valid-time; **valid-time as-of** point reads return the value in
-  effect at a past instant, and transaction-time as-of is a version-vector pin (`strict` / `fresh`
-  read modes). Full temporal query scopes (`ever` / `overlap`, and valid-time over multi-valued
-  edges) are on the roadmap.
-- **No internal model** — a deterministic retrieval/query layer; the LLM is always the caller.
-  Model-written summaries are stored with provenance, kept distinct from asserted facts.
-- **Self-hostable single-node engine** under a source-available license.
-
-See **[SPEC.md](SPEC.md)** for the capability/constraint contract,
-**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the design, and
-**[docs/DECISIONS.md](docs/DECISIONS.md)** for *why* the engine is shaped this way — the decision trail
-with the measurements that settled each call (and the known limitations / roadmap).
-
-## Console (web UI)
-
-`stroma-serve` ships a built-in web console — one dependency-free HTML file, no build step — served
-at `http://localhost:7687/`. It's a GPU-rendered (WebGL2) graph explorer with three peer modes:
-
-- **Explore** — walk a node's neighbourhood filtered by hop distance and type scope, with live force
-  layout, draggable nodes, and on-graph distance labels; inspect any node down to its embedding.
-- **Query** — run a point/expand read, a type-aware vector search, or "find similar", and see the
-  result laid out on the graph.
-- **Compose** — chain primitives (source → expand → filter → top-k) step by step, with a result
-  count at each stage.
-
-The graph updates in place as the database changes (a red **LIVE** indicator shows when a stream is
-feeding it). Session login, light/dark themes, and EN / JA / ZH are built in.
+## Try it in 60 seconds
 
 ```bash
-stroma-serve --db ./mydb --addr 127.0.0.1:7687
-# then open http://localhost:7687/ in a browser
+docker run -p 7687:7687 ghcr.io/katsut/stromadb:latest --demo
+# or, with a Rust toolchain (compiles from source, takes a few minutes):
+cargo install stromadb && stroma up --demo
 ```
 
-Load the [sample dataset](examples/) first to explore a populated graph in about a minute.
+`--demo` boots a self-contained sample org graph — people, departments with transfers, releases
+with planted approval violations, docs with embeddings — and prints everything to explore it:
 
-## Quickstart (CLI)
+- the **console URL** and login,
+- three copy-paste queries for the console's Query tab:
+  **as-of** (*which department was Alice in on 2024-09-01?*), **timeline** (*who was her manager,
+  over time — three intervals*), and **rule verdicts** (*one clean approval, a self-approval, a
+  stale approval, a missing sign-off*),
+- a ready-to-paste **`claude mcp add` command** with a minted bearer token, so your agent talks to
+  the same live graph immediately.
+
+The demo lives in its own directory under the OS temp dir and seeds only an empty database —
+restarting never duplicates anything.
+
+## One server, many agents
+
+`stroma serve` (or `stroma up`) is a standalone server: the HTTP API, the web console, and an MCP
+endpoint (`POST /mcp`) run against one live database, so **N agents and the humans share the same
+graph** — and see each other's writes immediately.
+
+```mermaid
+flowchart LR
+  A["Claude (support agent)"] -->|MCP over HTTP| S
+  B["Claude (analytics agent)"] -->|MCP over HTTP| S
+  H["humans (web console)"] --> S
+  S["stroma serve — one live database"]
+```
+
+Give each agent its own identity with a token registry (`--tokens tokens.json`):
+
+```json
+{"tokens":[
+  {"name":"support-agent","token":"...","labels":15},
+  {"name":"auditor","token":"...","read_only":true}
+]}
+```
+
+- a named token's writes carry its name as **provenance** — *which agent said this* is queryable,
+  and agreement between different agents counts as corroboration in confidence signals;
+- `labels` caps what the token can read (ABAC bitmask, intersected with each request — a client can
+  narrow itself, never widen);
+- `read_only` tokens get a clear 403 on any write.
+
+For a single-process/offline setup, `stroma-mcp --db ./mydb` speaks MCP over stdio against the
+directory directly (one process at a time — the directory is locked while a server runs).
+
+## Load your own data
+
+**CSV** — in the console's **Import** tab: drop a file, pick each column's role (property / row id /
+edge / `valid_from` / `valid_to` / skip), and rows become typed facts. Date columns map onto
+valid time, so as-of and timeline queries work on your data immediately. The CLI twin:
 
 ```bash
-cargo install stromadb                   # installs the `stroma` binary
+stroma import people.csv --db ./mydb --type Person --id id \
+  --valid-from hired --valid-to left --edge dept:Department:member-of --source hr
+```
 
+Node ids are a deterministic hash of `(type, row id)`: re-importing the same file is a no-op, and
+files that share key values line up in one graph.
+
+**JSONL** — the full wire format (schema, nodes, facts with valid-time and provenance, rules):
+
+```bash
 stroma init --db ./mydb
-
 cat > data.jsonl <<'EOF'
 {"type_def":{"name":"Person"}}
 {"type_def":{"name":"Project"}}
@@ -105,80 +99,97 @@ stroma embed emb.jsonl --db ./mydb       # embeddings are received, never comput
 
 stroma query point 1 age --db ./mydb                     # {"one":{"int":34}}
 stroma query expand 1 works-on --db ./mydb               # {"nodes":[2]}
-echo '[1.0,0.0,0.0,0.0]' > q.json
-stroma query search --type Person --k 5 --vector-file q.json --db ./mydb
 stroma stats --db ./mydb
 ```
 
-The database directory holds only the authoritative inputs (changelog WAL, schema/node
-assignments, received embeddings); derived stores (the vector index) rebuild on open.
+The database directory holds only the authoritative inputs (changelog WAL, schema/node assignments,
+received embeddings); derived stores (the vector index) rebuild on open. See **[SPEC.md](SPEC.md)**
+for the complete ingest and query contract.
 
-## Quickstart (Docker)
+## Why
 
-Run the HTTP surface with no local Rust toolchain — a fresh data volume is initialized on first run:
+Real-time LLM retrieval needs a graph that ingests a stream instantly and answers
+**type-aware hybrid** queries cheaply. Existing options don't fit this shape:
 
-```bash
-docker run -p 7687:7687 -v stroma-data:/data ghcr.io/katsut/stromadb:latest   # linux/amd64 + arm64
+- Vector DBs are **type-blind** — they return semantically near but structurally wrong results
+  (a "Python" skill, doc, and person all look alike to pure ANN).
+- Property graphs (Neo4j/…) are batch-oriented, not stream-native.
+- `Postgres + pgvector` splits meaning from structure across separate I/O paths and contends on
+  stream updates.
 
-curl -s localhost:7687/health
-curl -s -X POST localhost:7687/ingest -d '{"type_def":{"name":"Person"}}'
-```
+StromaDB is built for LLM retrieval: stream-native, vector + typed-graph + bitemporal, low-cost.
+It targets the **bounded scale of a single organization**, which is what makes low-cost *and*
+high-performance achievable at once: the hot working set fits in memory, the footprint is small,
+and idle tenants can scale to zero.
 
-Or build locally:
+## Core capabilities
 
-```bash
-docker compose up            # builds the image, serves on localhost:7687 (persisted in a volume)
-# or without compose:
-docker build -t stromadb .
-docker run -p 7687:7687 -v stroma-data:/data stromadb
-```
+- **Type-aware hybrid search** — ANN candidates filtered/reranked by graph type, so disjoint-type
+  mis-fusion is rejected.
+- **Bitemporal facts** — every fact carries a valid-time interval and a transaction time.
+  **As-of** reads answer *what was true at instant T*; the **timeline** op answers *over which
+  intervals was it true* through a chain of hops; late corrections re-slice history instead of
+  corrupting it.
+- **Declared rules, live verdicts** — declare a rule once (*an issue's approver must be its
+  department's manager as of the approval instant, and must differ from its author*) and read
+  deterministic per-subject verdicts (`OK` / `MISMATCH` stale|wrong / `ABSENT`), maintained
+  **incrementally** as writes land (measured 100–1800× cheaper than re-evaluation).
+- **Provenance & confidence** — facts name their source; reads surface it with a coarse confidence
+  tier (corroboration, freshness), and multi-hop answers carry a **weakest-link** tier naming the
+  bottleneck hop.
+- **Typed property graph** — typed edges with per-edge **properties** (a level, a role, an
+  allocation), minimal constraint validation at ingest (domain/range, cardinality).
+- **Stream ingest, no write stalls** — append-only changelog; explicit backpressure under overload;
+  no-op suppression keeps the log growing with change, not observation frequency.
+- **Composable operator query IR** — `point / type-ANN / expand / filter / top-k` composed as a
+  pipeline; standing queries maintained incrementally.
+- **No internal model** — a deterministic retrieval/query layer; the LLM is always the caller.
+  Model-written values are stored as `derived` with provenance, distinct from asserted facts.
 
-The image ships `stroma-serve` (entrypoint), plus the `stroma` CLI and `stroma-mcp` binaries.
+See **[SPEC.md](SPEC.md)** for the capability/constraint contract,
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the design, and
+**[docs/DECISIONS.md](docs/DECISIONS.md)** for *why* the engine is shaped this way — the decision
+trail with the measurements that settled each call (and the known limitations / roadmap).
+
+## Console (web UI)
+
+One dependency-free HTML file, no build step, served at `http://localhost:7687/`. A GPU-rendered
+(WebGL2) graph explorer with four peer modes:
+
+- **Explore** — walk a node's neighbourhood with live force layout; inspect any node down to its
+  embedding, provenance, and confidence chips.
+- **Query** — point (with **as of**), expand, node detail, similar-by-vector, **timeline**
+  (interval bars over a hop chain), and **conformance** (verdict counts + gap rows).
+- **Compose** — chain primitives (source → expand → filter → top-k) step by step.
+- **Import** — CSV → column roles → typed facts, with valid-time mapping and conflict warnings.
+
+The graph updates in place as the database changes (a red **LIVE** indicator shows when a stream is
+feeding it). Session login, light/dark themes, and EN / JA / ZH are built in.
 
 ## Serve (HTTP)
 
-`stroma-serve` exposes the same database over HTTP so an agent or service can query and ingest it
-without embedding the engine — the intended surface for an LLM caller. It also serves the built-in
-web [Console](#console-web-ui) (pictured above) at the same address.
-
 ```bash
-stroma-serve --db ./mydb --addr 127.0.0.1:7687   # worker pool: concurrent reads, exclusive writes
+stroma serve --db ./mydb --addr 127.0.0.1:7687   # or: stroma up  (init-if-missing + serve)
 
 curl -s localhost:7687/health
-curl -s -X POST localhost:7687/query  -d '{"op":"expand","subject":1,"predicate":"works-on"}'
-curl -s -X POST localhost:7687/query  -d '{"op":"search","type":"Person","vector":[...],"k":10,"allowed_labels":7}'
-# retrieve_context: assembled, date-stamped, current-value context ready for an LLM
-curl -s -X POST localhost:7687/query  -d '{"op":"retrieve_context","type":"Doc","vector":[...],"content":"body","date":"created_at","k":8}'
-curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2}}}'
-# edge properties: attach attributes to an edge, then read them back
-curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2},"props":{"role":"lead","allocation":60}}}'
-curl -s -X POST localhost:7687/query  -d '{"op":"edge_props","subject":1,"predicate":"works-on","object":{"node":2}}'
+curl -s -X POST localhost:7687/query  -d '{"op":"point","subject":1,"predicate":"age"}'
+curl -s -X POST localhost:7687/query  -d '{"op":"timeline","subject":1,"hops":["member-of","manager-of"]}'
+curl -s -X POST localhost:7687/query  -d '{"op":"conformance","rule_name":"release-approval"}'
+curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2},"props":{"role":"lead"}}}'
 curl -s localhost:7687/stats
 ```
 
 Settings come from flags or environment variables (flag > env > default) — see
-**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** and `.env.example`.
+**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** and `.env.example`. Reads are authz-scoped
+(`allowed_labels`, capped per token) and stamped with an `as_of` version vector. The `stroma-serve`
+binary still ships and behaves identically to `stroma serve`.
 
-Reads are authz-scoped (`allowed_labels` is the caller's ABAC bitmask) and stamped with an `as_of`
-version vector. v1 handles requests sequentially (single-threaded engine, pre-1.0); concurrent reads
-are on the roadmap.
-
-## MCP (agent tools)
-
-`stroma-mcp` speaks the Model Context Protocol over stdio, exposing the database as tools an LLM agent
-can call directly — `point`, `expand`, `search` (authz-scoped hybrid), `stats`, `ingest`.
+Docker, without a local Rust toolchain:
 
 ```bash
-stroma-mcp --db ./mydb          # newline-delimited JSON-RPC 2.0 over stdin/stdout
+docker run -p 7687:7687 -v stroma-data:/data ghcr.io/katsut/stromadb:latest
+# docker compose up   — builds locally, serves on :7687, persists in a volume
 ```
-
-Point an MCP client at that command; `tools/list` returns the schemas, `tools/call` runs a tool and
-returns the JSON result as text content.
-
-The same tools are also served over HTTP by `stroma-serve` at `POST /mcp` (MCP streamable HTTP
-transport, stateless: one JSON-RPC message per request), so an MCP agent and the web console can
-work against the same live database through one process. The endpoint honors the same auth as the
-other serve endpoints (session cookie or `Authorization: Bearer <api-token>`).
 
 ## Performance (measured, reproducible)
 
@@ -190,12 +201,21 @@ Apple M-series laptop. Every row reproduces with one command from `crates/stroma
 | Hybrid read — vector top-10 + type/label filter + 1-hop expand, **while durably writing** | **p50 0.86 ms / p99 1.84 ms** @ 0.5M docs | `--example c2b_integrated` |
 | Write → query-visible (durable fsync + vector add + consistent view refresh) | **single-digit ms**; view refresh is O(changed keys), not O(state) | `--example c2b_integrated` |
 | Filtered recall@10 @ 50% type selectivity (overlapping-cluster data, exact re-rank) | **~0.99–1.0** at ~1 ms warm p99 | `--example ann_nprobe_curve` |
+| Incremental rule-verdict maintenance | **1.6–16.5 µs/write** vs 171 µs–29.9 ms full re-eval (1K→100K subjects) | `--example conformance_ivm` |
 | Cold-start recovery (RTO) | **0.81 s for 5M facts**; torn-write → **0 data loss** | `--example durability_slo` |
 | Ingest (append + group-commit fsync) | **~7M facts/s** | `--example durability_slo` |
 | Hot-tier memory | **96 B/vector** PQ codes (32× vs raw f32); the raw re-rank tier is cold/SSD-able | `--example ann_slo` |
-| Integrated open-loop (writes + reads + live queries) | **0 data loss**, version-consistent reads | `--example c2b_integrated` |
 
 Notes: numbers are from our runs on the hardware above — run the examples on yours. Tail latencies
 (p99) are reported, not just medians. No vendor comparisons here; see
-[docs/DECISIONS.md](docs/DECISIONS.md) for known limitations (single-threaded serving, file-WAL
-compaction pending, cold-SSD re-rank caveat).
+[docs/DECISIONS.md](docs/DECISIONS.md) for known limitations (single-threaded serving, cold-SSD
+re-rank caveat) and the roadmap.
+
+## Status & license
+
+Pre-1.0, single-node, under active development. Core engine implemented and measured: durable
+changelog (framed WAL, group-commit fsync, compaction), IVF-PQ vector index with exact re-rank and
+drift detection, typed hybrid reads, bitemporal as-of + timeline reads, incrementally maintained
+conformance verdicts, a composable query IR, and the unified `stroma` binary (CLI + server + console
++ MCP). Source-available under the **Elastic License 2.0** — free to use, embed, and modify; the
+restriction is offering it as a managed service.
