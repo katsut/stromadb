@@ -1,5 +1,8 @@
 # Examples
 
+> The fastest first run is `stroma up --demo` — a bundled sample graph with history, planted rule
+> violations, and embeddings, no files needed. The dataset below is the manual-loading alternative.
+
 ## `org-sample.ndjson`
 
 A small, self-contained fictional-company knowledge graph for trying the console and query
