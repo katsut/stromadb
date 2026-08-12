@@ -763,6 +763,13 @@ impl WriteState {
                 apply_def(Arc::make_mut(&mut self.schema), &v)?;
                 self.append_line("schema.jsonl", line)?;
                 s.defs += 1;
+            } else if v.get("source_def").is_some() {
+                // A client-declared provenance source (SPEC §2) — same registration a fact's own
+                // `source` would trigger, so re-sending one a fact already interned is a no-op line
+                // in schema.jsonl either way (apply_def re-interns idempotently on replay).
+                apply_def(Arc::make_mut(&mut self.schema), &v)?;
+                self.append_line("schema.jsonl", line)?;
+                s.defs += 1;
             } else if v.get("rule_def").is_some() {
                 // A named conformance rule: parse + store (names are validated at evaluation, not
                 // here — the referenced predicates may be declared later), persist for replay.
@@ -2165,10 +2172,10 @@ fn read_u64(p: &Path) -> Vec<u64> {
 }
 
 fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
-    // A `source_def` records a provenance source name interned during fact ingest (never sent by a
-    // client — `WriteState::source_id` appends it). Replaying it here, interleaved with the type/pred
-    // defs in `schema.jsonl`, re-interns it in the same order so the numeric `source` the WAL stores
-    // resolves back to this name after a reopen.
+    // A `source_def` registers a provenance source name — sent by a client up front (SPEC §2) or
+    // appended by `WriteState::source_id` when a fact's `source` interns a new name. Replaying it
+    // here, interleaved with the type/pred defs in `schema.jsonl`, re-interns it in the same order
+    // so the numeric `source` the WAL stores resolves back to this name after a reopen.
     if let Some(sd) = v.get("source_def") {
         let id = schema
             .cat
@@ -2282,7 +2289,9 @@ fn obj_key(v: &Value) -> DbResult<ObjKey> {
     Err("object must be one of {node|int|float|text|bool}".into())
 }
 
-/// A bare JSON scalar → value ObjKey, for edge-property values (`{"level": 5, "role": "lead"}`).
+/// An edge-property value → literal ObjKey. Accepts both shapes SPEC shows: a bare JSON scalar
+/// (`{"level": 5, "role": "lead"}`) and the single-key typed object used everywhere else
+/// (`{"role": {"text": "lead"}}`). `node` stays excluded — edge properties are literals.
 fn value_key(v: &Value) -> DbResult<ObjKey> {
     match v {
         Value::Bool(b) => Ok(ObjKey::Bool(*b)),
@@ -2290,7 +2299,11 @@ fn value_key(v: &Value) -> DbResult<ObjKey> {
         Value::Number(n) if n.is_i64() => Ok(ObjKey::Int(n.as_i64().unwrap())),
         Value::Number(n) if n.is_u64() => Ok(ObjKey::Int(n.as_u64().unwrap() as i64)),
         Value::Number(n) => Ok(ObjKey::Float((n.as_f64().unwrap() as f32 as f64).to_bits())),
-        _ => Err("edge-property value must be a number, string, or bool".into()),
+        Value::Object(_) if v.get("node").is_none() => obj_key(v),
+        _ => Err(
+            "edge-property value must be a literal: a number/string/bool, or {int|float|text|bool}"
+                .into(),
+        ),
     }
 }
 
