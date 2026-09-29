@@ -294,6 +294,18 @@ fn serve_api_token_auth() {
         403,
         "reset must be disabled without --allow-reset"
     );
+    // the refusal names the flag, and /me reports the same state and hint for the console
+    let (st, body) = http_bearer_body(&addr, "POST", "/reset", "", Some("s3cr3t-token"));
+    assert_eq!(st, 403);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let hint = v["error"].as_str().unwrap();
+    assert!(hint.contains("start with --allow-reset"), "hint: {hint}");
+    let (st, body) = http_bearer_body(&addr, "GET", "/me", "", Some("s3cr3t-token"));
+    assert_eq!(st, 200);
+    let me: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(me["allow_reset"], false);
+    assert_eq!(me["read_only"], false);
+    assert_eq!(me["reset_hint"], hint);
 
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -450,6 +462,12 @@ fn serve_reset_when_enabled() {
     ))
     .unwrap();
     drop(db);
+    let tokens = base.join("tokens.json");
+    std::fs::write(
+        &tokens,
+        r#"{"tokens":[{"name":"viewer","token":"ro","read_only":true}]}"#,
+    )
+    .unwrap();
 
     let port = 8300 + (std::process::id() % 900) as u16;
     let addr = format!("127.0.0.1:{port}");
@@ -461,6 +479,8 @@ fn serve_reset_when_enabled() {
             &addr,
             "--api-token",
             "tok",
+            "--tokens",
+            tokens.to_str().unwrap(),
             "--allow-reset",
         ])
         .spawn()
@@ -488,11 +508,32 @@ fn serve_reset_when_enabled() {
         200,
         "fact should be queryable before reset"
     );
+    // /me reports the flag (no hint) and each caller's read-only bit
+    let me = |tok: &str| -> serde_json::Value {
+        let (st, body) = http_bearer_body(&addr, "GET", "/me", "", Some(tok));
+        assert_eq!(st, 200);
+        serde_json::from_str(&body).unwrap()
+    };
+    let rw = me("tok");
+    assert_eq!(rw["allow_reset"], true);
+    assert_eq!(rw["read_only"], false);
+    assert!(rw["reset_hint"].is_null());
+    assert_eq!(me("ro")["read_only"], true);
+    // a read-only token may not reset even with the flag
+    assert_eq!(http_bearer(&addr, "POST", "/reset", "", Some("ro")), 403);
+    let head = |tok: &str| -> u64 {
+        let (st, body) = http_bearer_body(&addr, "GET", "/stats", "", Some(tok));
+        assert_eq!(st, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        v["facts"]["durable_head"].as_u64().unwrap()
+    };
+    assert!(head("tok") > 0, "seeded database has a durable head");
     assert_eq!(
         http_bearer(&addr, "POST", "/reset", "", Some("tok")),
         200,
         "reset must succeed when enabled"
     );
+    assert_eq!(head("tok"), 0, "reset clears the durable head");
     // after reset the predicate is gone → query errors (400)
     assert_eq!(
         http_bearer(

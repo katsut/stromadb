@@ -2220,8 +2220,10 @@ fn read_lines(p: &Path) -> Vec<String> {
 fn read_f32(p: &Path) -> Vec<f32> {
     fs::read(p)
         .map(|b| {
-            b.chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            b.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
                 .collect()
         })
         .unwrap_or_default()
@@ -2230,8 +2232,10 @@ fn read_f32(p: &Path) -> Vec<f32> {
 fn read_u64(p: &Path) -> Vec<u64> {
     fs::read(p)
         .map(|b| {
-            b.chunks_exact(8)
-                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            b.as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| u64::from_le_bytes(*c))
                 .collect()
         })
         .unwrap_or_default()
