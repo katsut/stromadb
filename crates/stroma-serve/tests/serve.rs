@@ -601,3 +601,87 @@ fn serve_reset_when_enabled() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Wait until the server accepts connections.
+fn wait_up(addr: &str) {
+    for _ in 0..50 {
+        if TcpStream::connect(addr).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("server did not come up");
+}
+
+#[test]
+fn serve_namespaces() {
+    let base = std::env::temp_dir().join(format!("stroma_serve_ns_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    let port = 10100 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let spawn = || {
+        Kill(
+            Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+                .args(["--db", dir.to_str().unwrap(), "--addr", &addr])
+                .spawn()
+                .unwrap(),
+        )
+    };
+    let login = || {
+        let (st, cookie, _) = http(
+            &addr,
+            "POST",
+            "/login",
+            "{\"user\":\"admin\",\"password\":\"password\"}",
+            None,
+        );
+        assert_eq!(st, 200, "login must succeed");
+        cookie.expect("login must set a session cookie")
+    };
+    let graph = concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+    );
+    let expand = "{\"op\":\"expand\",\"subject\":1,\"predicate\":\"knows\"}";
+    {
+        let _guard = spawn();
+        wait_up(&addr);
+        // the auth gate covers namespaced routes; a namespace's console gets the login page
+        assert_eq!(http(&addr, "GET", "/ns/a/stats", "", None).0, 401);
+        assert_eq!(http(&addr, "GET", "/namespaces", "", None).0, 401);
+        let (st, _, body) = http(&addr, "GET", "/ns/a/", "", None);
+        assert_eq!(st, 200);
+        assert!(body.contains("Sign in"), "expected login page, got: {body}");
+
+        let tok = login();
+        let (st, _, body) = http(&addr, "GET", "/ns/a/stats", "", Some(&tok));
+        assert_eq!(st, 404, "unknown namespace read: {body}");
+        assert_eq!(http(&addr, "GET", "/ns/Bad!/stats", "", Some(&tok)).0, 400);
+        let (st, _, body) = http(&addr, "POST", "/ns/a/ingest", graph, Some(&tok));
+        assert_eq!(st, 200, "ingest into a: {body}");
+        let (_, _, body) = http(&addr, "POST", "/ns/a/query", expand, Some(&tok));
+        assert!(body.contains("[2]"), "a sees its fact: {body}");
+        let (_, _, body) = http(&addr, "POST", "/query", expand, Some(&tok));
+        assert!(!body.contains("[2]"), "default leaked: {body}");
+        let (st, _, body) = http(&addr, "GET", "/ns/a/", "", Some(&tok));
+        assert_eq!(st, 200);
+        assert!(body.contains("Draw neighbourhood"), "namespace console");
+        let (st, _, body) = http(&addr, "GET", "/namespaces", "", Some(&tok));
+        assert_eq!(st, 200);
+        assert_eq!(body, "{\"namespaces\":[\"default\",\"a\"]}");
+    }
+    // restart on the same directory: the namespace is still there
+    let _guard = spawn();
+    wait_up(&addr);
+    let tok = login();
+    let (_, _, body) = http(&addr, "GET", "/namespaces", "", Some(&tok));
+    assert_eq!(body, "{\"namespaces\":[\"default\",\"a\"]}");
+    let (_, _, body) = http(&addr, "POST", "/ns/a/query", expand, Some(&tok));
+    assert!(body.contains("[2]"), "a after restart: {body}");
+    drop(_guard);
+    let _ = std::fs::remove_dir_all(&base);
+}

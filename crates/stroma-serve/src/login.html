@@ -62,7 +62,8 @@
     $('go').disabled = true; $('err').textContent = '';
     try {
       const r = await fetch('/login', { method:'POST', body: JSON.stringify({ user: $('u').value, password: $('p').value }) });
-      if (r.ok) { location.href = '/'; return; }
+      // served in place of a page (e.g. a namespace's console at /ns/<name>/) → return there
+      if (r.ok) { location.href = location.pathname === '/login' ? '/' : location.pathname; return; }
       const j = await r.json().catch(() => ({}));
       $('err').textContent = j.error || tr.fail;
     } catch (x) { $('err').textContent = '' + x; }

@@ -21,7 +21,18 @@
 //!                 a request gets its JSON-RPC response (200), a notification gets 202 with an
 //!                 empty body. Stateless (no session ids); GET /mcp is 405 (no server stream).
 //!                 Same tool set as `stroma-mcp` (shared `stromadb_store::mcp` dispatch).
-//!   POST /reset           → clears the whole database (opt-in: only when started with --allow-reset)
+//!   POST /reset           → clears the addressed database (opt-in: only when started with --allow-reset)
+//!   GET  /namespaces      → {"namespaces":["default", ...]}  (every namespace that exists)
+//!
+//! Namespaces: several isolated databases behind one server (D27). The `--db` directory is the
+//! `default` namespace; a named one is an ordinary database directory at `<db>/ns/<name>/`
+//! (`[a-z0-9_-]{1,64}`). A path `/ns/<name>/<rest>` addresses `<name>` with `/<rest>` as the
+//! endpoint — `/query`, `/ingest`, `/embed`, `/events`, `/stats`, `/compact`, `/reset`, `/mcp` and
+//! the console `/` — and any unprefixed path addresses `default`, so `/ns/default/...` is an
+//! alias. `/health`, `/login`, `/logout`, `/me` and `/namespaces` are global. A namespace is
+//! created by its first `POST /ingest`; any other request to a missing one is 404, a malformed
+//! name 400. Databases open lazily and stay cached for the life of the process. Auth, sessions and
+//! token scopes are server-wide and apply unchanged inside every namespace.
 //!
 //! Auth: every endpoint except `/health` and the login page/POST requires either a valid session
 //! cookie (issued by `POST /login`, in-memory, 12h) or, for programmatic clients, a registered
@@ -36,7 +47,7 @@
 //! single unnamed, unrestricted token (none configured = bearer auth disabled, cookie-only).
 //! Sessions (the console) are unrestricted. The same scopes govern `/mcp`.
 //!
-//! Concurrency: a worker pool shares the database as a plain `Arc<Db>`. Reads (`/query`) are
+//! Concurrency: a worker pool shares each database as a plain `Arc<Db>`. Reads (`/query`) are
 //! lock-free — each pins the current read view (a momentary lock + `Arc` clone) and then runs on it
 //! with no lock held, so an in-flight write never blocks a read. Writes (`/ingest`, `/embed`,
 //! `/reset`) serialize on the database's internal write mutex and publish a fresh read view on
@@ -231,6 +242,114 @@ pub mod demo {
     pub const EMBED_JSONL: &str = include_str!("../data/demo-embed.jsonl");
 }
 
+/// The namespace an unprefixed path addresses: the `--db` directory itself.
+const DEFAULT_NS: &str = "default";
+
+/// A namespace name: `[a-z0-9_-]{1,64}` — safe as one path component on every platform, and
+/// never `.`/`..`.
+fn valid_ns_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
+/// Split a request path into (namespace, inner path): `/ns/<name>/<rest>` addresses `<name>` with
+/// `/<rest>` as the path (`/ns/<name>` alone is its console, `/`); any other path addresses
+/// `default` unchanged. A malformed name is an error (the caller answers 400).
+fn route(path: &str) -> Result<(&str, &str), String> {
+    let Some(rest) = path.strip_prefix("/ns/") else {
+        return Ok((DEFAULT_NS, path));
+    };
+    let (name, inner) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, "/"),
+    };
+    if !valid_ns_name(name) {
+        return Err(format!(
+            "bad namespace name '{name}': expected [a-z0-9_-]{{1,64}}"
+        ));
+    }
+    Ok((name, inner))
+}
+
+/// One namespace's open slot: empty until the first request that finds its directory opens it.
+type Slot = Arc<Mutex<Option<SharedDb>>>;
+
+/// The databases one server fronts (D27). The `--db` directory is the `default` namespace; each
+/// named namespace is an ordinary database directory at `<db>/ns/<name>/`, opened lazily with the
+/// same backlog bound and cached for the life of the process. The engine stays one database per
+/// directory — isolation is by directory, so a namespace can also be opened offline by pointing
+/// `--db` at it (while this server is not holding it).
+struct Namespaces {
+    root: std::path::PathBuf,
+    n_max: usize,
+    default: SharedDb,
+    /// name → slot. The map lock is held only to find or insert a slot; opening runs under the
+    /// slot's own lock, so a slow first open never stalls requests to other namespaces, and two
+    /// concurrent first requests for one name open it exactly once.
+    open: Mutex<HashMap<String, Slot>>,
+}
+
+impl Namespaces {
+    fn new(root: &std::path::Path, n_max: usize, default: SharedDb) -> Namespaces {
+        Namespaces {
+            root: root.to_path_buf(),
+            n_max,
+            default,
+            open: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn dir(&self, name: &str) -> std::path::PathBuf {
+        self.root.join("ns").join(name)
+    }
+
+    /// The database for a (validated) namespace name. `create` (a write) initializes a missing
+    /// one; otherwise a missing namespace is `Ok(None)` and leaves nothing behind — neither a
+    /// directory nor a cache entry.
+    fn get(&self, name: &str, create: bool) -> Result<Option<SharedDb>, String> {
+        if name == DEFAULT_NS {
+            return Ok(Some(self.default.clone()));
+        }
+        let dir = self.dir(name);
+        let slot = {
+            let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+            match open.get(name) {
+                Some(slot) => slot.clone(),
+                None if !create && !dir.join("wal.log").exists() => return Ok(None),
+                None => open.entry(name.to_string()).or_default().clone(),
+            }
+        };
+        let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(db) = slot.as_ref() {
+            return Ok(Some(db.clone()));
+        }
+        let db = match create {
+            true => Db::open_or_init_with(&dir, self.n_max),
+            false => Db::open_with(&dir, self.n_max),
+        }
+        .map_err(|e| format!("namespace '{name}': {e}"))?;
+        let db = Arc::new(db);
+        *slot = Some(db.clone());
+        Ok(Some(db))
+    }
+
+    /// `default` first, then every database directory under `<db>/ns/`, sorted.
+    fn list(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.root.join("ns"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n != DEFAULT_NS && valid_ns_name(n) && self.dir(n).join("wal.log").exists())
+            .collect();
+        names.sort();
+        names.insert(0, DEFAULT_NS.to_string());
+        names
+    }
+}
+
 fn json_response(status: u16, body: &Value) -> Response<std::io::Cursor<Vec<u8>>> {
     let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     Response::from_string(body.to_string())
@@ -273,19 +392,58 @@ fn read_body(req: &mut Request) -> String {
     s
 }
 
-fn handle(db: &SharedDb, req: &mut Request, scope: &mcp::Scope) -> (u16, Value) {
-    let url = req.url().to_string();
-    let path = url.split('?').next().unwrap_or("");
+/// What a namespaced endpoint answers: a JSON body, the console page, or an empty 202 (an MCP
+/// notification). The worker turns it into the wire response.
+enum Reply {
+    Json(u16, Value),
+    Page,
+    Accepted,
+}
+
+/// Serve one authenticated request against the namespace its path addresses: parse the
+/// `/ns/<name>` prefix (400 on a bad name), resolve that namespace's database (created only by a
+/// `POST /ingest`; anything else on a missing one is 404), then dispatch the inner path to it.
+fn dispatch(
+    nss: &Namespaces,
+    allow_reset: bool,
+    req: &mut Request,
+    path: &str,
+    scope: &mcp::Scope,
+) -> Reply {
+    let (name, inner) = match route(path) {
+        Ok(r) => r,
+        Err(e) => return Reply::Json(400, json!({ "error": e })),
+    };
+    // a read-only token's ingest is refused (403), so it must not create the namespace either
+    let create = *req.method() == Method::Post && inner == "/ingest" && !scope.read_only;
+    match nss.get(name, create) {
+        Ok(Some(db)) => handle(&db, req, inner, scope, allow_reset),
+        Ok(None) => Reply::Json(
+            404,
+            json!({ "error": format!("namespace '{name}' does not exist (it is created by its first /ingest)") }),
+        ),
+        Err(e) => Reply::Json(500, json!({ "error": e })),
+    }
+}
+
+fn handle(
+    db: &SharedDb,
+    req: &mut Request,
+    path: &str,
+    scope: &mcp::Scope,
+    allow_reset: bool,
+) -> Reply {
+    let method = req.method().clone();
     let read_only_err = || {
-        (
+        Reply::Json(
             403,
             json!({ "error": "this token is read-only: writes are not allowed" }),
         )
     };
-    match (req.method(), path) {
-        (Method::Get, "/health") => (200, json!({ "status": "ok" })),
+    match (&method, path) {
+        (Method::Get, "/" | "/ui") => Reply::Page,
         // reads: lock-free over a pinned read view (query internally pins the current Arc<ReadState>).
-        (Method::Get, "/stats") => (200, db.stats()),
+        (Method::Get, "/stats") => Reply::Json(200, db.stats()),
         (Method::Post, "/query") => {
             let body = read_body(req);
             match serde_json::from_str::<Value>(&body) {
@@ -294,11 +452,11 @@ fn handle(db: &SharedDb, req: &mut Request, scope: &mcp::Scope) -> (u16, Value) 
                     // allowed_labels is intersected, never widened
                     scope.cap_labels(&mut v);
                     match db.query(&v) {
-                        Ok(r) => (200, r),
-                        Err(e) => (400, json!({ "error": e })),
+                        Ok(r) => Reply::Json(200, r),
+                        Err(e) => Reply::Json(400, json!({ "error": e })),
                     }
                 }
-                Err(e) => (400, json!({ "error": format!("bad json: {e}") })),
+                Err(e) => Reply::Json(400, json!({ "error": format!("bad json: {e}") })),
             }
         }
         // writes: serialize on the database's internal write mutex, then publish a fresh read
@@ -309,11 +467,11 @@ fn handle(db: &SharedDb, req: &mut Request, scope: &mcp::Scope) -> (u16, Value) 
             }
             let body = read_body(req);
             match db.ingest_str_as(&body, scope.default_source.as_deref()) {
-                Ok(s) => (
+                Ok(s) => Reply::Json(
                     200,
                     json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "suppressed": s.suppressed, "durable_head": s.durable_head }),
                 ),
-                Err(e) => (400, json!({ "error": e })),
+                Err(e) => Reply::Json(400, json!({ "error": e })),
             }
         }
         (Method::Post, "/embed") => {
@@ -322,8 +480,8 @@ fn handle(db: &SharedDb, req: &mut Request, scope: &mcp::Scope) -> (u16, Value) 
             }
             let body = read_body(req);
             match db.embed_str(&body) {
-                Ok(n) => (200, json!({ "embedded": n })),
-                Err(e) => (400, json!({ "error": e })),
+                Ok(n) => Reply::Json(200, json!({ "embedded": n })),
+                Err(e) => Reply::Json(400, json!({ "error": e })),
             }
         }
         // Snapshot + truncate the changelog: non-destructive (as-of reads keep answering across
@@ -334,14 +492,72 @@ fn handle(db: &SharedDb, req: &mut Request, scope: &mcp::Scope) -> (u16, Value) 
                 return read_only_err();
             }
             match db.compact() {
-                Ok(s) => (
+                Ok(s) => Reply::Json(
                     200,
                     json!({ "compacted_upto": s.covered, "wal_bytes": s.wal_bytes, "snapshot_bytes": s.snapshot_bytes }),
                 ),
-                Err(e) => (400, json!({ "error": e })),
+                Err(e) => Reply::Json(400, json!({ "error": e })),
             }
         }
-        _ => (404, json!({ "error": "not found" })),
+        // opt-in, destructive: clear the addressed database. Off unless --allow-reset is set.
+        (Method::Post, "/reset") => {
+            if scope.read_only {
+                Reply::Json(
+                    403,
+                    json!({ "error": "this token is read-only: reset is not allowed" }),
+                )
+            } else if !allow_reset {
+                Reply::Json(403, json!({ "error": RESET_DISABLED }))
+            } else {
+                match db.reset() {
+                    Ok(()) => Reply::Json(200, json!({ "ok": true })),
+                    Err(e) => Reply::Json(500, json!({ "error": e })),
+                }
+            }
+        }
+        (Method::Get, "/events") => {
+            // long-poll: block until the durable head advances past `since` (or ~20s), so the
+            // console can re-query its current slice the moment the database changes.
+            let since = req
+                .url()
+                .split("since=")
+                .nth(1)
+                .and_then(|s| s.split('&').next())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let mut head = db.durable_head();
+            let mut waited = 0u32;
+            while head == since && waited < 20_000 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                waited += 250;
+                head = db.durable_head();
+            }
+            Reply::Json(200, json!({ "head": head }))
+        }
+        // MCP streamable HTTP transport, stateless: one JSON-RPC message per POST, no session
+        // ids, no server-initiated stream. Same auth as the other endpoints (the worker's gate).
+        // Reads run lock-free on a pinned view; a `tools/call ingest` serializes on the database's
+        // internal write mutex exactly like POST /ingest.
+        (Method::Post, "/mcp") => {
+            let body = read_body(req);
+            match serde_json::from_str::<Value>(&body) {
+                // a request (has an id) → its JSON-RPC response, under the caller's scope
+                Ok(msg) => match mcp::handle_message_scoped(db, &msg, scope) {
+                    Some(resp) => Reply::Json(200, resp),
+                    // a notification → accepted, empty body
+                    None => Reply::Accepted,
+                },
+                Err(e) => Reply::Json(
+                    400,
+                    mcp::rpc_error(&Value::Null, -32700, &format!("parse error: {e}")),
+                ),
+            }
+        }
+        (_, "/mcp") => Reply::Json(
+            405,
+            json!({ "error": "method not allowed: POST one JSON-RPC message to /mcp" }),
+        ),
+        _ => Reply::Json(404, json!({ "error": "not found" })),
     }
 }
 
@@ -496,10 +712,11 @@ pub fn run(args: &[String]) {
         );
     }
 
+    let nss = Arc::new(Namespaces::new(std::path::Path::new(&dir), n_max, db));
     let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
-        let (db, server, auth, sessions, info) = (
-            db.clone(),
+        let (nss, server, auth, sessions, info) = (
+            nss.clone(),
             server.clone(),
             auth.clone(),
             sessions.clone(),
@@ -562,8 +779,10 @@ pub fn run(args: &[String]) {
                     let name = (!entry.name.is_empty()).then_some(entry.name.as_str());
                     (entry.scope(), "token", name)
                 } else {
-                    if method == Method::Get && (path == "/" || path == "/ui") {
-                        let _ = req.respond(login_response()); // browser → login page
+                    // browser → login page, also for a namespace's console (`/ns/<name>/`)
+                    let page = route(&path).is_ok_and(|(_, p)| p == "/" || p == "/ui");
+                    if method == Method::Get && page {
+                        let _ = req.respond(login_response());
                     } else {
                         let _ = req.respond(json_response(401, &json!({ "error": "unauthorized" })));
                     }
@@ -595,88 +814,20 @@ pub fn run(args: &[String]) {
                             "mcp_url": info.mcp_url,
                         }),
                     ));
-                } else if method == Method::Post && path == "/reset" {
-                    // opt-in, destructive: clear the whole database. Off unless --allow-reset is set.
-                    if scope.read_only {
-                        let _ = req.respond(json_response(
-                            403,
-                            &json!({ "error": "this token is read-only: reset is not allowed" }),
-                        ));
-                    } else if !auth.allow_reset {
-                        let _ = req.respond(json_response(
-                            403,
-                            &json!({ "error": RESET_DISABLED }),
-                        ));
-                    } else {
-                        let r = db.reset();
-                        match r {
-                            Ok(()) => {
-                                let _ = req.respond(json_response(200, &json!({ "ok": true })));
-                            }
-                            Err(e) => {
-                                let _ = req.respond(json_response(500, &json!({ "error": e })));
-                            }
-                        }
-                    }
-                } else if method == Method::Get && path == "/events" {
-                    // long-poll: block until the durable head advances past `since` (or ~20s), so the
-                    // console can re-query its current slice the moment the database changes.
-                    let since = req
-                        .url()
-                        .split("since=")
-                        .nth(1)
-                        .and_then(|s| s.split('&').next())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
-                    let head_now = || db.durable_head();
-                    let mut head = head_now();
-                    let mut waited = 0u32;
-                    while head == since && waited < 20_000 {
-                        std::thread::sleep(std::time::Duration::from_millis(250));
-                        waited += 250;
-                        head = head_now();
-                    }
-                    let _ = req.respond(json_response(200, &json!({ "head": head })));
-                } else if path == "/mcp" {
-                    // MCP streamable HTTP transport, stateless: one JSON-RPC message per POST,
-                    // no session ids, no server-initiated stream. Same auth as the other endpoints
-                    // (the gate above). Reads run lock-free on a pinned view; a `tools/call ingest`
-                    // serializes on the database's internal write mutex exactly like POST /ingest.
-                    if method == Method::Post {
-                        let body = read_body(&mut req);
-                        match serde_json::from_str::<Value>(&body) {
-                            // a request (has an id) → its JSON-RPC response, under the caller's scope
-                            Ok(msg) => match stromadb_store::mcp::handle_message_scoped(&db, &msg, &scope) {
-                                Some(resp) => {
-                                    let _ = req.respond(json_response(200, &resp));
-                                }
-                                // a notification → accepted, empty body
-                                None => {
-                                    let _ = req.respond(Response::empty(202));
-                                }
-                            },
-                            Err(e) => {
-                                let _ = req.respond(json_response(
-                                    400,
-                                    &stromadb_store::mcp::rpc_error(
-                                        &Value::Null,
-                                        -32700,
-                                        &format!("parse error: {e}"),
-                                    ),
-                                ));
-                            }
-                        }
-                    } else {
-                        let _ = req.respond(json_response(
-                            405,
-                            &json!({ "error": "method not allowed: POST one JSON-RPC message to /mcp" }),
-                        ));
-                    }
-                } else if method == Method::Get && (path == "/" || path == "/ui") {
-                    let _ = req.respond(html_response());
+                } else if method == Method::Get && path == "/namespaces" {
+                    let _ = req.respond(json_response(200, &json!({ "namespaces": nss.list() })));
                 } else {
-                    let (status, body) = handle(&db, &mut req, &scope);
-                    let _ = req.respond(json_response(status, &body));
+                    match dispatch(&nss, auth.allow_reset, &mut req, &path, &scope) {
+                        Reply::Json(status, body) => {
+                            let _ = req.respond(json_response(status, &body));
+                        }
+                        Reply::Page => {
+                            let _ = req.respond(html_response());
+                        }
+                        Reply::Accepted => {
+                            let _ = req.respond(Response::empty(202));
+                        }
+                    }
                 }
             }
         }));
@@ -688,7 +839,148 @@ pub fn run(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{new_token, parse_tokens};
+    use super::{Namespaces, Reply, dispatch, new_token, parse_tokens, route, valid_ns_name};
+    use std::sync::Arc;
+    use stromadb_store::{DEFAULT_N_MAX, Db, mcp};
+    use tiny_http::{Method, TestRequest};
+
+    #[test]
+    fn namespace_names_and_routing() {
+        assert!(valid_ns_name("ocel"));
+        assert!(valid_ns_name("a-b_9"));
+        assert!(valid_ns_name(&"x".repeat(64)));
+        for bad in ["", "Ocel", "a.b", "..", "a/b", "é", "Bad!"] {
+            assert!(!valid_ns_name(bad), "{bad:?} must be rejected");
+        }
+        assert!(!valid_ns_name(&"x".repeat(65)));
+
+        assert_eq!(route("/query"), Ok(("default", "/query")));
+        assert_eq!(route("/"), Ok(("default", "/")));
+        assert_eq!(route("/ns/a/query"), Ok(("a", "/query")));
+        assert_eq!(route("/ns/a/"), Ok(("a", "/")));
+        assert_eq!(route("/ns/a"), Ok(("a", "/")));
+        assert_eq!(route("/ns/default/stats"), Ok(("default", "/stats")));
+        // only a leading /ns/ is a prefix; a nested one is just the inner path
+        assert_eq!(route("/ns/a/ns/b/stats"), Ok(("a", "/ns/b/stats")));
+        assert_eq!(route("/nsx/stats"), Ok(("default", "/nsx/stats")));
+        assert!(route("/ns/Bad!/stats").is_err());
+        assert!(route("/ns//stats").is_err());
+        assert!(route("/ns/").is_err());
+    }
+
+    /// Drive one request through the namespace dispatcher (unrestricted scope).
+    fn call(nss: &Namespaces, method: Method, path: &str, body: &'static str) -> (u16, String) {
+        let mut req = TestRequest::new()
+            .with_method(method)
+            .with_path(path)
+            .with_body(body)
+            .into();
+        match dispatch(nss, true, &mut req, path, &mcp::Scope::default()) {
+            Reply::Json(status, v) => (status, v.to_string()),
+            Reply::Page => (200, "<page>".into()),
+            Reply::Accepted => (202, String::new()),
+        }
+    }
+
+    fn open_root(root: &std::path::Path) -> Namespaces {
+        let db = Db::open_or_init_with(root, DEFAULT_N_MAX).unwrap();
+        Namespaces::new(root, DEFAULT_N_MAX, Arc::new(db))
+    }
+
+    // Writes to /ns/a are invisible from default and from /ns/b; unknown namespaces 404 without
+    // being created; bad names 400; a fresh server state over the same root finds `a` again.
+    #[test]
+    fn namespaces_isolate_create_on_write_and_reopen() {
+        let root = std::env::temp_dir().join(format!("stroma_ns_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let graph = concat!(
+            "{\"type_def\":{\"name\":\"Person\"}}\n",
+            "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+            "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+            "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
+            "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+        );
+        let expand = r#"{"op":"expand","subject":1,"predicate":"knows"}"#;
+        {
+            let nss = open_root(&root);
+            // reads, the console and non-ingest writes on a missing namespace are 404 and leave
+            // no trace
+            for (m, p) in [
+                (Method::Get, "/ns/a/stats"),
+                (Method::Get, "/ns/a/"),
+                (Method::Post, "/ns/a/embed"),
+                (Method::Post, "/ns/a/compact"),
+                (Method::Post, "/ns/a/reset"),
+                (Method::Post, "/ns/a/mcp"),
+            ] {
+                assert_eq!(call(&nss, m, p, "").0, 404, "{p}");
+            }
+            assert!(!root.join("ns").exists());
+            assert_eq!(call(&nss, Method::Get, "/ns/Bad!/stats", "").0, 400);
+
+            let (st, body) = call(&nss, Method::Post, "/ns/a/ingest", graph);
+            assert_eq!(st, 200, "{body}");
+            assert!(root.join("ns/a/wal.log").exists());
+            let (st, body) = call(&nss, Method::Post, "/ns/a/query", expand);
+            assert_eq!(st, 200, "{body}");
+            assert!(body.contains("[2]"), "a sees its fact: {body}");
+
+            // default (both spellings) and a sibling namespace see nothing of it
+            for p in ["/query", "/ns/default/query"] {
+                let (_, body) = call(&nss, Method::Post, p, expand);
+                assert!(!body.contains("[2]"), "{p} leaked: {body}");
+            }
+            call(
+                &nss,
+                Method::Post,
+                "/ns/b/ingest",
+                "{\"type_def\":{\"name\":\"Other\"}}\n",
+            );
+            let (_, body) = call(&nss, Method::Post, "/ns/b/query", expand);
+            assert!(!body.contains("[2]"), "b leaked: {body}");
+            assert_eq!(call(&nss, Method::Get, "/ns/nope/stats", "").0, 404);
+            // a global endpoint is not reachable under a namespace
+            assert_eq!(call(&nss, Method::Get, "/ns/a/me", "").0, 404);
+            assert_eq!(call(&nss, Method::Get, "/ns/a/", "").0, 200);
+            assert_eq!(nss.list(), ["default", "a", "b"]);
+
+            // resetting default clears only default: the ns/ subtree is not its file
+            assert_eq!(call(&nss, Method::Post, "/reset", "").0, 200);
+            let (_, body) = call(&nss, Method::Post, "/ns/a/query", expand);
+            assert!(body.contains("[2]"), "default reset hit a: {body}");
+        }
+        // a new server state over the same root: the parent db opens undisturbed by ns/, and
+        // `a` reopens lazily with its data
+        let nss = open_root(&root);
+        assert_eq!(nss.list(), ["default", "a", "b"]);
+        let (st, body) = call(&nss, Method::Post, "/ns/a/query", expand);
+        assert_eq!(st, 200, "{body}");
+        assert!(body.contains("[2]"), "a after reopen: {body}");
+        drop(nss);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Concurrent first requests for one namespace open it once (a second open of the same
+    // directory would fail on its LOCK) and all get the same database.
+    #[test]
+    fn concurrent_first_open_opens_once() {
+        let root = std::env::temp_dir().join(format!("stroma_ns_race_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nss = Arc::new(open_root(&root));
+        let dbs: Vec<_> = (0..8)
+            .map(|_| {
+                let nss = nss.clone();
+                std::thread::spawn(move || nss.get("r", true).unwrap().unwrap())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+        assert!(dbs.iter().all(|d| Arc::ptr_eq(d, &dbs[0])));
+        drop(dbs);
+        drop(nss);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn token_registry_parses_and_fails_loudly() {
