@@ -28,22 +28,22 @@ impl IvfPq {
 
     /// ADC score = Σ_j table[j·ksub + code_j]. The loop is gather-bound (a table lookup per code
     /// byte); NEON has no gather, so the win is instruction-level parallelism — four independent
-    /// accumulators break the add dependency chain and let loads pipeline, and `chunks_exact`
-    /// removes per-element bounds checks.
+    /// accumulators break the add dependency chain and let loads pipeline, and `as_chunks::<4>`
+    /// yields fixed-size arrays so the per-element bounds checks disappear.
     #[inline]
     fn adc_score(&self, table: &[f32], code: &[u8]) -> f32 {
         let ksub = self.pq_ksub;
         let (mut s0, mut s1, mut s2, mut s3) = (0f32, 0f32, 0f32, 0f32);
         let mut off = 0usize;
-        let mut it = code.chunks_exact(4);
-        for ch in &mut it {
+        let (chunks, rest) = code.as_chunks::<4>();
+        for ch in chunks {
             s0 += table[off + ch[0] as usize];
             s1 += table[off + ksub + ch[1] as usize];
             s2 += table[off + 2 * ksub + ch[2] as usize];
             s3 += table[off + 3 * ksub + ch[3] as usize];
             off += 4 * ksub;
         }
-        for &c in it.remainder() {
+        for &c in rest {
             s0 += table[off + c as usize];
             off += ksub;
         }
