@@ -139,6 +139,16 @@ fn serve_health_query_ingest() {
         "ui body missing app marker"
     );
 
+    // a console session is unrestricted and reports itself as such (no token identity)
+    let (st, _, body) = http(&addr, "GET", "/me", "", Some(&tok));
+    assert_eq!(st, 200, "me: {body}");
+    let me: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(me["auth"], "session", "{me}");
+    assert_eq!(me["user"], "admin");
+    assert_eq!(me["read_only"], false);
+    assert!(me["token_name"].is_null() && me["labels"].is_null(), "{me}");
+    assert_eq!(me["mcp_url"], format!("http://{addr}/mcp"));
+
     let (st, _, body) = http(
         &addr,
         "POST",
@@ -306,6 +316,20 @@ fn serve_api_token_auth() {
     assert_eq!(me["allow_reset"], false);
     assert_eq!(me["read_only"], false);
     assert_eq!(me["reset_hint"], hint);
+    // server info for the console's settings panel; the legacy token is unnamed and uncapped
+    assert_eq!(me["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        me["db_path"],
+        std::fs::canonicalize(&dir)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert!(me["workers"].as_u64().unwrap() >= 2, "{me}");
+    assert_eq!(me["mcp_url"], format!("http://{addr}/mcp"));
+    assert_eq!(me["auth"], "token");
+    assert!(me["token_name"].is_null(), "{me}");
+    assert!(me["labels"].is_null(), "{me}");
 
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -465,7 +489,7 @@ fn serve_reset_when_enabled() {
     let tokens = base.join("tokens.json");
     std::fs::write(
         &tokens,
-        r#"{"tokens":[{"name":"viewer","token":"ro","read_only":true}]}"#,
+        r#"{"tokens":[{"name":"viewer","token":"ro","labels":3,"read_only":true}]}"#,
     )
     .unwrap();
 
@@ -518,7 +542,12 @@ fn serve_reset_when_enabled() {
     assert_eq!(rw["allow_reset"], true);
     assert_eq!(rw["read_only"], false);
     assert!(rw["reset_hint"].is_null());
-    assert_eq!(me("ro")["read_only"], true);
+    let ro = me("ro");
+    assert_eq!(ro["read_only"], true);
+    // a named token reports its identity and label cap
+    assert_eq!(ro["auth"], "token");
+    assert_eq!(ro["token_name"], "viewer");
+    assert_eq!(ro["labels"], 3);
     // a read-only token may not reset even with the flag
     assert_eq!(http_bearer(&addr, "POST", "/reset", "", Some("ro")), 403);
     let head = |tok: &str| -> u64 {
