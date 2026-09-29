@@ -170,9 +170,6 @@
   .set-row { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:12.5px; color:var(--fg-dim); min-height:32px; }
   .set-row b { font:600 12px var(--mono); color:var(--fg); }
   .set-row b.on { color:var(--accent); } .set-row b.off { color:var(--mut); }
-  .seg { display:inline-flex; border:1px solid var(--line-2); border-radius:100px; padding:2px; background:var(--bg); }
-  .seg button { background:none; border:0; color:var(--mut); font:600 12px var(--sans); padding:4px 12px; border-radius:100px; cursor:pointer; }
-  .seg button.on { color:var(--accent-ink); background:linear-gradient(180deg,var(--accent),var(--accent-2)); }
   .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 14px; font-size:12px; }
   .kv .k { color:var(--fg-dim); } .kv .v { color:var(--fg); font:12px var(--mono); text-align:right; word-break:break-all; }
   .kv .wide { grid-column:1 / -1; } .kv .v.wide { text-align:left; margin:-3px 0 3px; color:var(--fg-dim); font-size:11.5px; }
@@ -204,6 +201,8 @@
     <span id="statpills"></span>
     <button class="pill scope-btn" id="scopeBtn" title="visibility scope"><span data-i18n="scope">scope</span>: <b id="scopeSummary">all</b></button>
     <span class="tb-spacer"></span>
+    <select class="lang" id="lang" title="language"><option value="en">EN</option><option value="ja">日本語</option><option value="zh">中文</option></select>
+    <button class="icon-btn" id="theme" data-i18n-title="theme">☾</button>
     <button class="icon-btn" id="settingsBtn" data-i18n-title="settings" title="settings" aria-controls="settings" aria-expanded="false">⚙</button>
     <button class="icon-btn" id="logout" data-i18n-title="signOut">⏻</button>
   </div>
@@ -218,11 +217,6 @@
   <!-- settings: a right-side drawer, groups in a fixed order; the destructive reset is always last -->
   <aside class="drawer hidden" id="settings" role="dialog" aria-labelledby="setTitle">
     <div class="drawer-h"><span class="pop-h" id="setTitle" data-i18n="settingsTitle">Settings</span><button class="caret-btn" id="setClose" data-i18n-title="close" title="close">✕</button></div>
-    <div class="set-grp" id="grpAppearance">
-      <h2 data-i18n="grpAppearance">Appearance</h2>
-      <div class="set-row"><span data-i18n="themeLbl">Theme</span><div class="seg" id="themeSeg"><button data-v="dark" data-i18n="themeDark">Dark</button><button data-v="light" data-i18n="themeLight">Light</button></div></div>
-      <div class="set-row"><span data-i18n="langLbl">Language</span><select class="lang" id="lang" data-i18n-title="langLbl" title="language"><option value="en">EN</option><option value="ja">日本語</option><option value="zh">中文</option></select></div>
-    </div>
     <div class="set-grp" id="grpServer">
       <h2 data-i18n="grpServer">Server</h2>
       <div class="kv" id="serverKv"></div>
@@ -351,7 +345,7 @@ const I18N = {
        lgFocus:"focus", lgDeep:"deep", hop:"hop",
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”",
-       settings:"settings", settingsTitle:"Settings", close:"close", grpAppearance:"Appearance", themeLbl:"Theme", themeDark:"Dark", themeLight:"Light", langLbl:"Language",
+       settings:"settings", settingsTitle:"Settings", close:"close",
        grpServer:"Server", version:"version", dbPath:"database", workers:"workers", typesPreds:"types · predicates", embeddingsLbl:"embeddings", durableHead:"durable head", changelog:"changelog", signedInAs:"signed in as", access:"access", readWrite:"read-write", readOnlyLbl:"read-only", allLabels:"all labels", labelsCap:"labels {l}", unnamedToken:"unnamed token", authOpen:"open (auth disabled)", viaToken:"token “{n}”",
        mcpEndpoint:"MCP endpoint", copy:"Copy", copied:"copied to clipboard", copyFailed:"copy failed — select the URL and copy it manually",
        grpAdmin:"Admin", compactIntro:"Snapshot the current state and truncate the changelog. Non-destructive: as-of reads keep answering across the boundary.", compactNow:"Compact now", compacting:"compacting…", compactDone:"compacted up to {n} · changelog {w} · snapshot {s}", compactFailed:"compaction failed: {e}", resetState:"Database reset", enabled:"enabled", disabled:"disabled", dangerZone:"Danger zone",
@@ -362,7 +356,7 @@ const I18N = {
        lgFocus:"焦点", lgDeep:"遠方", hop:"ホップ",
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用",
-       settings:"設定", settingsTitle:"設定", close:"閉じる", grpAppearance:"表示", themeLbl:"テーマ", themeDark:"ダーク", themeLight:"ライト", langLbl:"言語",
+       settings:"設定", settingsTitle:"設定", close:"閉じる",
        grpServer:"サーバー", version:"バージョン", dbPath:"データベース", workers:"ワーカー数", typesPreds:"型 · 述語", embeddingsLbl:"埋め込み", durableHead:"durable head", changelog:"変更ログ", signedInAs:"サインイン", access:"権限", readWrite:"読み書き", readOnlyLbl:"読み取り専用", allLabels:"全ラベル", labelsCap:"ラベル {l}", unnamedToken:"名前なしトークン", authOpen:"認証なし（無効化中）", viaToken:"トークン「{n}」",
        mcpEndpoint:"MCP エンドポイント", copy:"コピー", copied:"クリップボードにコピーしました", copyFailed:"コピーできませんでした。URL を選択して手動でコピーしてください",
        grpAdmin:"管理", compactIntro:"現在の状態をスナップショットし、変更ログを切り詰めます。非破壊で、境界をまたぐ時点指定の読み取りもそのまま動きます。", compactNow:"今すぐコンパクション", compacting:"コンパクション中…", compactDone:"{n} までコンパクション済み · 変更ログ {w} · スナップショット {s}", compactFailed:"コンパクションに失敗しました: {e}", resetState:"データベースのリセット", enabled:"有効", disabled:"無効", dangerZone:"危険な操作",
@@ -373,7 +367,7 @@ const I18N = {
        lgFocus:"焦点", lgDeep:"更远", hop:"跳",
        detNode:"节点", detType:"类型", detLabel:"标签", untyped:"无类型", recentre:"以此为中心 ›", noProps:"无存储属性。", loading:"加载中…", restricted:"角色“{r}”下受限。",
        tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”",
-       settings:"设置", settingsTitle:"设置", close:"关闭", grpAppearance:"外观", themeLbl:"主题", themeDark:"深色", themeLight:"浅色", langLbl:"语言",
+       settings:"设置", settingsTitle:"设置", close:"关闭",
        grpServer:"服务器", version:"版本", dbPath:"数据库", workers:"工作线程", typesPreds:"类型 · 谓词", embeddingsLbl:"嵌入向量", durableHead:"durable head", changelog:"变更日志", signedInAs:"登录身份", access:"权限", readWrite:"读写", readOnlyLbl:"只读", allLabels:"全部标签", labelsCap:"标签 {l}", unnamedToken:"未命名令牌", authOpen:"开放（认证已禁用）", viaToken:"令牌“{n}”",
        mcpEndpoint:"MCP 端点", copy:"复制", copied:"已复制到剪贴板", copyFailed:"复制失败，请选中 URL 手动复制",
        grpAdmin:"管理", compactIntro:"为当前状态创建快照并截断变更日志。非破坏性：跨越边界的时点读取仍然有效。", compactNow:"立即压缩", compacting:"正在压缩…", compactDone:"已压缩至 {n} · 变更日志 {w} · 快照 {s}", compactFailed:"压缩失败：{e}", resetState:"数据库重置", enabled:"已启用", disabled:"已禁用", dangerZone:"危险操作",
@@ -1089,11 +1083,11 @@ $('scopeChips').onclick=e=>{ const c=e.target.closest('.scope-chip'); if(!c) ret
 function applyTheme(t){ document.documentElement.dataset.theme=t; localStorage.setItem('stroma_theme',t);
   additive = t!=='light';                                            // dark = additive glow (cosmic)
   edgeRGBA = t==='light' ? [.28,.36,.52,.75] : [.5,.62,1.,.5];       // light: solid line · dark: luminous filament
-  document.querySelectorAll('#themeSeg button').forEach(b=>b.classList.toggle('on', b.dataset.v===t)); }
-$('themeSeg').onclick=e=>{ const b=e.target.closest('button'); if(b) applyTheme(b.dataset.v); };
+  $('theme').textContent = t==='light' ? '☀' : '☾'; }
+$('theme').onclick=()=>applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light');
 applyTheme(localStorage.getItem('stroma_theme')||'dark');
 
-// ---------- settings drawer: Appearance → Server → Admin → Danger zone (reset, always last) ----------
+// ---------- settings drawer: Server → Admin → Danger zone (reset, always last) ----------
 // GET /me says what this caller may do and what it is talking to. A read-only caller gets no admin
 // group and no reset at all; without --allow-reset the reset stays visible but disabled, with the
 // server's own hint.
