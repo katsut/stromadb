@@ -22,7 +22,7 @@ managed by the OS directly; the only knob that bounds resident memory is `STROMA
 | `STROMA_API_TOKEN` | `--api-token <token>` | *(unset)* | serve | Legacy single API token: one unnamed, unrestricted bearer. When set, requests carrying `Authorization: Bearer <token>` are authorized without the login/cookie flow. Prefer named tokens (below). |
 | `STROMA_TOKENS` | `--tokens <file>` | *(unset)* | serve | **Named token registry** (JSON: `{"tokens":[{"name":"support-agent","token":"...","labels":15,"read_only":true}, …]}`). Each token carries a client identity — its name is stamped as provenance on un-sourced writes — plus an optional ABAC `labels` cap (intersected with every read's `allowed_labels`) and an optional `read_only` bit. No tokens configured at all = bearer auth disabled (cookie-only). |
 | — | `--demo` | `false` | serve | Boot with the bundled sample org graph (seeded only into an empty database) and print first-run queries plus an MCP connection snippet with a minted `demo-agent` token. With no `--db`/`$STROMA_DB`, the demo gets its own directory under the OS temp dir. |
-| `STROMA_ALLOW_RESET` | `--allow-reset` | `false` | serve | Enable `POST /reset`, which **clears the entire database**. Off by default; intended for dev/demo/test. Set `STROMA_ALLOW_RESET=1` (or pass the flag). Still requires auth, and read-only tokens are always refused. The console's administration menu (⚙) exposes it as **Reset database** with a typed `RESET` confirmation; without the flag the action is shown disabled with the server's hint. `GET /me` reports `allow_reset` and `read_only` for the caller. |
+| `STROMA_ALLOW_RESET` | `--allow-reset` | `false` | serve | Enable `POST /reset`, which **clears the entire database**. Off by default; intended for dev/demo/test. Set `STROMA_ALLOW_RESET=1` (or pass the flag). Still requires auth, and read-only tokens are always refused. The console's settings panel (⚙) exposes it as **Reset database**, the last item in its danger zone, with a typed `RESET` confirmation; without the flag the action is shown disabled with the server's hint. `GET /me` reports `allow_reset` and `read_only` for the caller. |
 
 `RUST_BACKTRACE=1` is honored by the Rust runtime for panic diagnostics.
 
@@ -47,6 +47,12 @@ read-only bit (writes answer a clear 403). The legacy single `STROMA_API_TOKEN` 
 unrestricted entry. Tokens are compared in constant time; sessions (the console) are unrestricted.
 Configure none of them to keep bearer auth disabled (cookie-only). Put the server behind TLS when
 sending a token over an untrusted network.
+
+`GET /me` tells any authenticated caller what it may do and what it is talking to. It returns
+`user`, `read_only`, `allow_reset`, `reset_hint`, `auth` (`session`, `token` or `open` under
+`--no-auth`), `token_name` and `labels` (the registry entry's name and label cap, `null` for
+sessions and the legacy token), and the server facts `version`, `db_path`, `workers` and `mcp_url`
+(the MCP endpoint on the bound address). The console's settings panel renders from it.
 
 ## Using a `.env` file
 

@@ -8,7 +8,9 @@
 //!   GET  /login           → login page               (public)
 //!   POST /login  {user,password} → session cookie     (public)
 //!   POST /logout          → clears the session
-//!   GET  /me              → {"user", "read_only", "allow_reset", "reset_hint"} (caller's permissions)
+//!   GET  /me              → caller's permissions {"user", "read_only", "allow_reset", "reset_hint",
+//!                 "auth", "token_name", "labels"} plus server info {"version", "db_path",
+//!                 "workers", "mcp_url"} (the console's settings panel)
 //!   GET  /events?since=N  → long-poll; returns {"head": M} when the durable head advances (or ~20s)
 //!   GET  /stats           → engine/schema/embedding/storage counters
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
@@ -76,6 +78,14 @@ const LOGIN_HTML: &str = include_str!("login.html");
 /// The refusal `POST /reset` returns without `--allow-reset`; `/me` reports the same text so the
 /// console can show why its reset action is disabled.
 const RESET_DISABLED: &str = "reset is disabled (start with --allow-reset to enable)";
+
+/// Static server facts `/me` reports for the console's settings panel, fixed at startup.
+struct ServerInfo {
+    db_path: String,
+    workers: usize,
+    /// The MCP endpoint on the address actually bound (so `--addr host:0` reports the real port).
+    mcp_url: String,
+}
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -438,6 +448,16 @@ pub fn run(args: &[String]) {
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(2, 32);
+    let bound = server
+        .server_addr()
+        .to_ip()
+        .map_or_else(|| addr.clone(), |a| a.to_string());
+    let info = Arc::new(ServerInfo {
+        db_path: std::fs::canonicalize(&dir)
+            .map_or_else(|_| dir.clone(), |p| p.to_string_lossy().into_owned()),
+        workers,
+        mcp_url: format!("http://{bound}/mcp"),
+    });
     eprintln!("stromadb serving on http://{addr}  (db: {dir}, {workers} workers)");
     eprintln!("console: open http://{addr}/ in a browser");
     if demo {
@@ -478,8 +498,13 @@ pub fn run(args: &[String]) {
 
     let mut handles = Vec::with_capacity(workers);
     for _ in 0..workers {
-        let (db, server, auth, sessions) =
-            (db.clone(), server.clone(), auth.clone(), sessions.clone());
+        let (db, server, auth, sessions, info) = (
+            db.clone(),
+            server.clone(),
+            auth.clone(),
+            sessions.clone(),
+            info.clone(),
+        );
         handles.push(std::thread::spawn(move || {
             while let Ok(mut req) = server.recv() {
                 let method = req.method().clone();
@@ -527,10 +552,15 @@ pub fn run(args: &[String]) {
                 // (programmatic), unless the auth gate is disabled for local dev (--no-auth).
                 // A session (or --no-auth) is unrestricted; a named token carries its own scope
                 // — provenance stamping, a label cap on reads, an optional read-only bit.
-                let scope: mcp::Scope = if auth.no_auth || authed(&sessions, &req) {
-                    mcp::Scope::default()
+                // `via` names how the caller got in (reported by /me): the open gate, a console
+                // session, or a registered token (whose name rides along; the legacy token has none).
+                let (scope, via, token_name): (mcp::Scope, &str, Option<&str>) = if auth.no_auth {
+                    (mcp::Scope::default(), "open", None)
+                } else if authed(&sessions, &req) {
+                    (mcp::Scope::default(), "session", None)
                 } else if let Some(entry) = bearer_entry(&auth, &req) {
-                    entry.scope()
+                    let name = (!entry.name.is_empty()).then_some(entry.name.as_str());
+                    (entry.scope(), "token", name)
                 } else {
                     if method == Method::Get && (path == "/" || path == "/ui") {
                         let _ = req.respond(login_response()); // browser → login page
@@ -547,7 +577,8 @@ pub fn run(args: &[String]) {
                     let clear = "stroma_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
                     let _ = req.respond(json_cookie_response(200, &json!({ "ok": true }), clear));
                 } else if method == Method::Get && path == "/me" {
-                    // what the caller may do, so the console renders admin actions without probing
+                    // what the caller may do, so the console renders admin actions without probing,
+                    // plus the static server facts its settings panel shows
                     let _ = req.respond(json_response(
                         200,
                         &json!({
@@ -555,6 +586,13 @@ pub fn run(args: &[String]) {
                             "read_only": scope.read_only,
                             "allow_reset": auth.allow_reset,
                             "reset_hint": (!auth.allow_reset).then_some(RESET_DISABLED),
+                            "auth": via,
+                            "token_name": token_name,
+                            "labels": scope.allowed_labels,
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "db_path": info.db_path,
+                            "workers": info.workers,
+                            "mcp_url": info.mcp_url,
                         }),
                     ));
                 } else if method == Method::Post && path == "/reset" {
