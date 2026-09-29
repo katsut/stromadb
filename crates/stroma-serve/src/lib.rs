@@ -561,11 +561,77 @@ fn handle(
     }
 }
 
+/// Flags that take a value (`--flag <value>`), matching `docs/CONFIGURATION.md`.
+const VALUE_FLAGS: &[&str] = &[
+    "--db",
+    "--addr",
+    "--max-unmerged",
+    "--admin-user",
+    "--admin-password",
+    "--api-token",
+    "--tokens",
+];
+
+/// Flags that take no value.
+const BOOL_FLAGS: &[&str] = &["--demo", "--allow-reset", "--no-auth", "-h", "--help"];
+
+/// `serve` / `up` usage: every flag `run` understands, one line each, matching
+/// `docs/CONFIGURATION.md`.
+fn usage() -> &'static str {
+    "usage: stroma serve|up [options]  (same flags for the stroma-serve binary)\n\
+     \n\
+     options:\n\
+     \x20 --db <dir>              database directory (default: .; `up` defaults to ./stroma-db)\n\
+     \x20 --addr <host:port>      HTTP bind address (default: 127.0.0.1:7687)\n\
+     \x20 --max-unmerged <n>      backpressure threshold for un-merged writes (default: 8000000)\n\
+     \x20 --admin-user <name>     console login username (default: admin)\n\
+     \x20 --admin-password <pw>   console login password (default: password)\n\
+     \x20 --api-token <token>     legacy single unnamed, unrestricted bearer token\n\
+     \x20 --tokens <file>         named token registry (JSON)\n\
+     \x20 --demo                  boot with the bundled sample org graph\n\
+     \x20 --allow-reset           enable POST /reset, which clears the database\n\
+     \x20 --no-auth               disable the auth gate (local dev only)\n\
+     \x20 -h, --help              print this help message\n"
+}
+
+/// The first argument that looks like a flag (starts with `-`) but is not one `run` recognizes,
+/// skipping over each known value-flag's value so it is never misread as a stray flag.
+fn unknown_flag(args: &[String]) -> Option<&str> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a.starts_with('-') {
+            if VALUE_FLAGS.contains(&a) {
+                i += 2;
+                continue;
+            }
+            if !BOOL_FLAGS.contains(&a) {
+                return Some(a);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Run the HTTP server with CLI-style `args` (everything after the program/subcommand name).
 /// Blocks for the life of the server; exits the process on a fatal startup error (bad dir, bind
 /// failure). Called by the `stroma-serve` binary and by the `stroma serve` / `stroma up`
 /// subcommands, so one install carries the whole application.
+///
+/// `-h`/`--help` and any unrecognized flag are handled first, before anything with a side effect
+/// (opening/creating the database directory, binding the socket): help prints usage and exits 0,
+/// an unknown flag prints an error plus usage and exits 2.
 pub fn run(args: &[String]) {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{}", usage());
+        exit(0);
+    }
+    if let Some(bad) = unknown_flag(args) {
+        eprintln!("error: unknown flag {bad}");
+        eprint!("{}", usage());
+        exit(2);
+    }
     let demo = args.iter().any(|a| a == "--demo");
     // --demo with no explicit location gets its own directory under the OS temp dir, so trying
     // the demo never litters the working directory; an explicit --db / $STROMA_DB still wins.

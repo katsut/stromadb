@@ -22,6 +22,89 @@ fn parse_flag(args: &[String], name: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+/// The first argument that looks like a flag (starts with `-`, other than `-h`/`--help`) but is
+/// not in `value_flags`, skipping over each known flag's value so it is never misread as a stray
+/// flag itself.
+fn unknown_flag<'a>(args: &'a [String], value_flags: &[&str]) -> Option<&'a str> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a.starts_with('-') && a != "-h" && a != "--help" {
+            if value_flags.contains(&a) {
+                i += 2;
+                continue;
+            }
+            return Some(a);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `-h`/`--help` prints `usage` and exits 0; an unrecognized flag (not in `value_flags`) prints
+/// an error plus `usage` and exits 2 — both before the subcommand does anything with a side
+/// effect (opening/creating a database directory, reading a file, etc).
+fn check_flags(args: &[String], value_flags: &[&str], usage: &str) {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{usage}");
+        exit(0);
+    }
+    if let Some(bad) = unknown_flag(args, value_flags) {
+        eprintln!("error: unknown flag {bad}");
+        eprint!("{usage}");
+        exit(2);
+    }
+}
+
+const INIT_USAGE: &str = "usage: stroma init --db <dir>\n\
+     \n\
+     options:\n\
+     \x20 --db <dir>   database directory to create (default: .)\n\
+     \x20 -h, --help   print this help message\n";
+
+const INGEST_USAGE: &str = "usage: stroma ingest <file.jsonl> --db <dir>\n\
+     \n\
+     options:\n\
+     \x20 --db <dir>   database directory (default: .)\n\
+     \x20 -h, --help   print this help message\n";
+
+const EMBED_USAGE: &str = "usage: stroma embed <file.jsonl> --db <dir>\n\
+     \n\
+     options:\n\
+     \x20 --db <dir>   database directory (default: .)\n\
+     \x20 -h, --help   print this help message\n";
+
+const IMPORT_USAGE: &str = "usage: stroma import <file.csv> --db <dir> --type <Type> --id <col> [options]\n\
+     \n\
+     options:\n\
+     \x20 --db <dir>            database directory (default: .)\n\
+     \x20 --type <Type>         node type to create for each row (required)\n\
+     \x20 --id <col>            column holding each row's node id (required)\n\
+     \x20 --valid-from <col>    column holding a fact's valid-from timestamp\n\
+     \x20 --valid-to <col>      column holding a fact's valid-to timestamp\n\
+     \x20 --edge <col:Type:pred> repeatable: map a column to an edge (target type + predicate)\n\
+     \x20 --skip <col>          repeatable: column to import unchanged\n\
+     \x20 --source <name>       provenance name stamped on imported facts\n\
+     \x20 -h, --help            print this help message\n";
+
+const QUERY_USAGE: &str = "usage: stroma query <point|expand|search> ... --db <dir>\n\
+     \n\
+     options:\n\
+     \x20 --db <dir>               database directory (default: .)\n\
+     \x20 --type <TypeName>        (search) node type to search within\n\
+     \x20 --vector-file <file>     (search) JSON array file with the query vector\n\
+     \x20 --k <n>                  (search) number of results\n\
+     \x20 --allowed-labels <mask>  (search) ABAC label mask\n\
+     \x20 --mode <mode>            (search) search mode\n\
+     \x20 --expand <predicate>     (search) predicate to expand results through\n\
+     \x20 -h, --help               print this help message\n";
+
+const STATS_USAGE: &str = "usage: stroma stats --db <dir>\n\
+     \n\
+     options:\n\
+     \x20 --db <dir>   database directory (default: .)\n\
+     \x20 -h, --help   print this help message\n";
+
 fn read_file(path: &str) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("read {path}: {e}")))
 }
@@ -74,15 +157,32 @@ fn cmd_query(dir: &Path, args: &[String]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let usage = "usage: stroma <init|ingest|import|embed|query|stats|serve|up> --db <dir> [...]";
+    let usage = "usage: stroma <command> --db <dir> [...]\n\
+         \n\
+         commands:\n\
+         \x20 init     create a database directory\n\
+         \x20 ingest   ingest a JSONL file of defs/nodes/facts\n\
+         \x20 import   import a CSV file as a mapped graph\n\
+         \x20 embed    ingest a JSONL file of vector embeddings\n\
+         \x20 query    run a point/expand/search query\n\
+         \x20 stats    print database counters\n\
+         \x20 serve    run the HTTP server\n\
+         \x20 up       run the HTTP server (creates ./stroma-db if no --db is given)\n\
+         \n\
+         Run `stroma <command> --help` for a command's own flags.\n";
+    if args.first().is_some_and(|a| a == "-h" || a == "--help") {
+        print!("{usage}");
+        exit(0);
+    }
     let cmd = args
         .first()
         .map(|s| s.as_str())
         .unwrap_or_else(|| die(usage));
     // `serve` / `up` hand the raw flags to the serving library (it does its own flag/env parsing,
-    // e.g. --addr, --api-token). `up` is the just-run-it verb: same server, but a fresh directory
-    // defaults to ./stroma-db instead of littering the current directory with db files (`--demo`
-    // is left alone — the server gives the demo its own directory under the OS temp dir).
+    // e.g. --addr, --api-token, and its own --help/unknown-flag handling). `up` is the
+    // just-run-it verb: same server, but a fresh directory defaults to ./stroma-db instead of
+    // littering the current directory with db files (`--demo` is left alone — the server gives
+    // the demo its own directory under the OS temp dir).
     if cmd == "serve" || cmd == "up" {
         let mut serve_args: Vec<String> = args[1..].to_vec();
         if cmd == "up"
@@ -93,6 +193,41 @@ fn main() {
         }
         stromadb_serve::run(&serve_args);
         return;
+    }
+    let sub_args = &args[1..];
+    match cmd {
+        "init" => check_flags(sub_args, &["--db"], INIT_USAGE),
+        "ingest" => check_flags(sub_args, &["--db"], INGEST_USAGE),
+        "embed" => check_flags(sub_args, &["--db"], EMBED_USAGE),
+        "import" => check_flags(
+            sub_args,
+            &[
+                "--db",
+                "--type",
+                "--id",
+                "--valid-from",
+                "--valid-to",
+                "--edge",
+                "--skip",
+                "--source",
+            ],
+            IMPORT_USAGE,
+        ),
+        "query" => check_flags(
+            sub_args,
+            &[
+                "--db",
+                "--type",
+                "--vector-file",
+                "--k",
+                "--allowed-labels",
+                "--mode",
+                "--expand",
+            ],
+            QUERY_USAGE,
+        ),
+        "stats" => check_flags(sub_args, &["--db"], STATS_USAGE),
+        _ => {}
     }
     let db_dir = parse_flag(&args, "--db").unwrap_or_else(|| ".".into());
     let dir = Path::new(&db_dir);
