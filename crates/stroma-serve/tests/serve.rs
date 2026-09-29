@@ -144,7 +144,6 @@ fn serve_health_query_ingest() {
             .unwrap_or_else(|| panic!("ui missing {needle}"))
     };
     let order = [
-        at("id=\"grpAppearance\""),
         at("id=\"grpServer\""),
         at("id=\"grpAdmin\""),
         at("id=\"grpDanger\""),
@@ -152,6 +151,16 @@ fn serve_health_query_ingest() {
         at("</aside>"),
     ];
     assert!(order.is_sorted(), "settings groups out of order: {order:?}");
+
+    // theme and language controls live in the topbar, not the settings drawer
+    assert!(
+        !body.contains("id=\"grpAppearance\""),
+        "Appearance group must be removed from the settings drawer"
+    );
+    assert!(
+        at("id=\"lang\"") < at("id=\"settings\"") && at("id=\"theme\"") < at("id=\"settings\""),
+        "lang select and theme toggle must be in the topbar, before the settings drawer"
+    );
 
     // a console session is unrestricted and reports itself as such (no token identity)
     let (st, _, body) = http(&addr, "GET", "/me", "", Some(&tok));
