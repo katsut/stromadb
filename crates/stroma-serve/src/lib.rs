@@ -8,7 +8,7 @@
 //!   GET  /login           → login page               (public)
 //!   POST /login  {user,password} → session cookie     (public)
 //!   POST /logout          → clears the session
-//!   GET  /me              → {"user": name}
+//!   GET  /me              → {"user", "read_only", "allow_reset", "reset_hint"} (caller's permissions)
 //!   GET  /events?since=N  → long-poll; returns {"head": M} when the durable head advances (or ~20s)
 //!   GET  /stats           → engine/schema/embedding/storage counters
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
@@ -72,6 +72,10 @@ type Sessions = Arc<Mutex<HashMap<String, u64>>>;
 const SESSION_TTL_SECS: u64 = 12 * 3600;
 
 const LOGIN_HTML: &str = include_str!("login.html");
+
+/// The refusal `POST /reset` returns without `--allow-reset`; `/me` reports the same text so the
+/// console can show why its reset action is disabled.
+const RESET_DISABLED: &str = "reset is disabled (start with --allow-reset to enable)";
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -543,7 +547,16 @@ pub fn run(args: &[String]) {
                     let clear = "stroma_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0";
                     let _ = req.respond(json_cookie_response(200, &json!({ "ok": true }), clear));
                 } else if method == Method::Get && path == "/me" {
-                    let _ = req.respond(json_response(200, &json!({ "user": auth.user })));
+                    // what the caller may do, so the console renders admin actions without probing
+                    let _ = req.respond(json_response(
+                        200,
+                        &json!({
+                            "user": auth.user,
+                            "read_only": scope.read_only,
+                            "allow_reset": auth.allow_reset,
+                            "reset_hint": (!auth.allow_reset).then_some(RESET_DISABLED),
+                        }),
+                    ));
                 } else if method == Method::Post && path == "/reset" {
                     // opt-in, destructive: clear the whole database. Off unless --allow-reset is set.
                     if scope.read_only {
@@ -554,7 +567,7 @@ pub fn run(args: &[String]) {
                     } else if !auth.allow_reset {
                         let _ = req.respond(json_response(
                             403,
-                            &json!({ "error": "reset is disabled (start with --allow-reset to enable)" }),
+                            &json!({ "error": RESET_DISABLED }),
                         ));
                     } else {
                         let r = db.reset();
