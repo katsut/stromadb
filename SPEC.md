@@ -379,7 +379,14 @@ Read the properties on a specific edge.
   and search — see only authorized facts. Cardinality/counting is **post-authz** (a count must not
   leak the existence of facts the caller can't see).
 - Access is **ABAC label-based**: a node's `label` is a bitmask, and a request's `allowed_labels`
-  bitmask scopes what it may read (default: all). Tenant namespace isolation is the outermost boundary.
+  bitmask scopes what it may read (default: all).
+- **Namespaces** (the serving layer) sit outside labels: one server can front several databases,
+  the `--db` directory as `default` plus ordinary database directories at `<db>/ns/<name>/`,
+  addressed by the path prefix `/ns/<name>/`. Namespaces share nothing but the process — no type,
+  predicate, node id, fact or embedding crosses between them, and no query spans two. Auth and
+  tokens are server-wide, so a namespace is an isolation boundary for data, not for credentials;
+  per-tenant credentials and crash isolation come from separate processes. The engine itself stays
+  one database per directory.
 - Subject-addressed reads (`point`, `expand`, `timeline`) are post-authz too: a subject outside the
   caller's labels answers `denied` (point/expand) or empty (timeline), and node-valued answers
   outside them read as absent — a direct id probe must not leak what a search would hide.

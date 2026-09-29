@@ -91,8 +91,9 @@ principle).
 
 - Every request carries an **end-user principal**; agents query by delegation (on-behalf-of).
 - Authz is injected at the **head** of every pipeline; downstream sees only authorized facts.
-  Cardinality estimation is **post-authz** (count itself must not leak). ABAC label-based; tenant
-  namespace isolation is the outermost boundary; derived/cached summaries inherit source labels.
+  Cardinality estimation is **post-authz** (count itself must not leak). ABAC label-based; derived/cached
+  summaries inherit source labels. Outside labels, the serving layer's namespaces (one database
+  directory each, D27) separate datasets that share a server; auth stays server-wide.
 
 ## 10. Operational
 

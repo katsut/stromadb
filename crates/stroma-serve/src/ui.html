@@ -196,6 +196,7 @@
     <div class="brand">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="5" r="2.4" fill="#37d6a8"/><circle cx="5" cy="17" r="2.4" fill="#5aa9ff"/><circle cx="19" cy="16" r="2.4" fill="#b78cff"/><circle cx="12" cy="12" r="1.6" fill="#e8ecf4"/><path d="M12 5.2 12 10.6M11 11 6 15.4M13 11 18 14.6" stroke="#3a475e" stroke-width="1.3"/></svg>
       <span class="name">Stroma<b>DB</b></span>
+      <span class="pill hidden" id="nsPill" title="namespace"></span>
     </div>
     <span class="pill live-ind on" id="livePill" title="live"><span class="dot"></span>LIVE</span>
     <span id="statpills"></span>
@@ -335,7 +336,10 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const api = (p,b) => fetch(p, b?{method:'POST',body:JSON.stringify(b)}:{}).then(r=>r.json());
+// served under /ns/<name>/ → every namespaced call goes to that namespace; /me, /logout, /login stay global
+const NS = (location.pathname.match(/^\/ns\/([a-z0-9_-]{1,64})(\/|$)/)||[])[1] || '';
+const BASE = NS ? '/ns/'+NS : '';
+const api = (p,b) => fetch(BASE+p, b?{method:'POST',body:JSON.stringify(b)}:{}).then(r=>r.json());
 
 // ---------- i18n (EN / JA / ZH) ----------
 const I18N = {
@@ -760,7 +764,7 @@ async function startPoll(){ if(pollStarted) return; pollStarted=true;
   try{ const s=await api('/stats'); liveHead = s.facts?.durable_head ?? 0; }catch(x){}
   while(true){
     let head;
-    try{ const r=await fetch('/events?since='+liveHead); if(!r.ok){ await new Promise(z=>setTimeout(z,2000)); continue; } head=(await r.json()).head; }
+    try{ const r=await fetch(BASE+'/events?since='+liveHead); if(!r.ok){ await new Promise(z=>setTimeout(z,2000)); continue; } head=(await r.json()).head; }
     catch(x){ await new Promise(z=>setTimeout(z,2000)); continue; }
     if(head===liveHead) continue;      // timeout tick, no change
     liveHead=head; setLivePill(); stats();   // refresh header counters too
@@ -884,7 +888,7 @@ function compileImport(){ const {headers, rows}=_imp; const type=$('impType').va
 $('impRun').onclick=async ()=>{ if(!_imp) return; const box=$('impResult');
   let jsonl; try{ jsonl=compileImport(); }catch(x){ box.innerHTML=`<div class="qerr">${esc(x.message)}</div>`; return; }
   box.innerHTML=`<div class="qerr" style="color:var(--mut)">${t('loading')}</div>`;
-  try{ const r=await fetch('/ingest',{method:'POST',body:jsonl}).then(x=>x.json());
+  try{ const r=await fetch(BASE+'/ingest',{method:'POST',body:jsonl}).then(x=>x.json());
     if(r.error){ box.innerHTML=`<div class="qerr">${esc(r.error)}</div>`; return; }
     box.innerHTML=`<div class="qsum">${t('impDone',{rows:_imp.rows.length,facts:r.facts,nodes:r.nodes,sup:r.suppressed})}</div>`;
     await loadSchema(); fillPredSelects(); renderScope(); toast(t('impDoneToast',{n:r.facts}));
@@ -1096,9 +1100,10 @@ async function me(){ try{ const r=await fetch('/me'); if(r.ok){ perms=await r.js
 const fmtBytes = n => n<1024 ? n+' B' : n<1048576 ? (n/1024).toFixed(1)+' KiB' : (n/1048576).toFixed(1)+' MiB';
 // the server reports the MCP URL on its bound address; a wildcard bind (0.0.0.0 / ::) is not
 // reachable as such, so fall back to the address this page was loaded from
-function mcpUrl(){ if(!perms || !perms.mcp_url) return location.origin+'/mcp';
-  try{ const u=new URL(perms.mcp_url); return ['0.0.0.0','[::]','::'].includes(u.hostname) ? location.origin+'/mcp' : perms.mcp_url; }
-  catch(x){ return perms.mcp_url; } }
+function mcpUrl(){ const local=location.origin+BASE+'/mcp'; if(!perms || !perms.mcp_url) return local;
+  const url=perms.mcp_url.replace(/\/mcp$/, BASE+'/mcp');
+  try{ const u=new URL(url); return ['0.0.0.0','[::]','::'].includes(u.hostname) ? local : url; }
+  catch(x){ return url; } }
 function labelList(mask){ const on=[]; for(let i=0;i<64 && mask>=2**i;i++) if(Math.floor(mask/2**i)%2) on.push(i); return on.join(','); }
 function renderServer(){ const rows=[];
   if(perms){ rows.push([t('version'), perms.version], [t('dbPath'), perms.db_path], [t('workers'), perms.workers]); }
@@ -1133,7 +1138,7 @@ async function copyText(s){ if(navigator.clipboard && window.isSecureContext){ a
 $('mcpCopy').onclick=async()=>{ try{ await copyText(mcpUrl()); toast(t('copied')); }
   catch(x){ console.warn('copy failed', x); toast(t('copyFailed'), true); } };
 $('compactBtn').onclick=async()=>{ const btn=$('compactBtn'), out=$('compactResult'); btn.disabled=true; out.className='tip'; out.textContent=t('compacting');
-  try{ const r=await fetch('/compact',{method:'POST'}); const j=await r.json();
+  try{ const r=await fetch(BASE+'/compact',{method:'POST'}); const j=await r.json();
     if(!r.ok || j.error){ out.className='tip err-text'; out.textContent=t('compactFailed',{e:j.error||('HTTP '+r.status)}); return; }
     out.textContent=t('compactDone',{n:j.compacted_upto, w:fmtBytes(j.wal_bytes), s:fmtBytes(j.snapshot_bytes)}); stats();
   }catch(x){ out.className='tip err-text'; out.textContent=t('compactFailed',{e:''+x}); }
@@ -1153,12 +1158,13 @@ $('resetCancel').onclick=closeReset;
 $('resetModal').onclick=e=>{ if(e.target===$('resetModal')) closeReset(); };
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('resetModal').classList.contains('hidden')) closeReset(); });
 $('resetConfirm').onclick=async()=>{ const btn=$('resetConfirm'), out=$('resetResult'); btn.disabled=true; out.className='tip'; out.textContent=t('resetting');
-  try{ const r=await fetch('/reset',{method:'POST'}); const j=await r.json();
+  try{ const r=await fetch(BASE+'/reset',{method:'POST'}); const j=await r.json();
     if(!r.ok || j.error){ out.className='tip err-text'; out.textContent=t('resetFailed',{e:j.error||('HTTP '+r.status)}); btn.disabled=false; return; }
     closeReset(); afterReset(); toast(t('resetDone'));
   }catch(x){ out.className='tip err-text'; out.textContent=t('resetFailed',{e:''+x}); btn.disabled=false; } };
 $('lang').onchange=e=>applyLang(e.target.value);
 $('logout').onclick=async()=>{ try{ await fetch('/logout',{method:'POST'}); }catch(x){} location.href='/login'; };
+if(NS){ $('nsPill').textContent=NS; $('nsPill').classList.remove('hidden'); }
 
 resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); stats(); me(); loadSchema(); qopFields(); loop();
 </script>

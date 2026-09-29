@@ -325,6 +325,32 @@
   watch); the journal is bounded (fall too far behind → resync); maintenance cost is paid on the write
   path in proportion to watched rules × blast radius.
 
+## Serving
+
+### D27. Namespaces live in the serving layer; the engine stays one database per directory
+- **Context:** a local `stroma up` is usually already owned by one app. Loading an unrelated dataset
+  into it mixes that data's types, predicates and node ids into the app's graph, and the only
+  isolation was a second process on another port — heavy for one developer machine.
+- **Decision:** `stroma-serve` fronts several databases. The `--db` directory is the `default`
+  namespace; a named namespace is an ordinary database directory at `<db>/ns/<name>/`, addressed by
+  the path prefix `/ns/<name>/` (names `[a-z0-9_-]{1,64}`). A namespace is created by its first
+  `/ingest`; anything else on a missing one is 404. Databases open lazily and stay cached for the
+  process lifetime. Auth, sessions and token scopes stay server-wide.
+- **Why not in the engine:** a `Db` owns one WAL, one catalog, one write mutex and one directory lock.
+  Tenancy inside it would thread a namespace through every key, index and read path for no gain over
+  a second directory, which already isolates everything and keeps every offline tool working
+  unchanged (`stroma import --db <db>/ns/<name>`).
+- **Why a path prefix, not a header:** an MCP client and the browser console can only be given a URL.
+  A prefix makes a namespace addressable wherever a URL is, and unprefixed paths keep existing
+  clients on `default`.
+- **Why lazy creation on write:** a typo in a read URL must not leave an empty database behind, while
+  the first ingest into a new name should just work, as `stroma up` does for a fresh directory.
+- **Relation to #237:** namespaces share one process — one crash, one memory budget, one credential
+  set. They are for one developer machine or one small server holding a few datasets. Many tenants,
+  per-tenant credentials and crash isolation remain the job of process isolation and the planned
+  fleet gateway (#237), which routes to one server per tenant. The two compose: a gateway child can
+  itself serve namespaces.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |

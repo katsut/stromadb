@@ -22,7 +22,7 @@ managed by the OS directly; the only knob that bounds resident memory is `STROMA
 | `STROMA_API_TOKEN` | `--api-token <token>` | *(unset)* | serve | Legacy single API token: one unnamed, unrestricted bearer. When set, requests carrying `Authorization: Bearer <token>` are authorized without the login/cookie flow. Prefer named tokens (below). |
 | `STROMA_TOKENS` | `--tokens <file>` | *(unset)* | serve | **Named token registry** (JSON: `{"tokens":[{"name":"support-agent","token":"...","labels":15,"read_only":true}, …]}`). Each token carries a client identity — its name is stamped as provenance on un-sourced writes — plus an optional ABAC `labels` cap (intersected with every read's `allowed_labels`) and an optional `read_only` bit. No tokens configured at all = bearer auth disabled (cookie-only). |
 | — | `--demo` | `false` | serve | Boot with the bundled sample org graph (seeded only into an empty database) and print first-run queries plus an MCP connection snippet with a minted `demo-agent` token. With no `--db`/`$STROMA_DB`, the demo gets its own directory under the OS temp dir. |
-| `STROMA_ALLOW_RESET` | `--allow-reset` | `false` | serve | Enable `POST /reset`, which **clears the entire database**. Off by default; intended for dev/demo/test. Set `STROMA_ALLOW_RESET=1` (or pass the flag). Still requires auth, and read-only tokens are always refused. The console's settings panel (⚙) exposes it as **Reset database**, the last item in its danger zone, with a typed `RESET` confirmation; without the flag the action is shown disabled with the server's hint. `GET /me` reports `allow_reset` and `read_only` for the caller. |
+| `STROMA_ALLOW_RESET` | `--allow-reset` | `false` | serve | Enable `POST /reset`, which **clears the entire database** (or, under `/ns/<name>/reset`, that namespace only). Off by default; intended for dev/demo/test. Set `STROMA_ALLOW_RESET=1` (or pass the flag). Still requires auth, and read-only tokens are always refused. The console's settings panel (⚙) exposes it as **Reset database**, the last item in its danger zone, with a typed `RESET` confirmation; without the flag the action is shown disabled with the server's hint. `GET /me` reports `allow_reset` and `read_only` for the caller. |
 
 `RUST_BACKTRACE=1` is honored by the Rust runtime for panic diagnostics.
 
@@ -54,6 +54,47 @@ sending a token over an untrusted network.
 sessions and the legacy token), and the server facts `version`, `db_path`, `workers` and `mcp_url`
 (the MCP endpoint on the bound address). The console's settings panel renders from it.
 
+## Namespaces
+
+One server can front several isolated databases, so an unrelated dataset (say, an event log you
+want to explore) does not mix its types, predicates and node ids into the graph an app already
+uses. The `--db` directory is the **`default`** namespace, exactly as before. A named namespace is
+an ordinary database directory under it:
+
+```
+<db>/            default namespace (wal.log, schema.jsonl, …)
+<db>/ns/ocel/    namespace "ocel" — a complete database directory of its own
+<db>/ns/crm/     namespace "crm"
+```
+
+- **Routing.** A path `/ns/<name>/<rest>` is served by namespace `<name>` with `/<rest>` as the
+  endpoint: `/query`, `/ingest`, `/embed`, `/events`, `/stats`, `/compact`, `/reset`, `/mcp`, and
+  the console at `/ns/<name>/`. Every unprefixed path goes to `default`, so existing clients are
+  unaffected and `/ns/default/...` is an alias. `/health`, `/login`, `/logout`, `/me` and
+  `GET /namespaces` are global and never prefixed.
+- **Names** match `[a-z0-9_-]{1,64}`; anything else answers `400`. `default` is reserved.
+- **Creation.** A namespace comes into existence on its first `POST /ns/<name>/ingest`. Any other
+  request to a namespace whose directory does not exist, including `/embed`, `/compact`, `/reset`,
+  `/mcp` and the console page, answers `404` and creates nothing.
+- **Lifetime.** Each namespace's database is opened on first use, with the same
+  `--max-unmerged` bound as `default`, and stays open until the server exits.
+- **Listing.** `GET /namespaces` returns `{"namespaces":["default", …]}`, the existing named ones
+  sorted.
+- **Access.** Sessions and tokens are server-wide: one login or token reaches every namespace, and
+  a token's label cap, read-only bit and provenance stamping apply unchanged inside each. There
+  are no per-namespace credentials. `--allow-reset` lets `/ns/<name>/reset` clear that namespace
+  only; `--demo` seeds only `default`.
+
+The console works under a namespace too: open `http://localhost:7687/ns/ocel/` and every call it
+makes goes to `ocel`, with the namespace name shown next to the logo. MCP clients are pointed at
+one namespace by its URL, e.g. `http://localhost:7687/ns/ocel/mcp`.
+
+Because a namespace is just a database directory, the offline tools address one by path:
+`stroma init --db <db>/ns/<name>` creates it, `stroma import data.csv --db <db>/ns/<name> …`
+loads into it, and `stroma-mcp --db <db>/ns/<name>` serves it over stdio. The usual directory lock
+applies: once the server has opened a namespace it holds that directory, so stop the server before
+writing to it offline.
+
 ## Using a `.env` file
 
 The binaries read variables from the process environment; they do not auto-load `.env`. Copy
@@ -69,7 +110,7 @@ stroma serve
 
 ## Deployment shape
 
-The server runs a worker pool sharing one database: reads (`/query`, `/stats`, `/health`) are
+The server runs a worker pool sharing its databases (the default one plus any open namespaces): reads (`/query`, `/stats`, `/health`) are
 **lock-free** — each pins the current read view and runs on it with no lock held, so an in-flight
 write never blocks a read; writes (`/ingest`, `/embed`) serialize on the database's internal write
 mutex and publish a fresh view on completion. The worker count defaults to the available

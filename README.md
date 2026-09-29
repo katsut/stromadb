@@ -184,6 +184,21 @@ Settings come from flags or environment variables (flag > env > default) — see
 (`allowed_labels`, capped per token) and stamped with an `as_of` version vector. The `stroma-serve`
 binary still ships and behaves identically to `stroma serve`.
 
+### Namespaces
+
+One server can hold several isolated databases. Prefix any endpoint with `/ns/<name>/` to address
+namespace `<name>`, stored as its own database directory at `<db>/ns/<name>/`; unprefixed paths
+keep hitting the `--db` database. A namespace is created by its first ingest, and
+`GET /namespaces` lists them. The console and MCP work per namespace too
+(`http://localhost:7687/ns/ocel/`, `…/ns/ocel/mcp`). Logins and tokens are shared server-wide;
+see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#namespaces).
+
+```bash
+curl -s -X POST localhost:7687/ns/ocel/ingest --data-binary @events.jsonl
+curl -s localhost:7687/ns/ocel/stats
+curl -s localhost:7687/namespaces     # {"namespaces":["default","ocel"]}
+```
+
 Docker, without a local Rust toolchain:
 
 ```bash
