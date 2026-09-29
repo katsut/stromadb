@@ -138,6 +138,20 @@ fn serve_health_query_ingest() {
         body.contains("Draw neighbourhood"),
         "ui body missing app marker"
     );
+    // the settings drawer keeps its groups in order, with the reset action last of all
+    let at = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("ui missing {needle}"))
+    };
+    let order = [
+        at("id=\"grpAppearance\""),
+        at("id=\"grpServer\""),
+        at("id=\"grpAdmin\""),
+        at("id=\"grpDanger\""),
+        at("id=\"resetBtn\""),
+        at("</aside>"),
+    ];
+    assert!(order.is_sorted(), "settings groups out of order: {order:?}");
 
     // a console session is unrestricted and reports itself as such (no token identity)
     let (st, _, body) = http(&addr, "GET", "/me", "", Some(&tok));

@@ -163,8 +163,23 @@
   .role-row .rn { font:600 12.5px var(--sans); color:var(--fg); } .role-row .rl { font:11px var(--mono); color:var(--mut); margin-left:auto; }
   .role-row .rx { color:var(--mut); cursor:pointer; font-size:14px; line-height:1; padding:0 2px; } .role-row .rx:hover { color:#ff7a90; }
   .pill.role { color:var(--fg-dim); } .pill.role b { color:var(--accent); }
-  /* admin actions: a top-right popover, destructive buttons, and a typed-confirmation dialog */
-  .pop.pop-right { left:auto; right:14px; }
+  /* settings drawer: grouped rows on the right edge; the danger zone is always the last group */
+  .drawer { position:absolute; top:0; right:0; bottom:0; z-index:9; width:380px; max-width:100%; overflow-y:auto; background:var(--panel-2); border-left:1px solid var(--line-2); box-shadow:-18px 0 40px -24px rgba(0,0,0,.7); padding:14px 18px 22px; }
+  .drawer-h { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; } .drawer-h .pop-h { margin:0; font-size:14px; }
+  .set-grp { padding:14px 0; border-top:1px solid var(--line); } .set-grp h2 { margin-bottom:10px; }
+  .set-row { display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:12.5px; color:var(--fg-dim); min-height:32px; }
+  .set-row b { font:600 12px var(--mono); color:var(--fg); }
+  .set-row b.on { color:var(--accent); } .set-row b.off { color:var(--mut); }
+  .seg { display:inline-flex; border:1px solid var(--line-2); border-radius:100px; padding:2px; background:var(--bg); }
+  .seg button { background:none; border:0; color:var(--mut); font:600 12px var(--sans); padding:4px 12px; border-radius:100px; cursor:pointer; }
+  .seg button.on { color:var(--accent-ink); background:linear-gradient(180deg,var(--accent),var(--accent-2)); }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 14px; font-size:12px; }
+  .kv .k { color:var(--fg-dim); } .kv .v { color:var(--fg); font:12px var(--mono); text-align:right; word-break:break-all; }
+  .kv .wide { grid-column:1 / -1; } .kv .v.wide { text-align:left; margin:-3px 0 3px; color:var(--fg-dim); font-size:11.5px; }
+  .copy-row { display:flex; align-items:center; gap:8px; } .copy-row code { flex:1; min-width:0; font:11.5px var(--mono); color:var(--fg); background:var(--bg); border:1px solid var(--line-2); border-radius:var(--r-sm); padding:7px 9px; word-break:break-all; }
+  .danger-zone { margin-top:10px; border:1px solid color-mix(in oklab,#ff5a6a 42%,var(--line-2)); border-radius:var(--r); padding:12px 14px; background:color-mix(in oklab,#ff5a6a 6%,transparent); }
+  .danger-zone h2 { color:#ff7a90; }
+  /* destructive buttons and the typed-confirmation dialog */
   button.danger { width:100%; margin-top:10px; background:color-mix(in oklab,#ff5a6a 16%,var(--panel)); color:#ff7a90; border:1px solid color-mix(in oklab,#ff5a6a 50%,var(--line-2)); border-radius:var(--r-sm); padding:9px; font:600 12.5px var(--sans); cursor:pointer; transition:filter .15s, background .15s; }
   button.danger:hover:not(:disabled) { background:color-mix(in oklab,#ff5a6a 26%,var(--panel)); filter:brightness(1.08); }
   button.danger:disabled { opacity:.45; cursor:not-allowed; }
@@ -189,10 +204,7 @@
     <span id="statpills"></span>
     <button class="pill scope-btn" id="scopeBtn" title="visibility scope"><span data-i18n="scope">scope</span>: <b id="scopeSummary">all</b></button>
     <span class="tb-spacer"></span>
-    <span class="pill" id="userPill" style="display:none">signed in <b id="userName"></b></span>
-    <select class="lang" id="lang" title="language"><option value="en">EN</option><option value="ja">日本語</option><option value="zh">中文</option></select>
-    <button class="icon-btn hidden" id="adminBtn" data-i18n-title="admin" title="administration">⚙</button>
-    <button class="icon-btn" id="theme" data-i18n-title="theme">☾</button>
+    <button class="icon-btn" id="settingsBtn" data-i18n-title="settings" title="settings" aria-controls="settings" aria-expanded="false">⚙</button>
     <button class="icon-btn" id="logout" data-i18n-title="signOut">⏻</button>
   </div>
 
@@ -203,12 +215,35 @@
     <div id="scopeEffect" class="tip" style="color:var(--accent);margin-bottom:0"></div>
   </div>
 
-  <div class="pop pop-right hidden" id="adminPop">
-    <div class="pop-h" data-i18n="adminTitle">Administration</div>
-    <div class="tip" data-i18n="resetIntro" style="margin:0">Remove everything stored in this database and start empty.</div>
-    <button class="danger" id="resetBtn" data-i18n="resetDb">Reset database…</button>
-    <div class="tip hidden" id="resetHint" style="margin-bottom:0"></div>
-  </div>
+  <!-- settings: a right-side drawer, groups in a fixed order; the destructive reset is always last -->
+  <aside class="drawer hidden" id="settings" role="dialog" aria-labelledby="setTitle">
+    <div class="drawer-h"><span class="pop-h" id="setTitle" data-i18n="settingsTitle">Settings</span><button class="caret-btn" id="setClose" data-i18n-title="close" title="close">✕</button></div>
+    <div class="set-grp" id="grpAppearance">
+      <h2 data-i18n="grpAppearance">Appearance</h2>
+      <div class="set-row"><span data-i18n="themeLbl">Theme</span><div class="seg" id="themeSeg"><button data-v="dark" data-i18n="themeDark">Dark</button><button data-v="light" data-i18n="themeLight">Light</button></div></div>
+      <div class="set-row"><span data-i18n="langLbl">Language</span><select class="lang" id="lang" data-i18n-title="langLbl" title="language"><option value="en">EN</option><option value="ja">日本語</option><option value="zh">中文</option></select></div>
+    </div>
+    <div class="set-grp" id="grpServer">
+      <h2 data-i18n="grpServer">Server</h2>
+      <div class="kv" id="serverKv"></div>
+      <label data-i18n="mcpEndpoint">MCP endpoint</label>
+      <div class="copy-row"><code id="mcpUrl">—</code><button class="tb-btn" id="mcpCopy" data-i18n="copy">Copy</button></div>
+    </div>
+    <div class="set-grp hidden" id="grpAdmin">
+      <h2 data-i18n="grpAdmin">Admin</h2>
+      <div class="tip" data-i18n="compactIntro" style="margin-top:0">Snapshot the current state and truncate the changelog. Non-destructive: as-of reads keep answering across the boundary.</div>
+      <button class="ghost" id="compactBtn" data-i18n="compactNow">Compact now</button>
+      <div class="tip" id="compactResult"></div>
+      <div class="set-row"><span data-i18n="resetState">Database reset</span><b id="resetState"></b></div>
+      <div class="tip hidden" id="resetStateHint" style="margin-top:4px"></div>
+    </div>
+    <div class="set-grp danger-zone hidden" id="grpDanger">
+      <h2 data-i18n="dangerZone">Danger zone</h2>
+      <div class="tip" data-i18n="resetIntro" style="margin:0">Remove everything stored in this database and start empty.</div>
+      <button class="danger" id="resetBtn" data-i18n="resetDb">Reset database…</button>
+      <div class="tip hidden" id="resetHint" style="margin-bottom:0"></div>
+    </div>
+  </aside>
 
   <div class="modal-back hidden" id="resetModal" role="dialog" aria-modal="true" aria-labelledby="resetTitle">
     <div class="modal">
@@ -316,21 +351,33 @@ const I18N = {
        lgFocus:"focus", lgDeep:"deep", hop:"hop",
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”",
-       admin:"administration", adminTitle:"Administration", resetIntro:"Remove everything stored in this database and start empty.", resetDb:"Reset database…", resetTitle:"Reset database", resetBody:"This removes all facts, schema, rules and embeddings, and cannot be undone. A server started with --demo does not re-seed the sample graph until it is restarted.", resetType:"type RESET to confirm", cancel:"Cancel", resetConfirm:"Reset", resetting:"resetting…", resetFailed:"reset failed: {e}", resetDone:"database reset — it is now empty" },
+       settings:"settings", settingsTitle:"Settings", close:"close", grpAppearance:"Appearance", themeLbl:"Theme", themeDark:"Dark", themeLight:"Light", langLbl:"Language",
+       grpServer:"Server", version:"version", dbPath:"database", workers:"workers", typesPreds:"types · predicates", embeddingsLbl:"embeddings", durableHead:"durable head", changelog:"changelog", signedInAs:"signed in as", access:"access", readWrite:"read-write", readOnlyLbl:"read-only", allLabels:"all labels", labelsCap:"labels {l}", unnamedToken:"unnamed token", authOpen:"open (auth disabled)", viaToken:"token “{n}”",
+       mcpEndpoint:"MCP endpoint", copy:"Copy", copied:"copied to clipboard", copyFailed:"copy failed — select the URL and copy it manually",
+       grpAdmin:"Admin", compactIntro:"Snapshot the current state and truncate the changelog. Non-destructive: as-of reads keep answering across the boundary.", compactNow:"Compact now", compacting:"compacting…", compactDone:"compacted up to {n} · changelog {w} · snapshot {s}", compactFailed:"compaction failed: {e}", resetState:"Database reset", enabled:"enabled", disabled:"disabled", dangerZone:"Danger zone",
+       resetIntro:"Remove everything stored in this database and start empty.", resetDb:"Reset database…", resetTitle:"Reset database", resetBody:"This removes all facts, schema, rules and embeddings, and cannot be undone. A server started with --demo does not re-seed the sample graph until it is restarted.", resetType:"type RESET to confirm", cancel:"Cancel", resetConfirm:"Reset", resetting:"resetting…", resetFailed:"reset failed: {e}", resetDone:"database reset — it is now empty" },
   ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。", queryTitle:"クエリ", queryOp:"何を調べる？", queryNode:"ノード", queryK:"件数", qopPoint:"プロパティの値", qopExpand:"つながっている隣接ノード", qopNode:"ノードの全情報", qopSimilar:"似ているノード（ベクトル）", qopTimeline:"値の変遷（タイムライン）", qopConformance:"ルール判定（conformance）", queryAsOf:"時点指定（空＝現在）", queryHops:"ホップ連鎖（one-cardinality 述語を左→右に辿る）", queryRule:"保存済みルール", needHops:"ホップ連鎖に述語を1つ以上入力してください。", noRules:"保存済みルールなし — rule_def の ingest 行で宣言できます。", nSegments:"{n} 区間 — バーにホバーで期間表示", noSegments:"区間なし — そのパスで有効だった値はありません。", nVerdicts:"{n} 件を判定", noVerdicts:"このルールの対象がありません。", tlOpen:"現在", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · 対象外 {na}", cfAbsent:"欠落 — 要求値: {req}", cfMismatch:"実際 {act} ≠ 要求 {req}", importTitle:"インポート", importIntro:"CSV を読み込み、各列の役割を選ぶだけ。日付列を valid time に割り付ければ、行が型付きファクトになります。", importType:"ノード型", importSource:"ソース（任意）", importRun:"インポート", impRoleLiteral:"プロパティ", impRoleId:"行 ID", impRoleEdge:"エッジ →", impRoleSkip:"無視", impTargetPh:"相手の型", impPredPh:"述語", impNotUtf8:"UTF-8 ではありません — 先に変換してください（Excel なら「CSV UTF-8」で保存）。", impBadQuote:"引用符が閉じていません。", impEmpty:"空のファイルです。", impNeedType:"ノード型を入力してください。", impNeedId:"行 ID の列をちょうど1つ選んでください。", impNeedEdge:"エッジ列には相手の型と述語が必要です。", impEmptyId:"{n} 行目: ID セルが空です。", impBadDate:"{n} 行目: {c} の日付が不正です。", impCardConflict:"「{p}」は別の cardinality で定義済み — エンジンが拒否します。", impRangeConflict:"「{p}」は別の range で定義済み — エンジンが拒否します。", impDone:"<b>{rows}</b> 行を取り込み → ファクト {facts}・ノード {nodes}（no-op {sup} 件スキップ）", impDoneToast:"ファクト {n} 件を取り込みました", run:"実行", rolesIntro:"各ノードには機密度ラベルが付きます。ロールは「見てよいラベルの集合」。「表示ロール」を切り替えると、その権限を持つ人の視点でグラフを探索でき、ロール外のノードは消えます。（探索補助であり認証ではありません）", labelsInUse:"このデータのラベル", noLabels:"このデータに機密度ラベルはありません — 全ノードが公開です。", roleSees:"「{role}」は {m} 中 {n} ノードを閲覧可", scope:"表示範囲", scopeTitle:"表示範囲（可視ラベル）", scopeIntro:"各ノードには機密度ラベルが付きます。表示するラベルをトグルで切替 — 隠したラベル（とそこへの辺）は全ビューから消えます。探索補助であり認証ではありません。", scopeAll:"全て", scopeNone:"なし", scopeSees:"{m} 中 {n} ノードを表示", restrictedScope:"現在の表示範囲では非表示。", embedding:"埋め込み", noVector:"このノードには検索に使う埋め込みがありません。", noValue:"値なし — このノードにそのプロパティはありません。", valuesW:"件の値", nLinked:"{n} 個の隣接ノード — クリックで開く", noLinked:"その述語での隣接ノードはありません。", nodeSummary:"{type}（プロパティ {n} 件）", nSimilar:"似ているノード {n} 件 — クリックで開く", noSimilar:"似ているノードは見つかりませんでした。", rawJson:"生 JSON", provTip:"来歴 — この値を取り込んだソース", confTip:"確信度 — この値の裏付けの強さ（合意する独立ソース数）", findNode:"ノード検索", findPh:"フリーワード検索…", findNone:"該当なし。", composeTitle:"合成", composeIntro:"ステップを鎖にして1本のクエリに。例を編集してみて — 各段で残るノード数が出ます。", addStep:"＋ステップ追加", cStartNodes:"このノードから始める", cStartSimilar:"似たノードから始める", cFollow:"辿る", cKeep:"型で絞る", cStart:"起点", cStep:"段",
        theme:"ライト/ダーク切替", signOut:"サインアウト", collapseSidebar:"サイドバーを閉じる", expandSidebar:"サイドバーを開く", back:"前の焦点に戻る", liveOn:"ライブ更新中（クリックで一時停止）", livePaused:"一時停止中（クリックで再開）", labels:"ラベル表示切替", zoomIn:"拡大", zoomOut:"縮小", fit:"全体表示", help:"操作説明", allEdges:"全ての辺", egAnalyst:"例: analyst",
        connecting:"接続中…", live:"ライブ", paused:"一時停止", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
        lgFocus:"焦点", lgDeep:"遠方", hop:"ホップ",
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用",
-       admin:"管理", adminTitle:"管理", resetIntro:"このデータベースの内容をすべて削除し、空の状態に戻します。", resetDb:"データベースをリセット…", resetTitle:"データベースをリセット", resetBody:"すべてのファクト・スキーマ・ルール・埋め込みを削除します。元には戻せません。--demo で起動したサーバーは、再起動するまでサンプルグラフを再投入しません。", resetType:"確認のため RESET と入力", cancel:"キャンセル", resetConfirm:"リセット", resetting:"リセット中…", resetFailed:"リセットに失敗しました: {e}", resetDone:"データベースをリセットしました。現在は空です" },
+       settings:"設定", settingsTitle:"設定", close:"閉じる", grpAppearance:"表示", themeLbl:"テーマ", themeDark:"ダーク", themeLight:"ライト", langLbl:"言語",
+       grpServer:"サーバー", version:"バージョン", dbPath:"データベース", workers:"ワーカー数", typesPreds:"型 · 述語", embeddingsLbl:"埋め込み", durableHead:"durable head", changelog:"変更ログ", signedInAs:"サインイン", access:"権限", readWrite:"読み書き", readOnlyLbl:"読み取り専用", allLabels:"全ラベル", labelsCap:"ラベル {l}", unnamedToken:"名前なしトークン", authOpen:"認証なし（無効化中）", viaToken:"トークン「{n}」",
+       mcpEndpoint:"MCP エンドポイント", copy:"コピー", copied:"クリップボードにコピーしました", copyFailed:"コピーできませんでした。URL を選択して手動でコピーしてください",
+       grpAdmin:"管理", compactIntro:"現在の状態をスナップショットし、変更ログを切り詰めます。非破壊で、境界をまたぐ時点指定の読み取りもそのまま動きます。", compactNow:"今すぐコンパクション", compacting:"コンパクション中…", compactDone:"{n} までコンパクション済み · 変更ログ {w} · スナップショット {s}", compactFailed:"コンパクションに失敗しました: {e}", resetState:"データベースのリセット", enabled:"有効", disabled:"無効", dangerZone:"危険な操作",
+       resetIntro:"このデータベースの内容をすべて削除し、空の状態に戻します。", resetDb:"データベースをリセット…", resetTitle:"データベースをリセット", resetBody:"すべてのファクト・スキーマ・ルール・埋め込みを削除します。元には戻せません。--demo で起動したサーバーは、再起動するまでサンプルグラフを再投入しません。", resetType:"確認のため RESET と入力", cancel:"キャンセル", resetConfirm:"リセット", resetting:"リセット中…", resetFailed:"リセットに失敗しました: {e}", resetDone:"データベースをリセットしました。現在は空です" },
   zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。", queryTitle:"查询", queryOp:"想查找什么？", queryNode:"节点", queryK:"结果数", qopPoint:"属性值", qopExpand:"相连的邻居", qopNode:"节点的全部信息", qopSimilar:"相似节点（向量）", qopTimeline:"值的变迁（时间线）", qopConformance:"规则判定（conformance）", queryAsOf:"截至时点（留空=当前）", queryHops:"跳链（one-cardinality 谓词，从左到右）", queryRule:"已存规则", needHops:"请为跳链输入至少一个谓词。", noRules:"没有已存规则 — 可通过 rule_def ingest 行声明。", nSegments:"{n} 个区间 — 悬停查看时段", noSegments:"无区间 — 该路径上没有生效过的值。", nVerdicts:"已判定 {n} 个主体", noVerdicts:"该规则没有适用主体。", tlOpen:"现在", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · 不适用 {na}", cfAbsent:"缺失 — 要求值: {req}", cfMismatch:"实际 {act} ≠ 要求 {req}", importTitle:"导入", importIntro:"载入 CSV：为每列选择角色，把日期列映射到 valid time，行即成为类型化事实。", importType:"节点类型", importSource:"来源（可选）", importRun:"导入", impRoleLiteral:"属性", impRoleId:"行 ID", impRoleEdge:"边 →", impRoleSkip:"忽略", impTargetPh:"目标类型", impPredPh:"谓词", impNotUtf8:"不是 UTF-8 — 请先转换（Excel 请另存为 CSV UTF-8）。", impBadQuote:"引号未闭合。", impEmpty:"文件为空。", impNeedType:"请输入节点类型。", impNeedId:"必须且只能选择一列作为行 ID。", impNeedEdge:"边列需要目标类型和谓词。", impEmptyId:"第 {n} 行：ID 单元格为空。", impBadDate:"第 {n} 行：{c} 的日期无效。", impCardConflict:"“{p}” 已以不同 cardinality 定义 — 引擎会拒绝。", impRangeConflict:"“{p}” 已以不同 range 定义 — 引擎会拒绝。", impDone:"已导入 <b>{rows}</b> 行 → {facts} 事实、{nodes} 节点（跳过 {sup} 个 no-op）", impDoneToast:"已导入 {n} 条事实", run:"运行", rolesIntro:"每个节点带有敏感度标签。角色是你被允许看到的标签集合；切换“查看身份”即可以该权限者的视角浏览图，角色之外的节点会隐藏。（探索辅助，非身份验证）", labelsInUse:"本数据中的标签", noLabels:"本数据没有敏感度标签 — 所有节点均公开。", roleSees:"“{role}”可见 {m} 中的 {n} 个节点", scope:"可见范围", scopeTitle:"可见范围（标签）", scopeIntro:"每个节点带有敏感度标签。切换要显示的标签 — 隐藏的标签（及其边）会从所有视图中移除。探索辅助，非身份验证。", scopeAll:"全部", scopeNone:"无", scopeSees:"显示 {m} 中的 {n} 个节点", restrictedScope:"在当前可见范围下已隐藏。", embedding:"嵌入向量", noVector:"该节点没有可用于搜索的嵌入向量。", noValue:"无值 — 该节点没有该属性。", valuesW:"个值", nLinked:"{n} 个相连节点 — 点击打开", noLinked:"该谓词下没有相连节点。", nodeSummary:"一个 {type}，含 {n} 个属性", nSimilar:"{n} 个相似节点 — 点击打开", noSimilar:"未找到相似节点。", rawJson:"原始 JSON", provTip:"来源 — 该值摄取自的数据源", confTip:"置信度 — 该值的佐证程度（独立一致来源数）", findNode:"查找节点", findPh:"自由词搜索…", findNone:"无匹配。", composeTitle:"合成", composeIntro:"把步骤连成一条查询。编辑示例 — 每步显示剩余节点数。", addStep:"+ 添加步骤", cStartNodes:"从该节点开始", cStartSimilar:"从相似节点开始", cFollow:"沿着", cKeep:"仅保留类型", cStart:"起点", cStep:"步",
        theme:"切换明暗", signOut:"退出登录", collapseSidebar:"收起侧边栏", expandSidebar:"展开侧边栏", back:"返回上一焦点", liveOn:"实时更新中（点击暂停）", livePaused:"已暂停（点击恢复）", labels:"切换标签", zoomIn:"放大", zoomOut:"缩小", fit:"适配", help:"操作说明", allEdges:"所有边", egAnalyst:"例: analyst",
        connecting:"连接中…", live:"实时", paused:"暂停", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
        lgFocus:"焦点", lgDeep:"更远", hop:"跳",
        detNode:"节点", detType:"类型", detLabel:"标签", untyped:"无类型", recentre:"以此为中心 ›", noProps:"无存储属性。", loading:"加载中…", restricted:"角色“{r}”下受限。",
        tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”",
-       admin:"管理", adminTitle:"管理", resetIntro:"删除此数据库中存储的全部内容，恢复为空。", resetDb:"重置数据库…", resetTitle:"重置数据库", resetBody:"这将删除所有事实、模式、规则和嵌入向量，且无法撤销。以 --demo 启动的服务器在重启之前不会重新载入示例图。", resetType:"输入 RESET 以确认", cancel:"取消", resetConfirm:"重置", resetting:"正在重置…", resetFailed:"重置失败：{e}", resetDone:"数据库已重置，现在为空" },
+       settings:"设置", settingsTitle:"设置", close:"关闭", grpAppearance:"外观", themeLbl:"主题", themeDark:"深色", themeLight:"浅色", langLbl:"语言",
+       grpServer:"服务器", version:"版本", dbPath:"数据库", workers:"工作线程", typesPreds:"类型 · 谓词", embeddingsLbl:"嵌入向量", durableHead:"durable head", changelog:"变更日志", signedInAs:"登录身份", access:"权限", readWrite:"读写", readOnlyLbl:"只读", allLabels:"全部标签", labelsCap:"标签 {l}", unnamedToken:"未命名令牌", authOpen:"开放（认证已禁用）", viaToken:"令牌“{n}”",
+       mcpEndpoint:"MCP 端点", copy:"复制", copied:"已复制到剪贴板", copyFailed:"复制失败，请选中 URL 手动复制",
+       grpAdmin:"管理", compactIntro:"为当前状态创建快照并截断变更日志。非破坏性：跨越边界的时点读取仍然有效。", compactNow:"立即压缩", compacting:"正在压缩…", compactDone:"已压缩至 {n} · 变更日志 {w} · 快照 {s}", compactFailed:"压缩失败：{e}", resetState:"数据库重置", enabled:"已启用", disabled:"已禁用", dangerZone:"危险操作",
+       resetIntro:"删除此数据库中存储的全部内容，恢复为空。", resetDb:"重置数据库…", resetTitle:"重置数据库", resetBody:"这将删除所有事实、模式、规则和嵌入向量，且无法撤销。以 --demo 启动的服务器在重启之前不会重新载入示例图。", resetType:"输入 RESET 以确认", cancel:"取消", resetConfirm:"重置", resetting:"正在重置…", resetFailed:"重置失败：{e}", resetDone:"数据库已重置，现在为空" },
 };
 let lang = 'en';
 function t(k, v){ let s=(I18N[lang]&&I18N[lang][k])||I18N.en[k]||k; if(v) for(const p in v) s=s.split('{'+p+'}').join(v[p]); return s; }
@@ -338,7 +385,7 @@ function applyLang(l){ lang = I18N[l] ? l : 'en'; localStorage.setItem('stroma_l
   document.querySelectorAll('[data-i18n]').forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll('[data-i18n-ph]').forEach(e=>e.placeholder=t(e.dataset.i18nPh));
   document.querySelectorAll('[data-i18n-title]').forEach(e=>e.title=t(e.dataset.i18nTitle));
-  legend(); renderUser(); renderStats(); setLivePill(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); renderCompose(); } }
+  legend(); renderSettings(); renderStats(); setLivePill(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); renderCompose(); } }
 const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
 const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
@@ -1001,7 +1048,7 @@ $('qrun').onclick=runQuery;
 function legend(){ const nm=[t('lgFocus'), '1-'+t('hop'), '2-'+t('hop'), '3-'+t('hop'), '4-'+t('hop'), t('lgDeep')];
   $('legend').innerHTML=nm.map((n,i)=>`<span><i class="swatch" style="background:${hex(DEPTH[i])}"></i>${n}</span>`).join(''); }
 let _stats=null;
-function renderStats(){ if(!_stats){ return; } const s=_stats; $('statpills').innerHTML=`<span class="pill"><b>${s.schema.nodes}</b> ${t('nodes')}</span><span class="pill"><b>${s.embeddings.count}</b> ${t('vec')}</span><span class="pill">${t('head')} <b>${s.facts.durable_head}</b></span>`; }
+function renderStats(){ if(!_stats){ return; } const s=_stats; $('statpills').innerHTML=`<span class="pill"><b>${s.schema.nodes}</b> ${t('nodes')}</span><span class="pill"><b>${s.embeddings.count}</b> ${t('vec')}</span><span class="pill">${t('head')} <b>${s.facts.durable_head}</b></span>`; renderServer(); }
 async function stats(){ try{ _stats=await api('/stats'); renderStats(); }catch{ $('statpills').innerHTML=`<span class="pill">${t('offline')}</span>`; } }
 
 // ---------- schema discoverability: predicate list + labels in use ----------
@@ -1042,31 +1089,68 @@ $('scopeChips').onclick=e=>{ const c=e.target.closest('.scope-chip'); if(!c) ret
 function applyTheme(t){ document.documentElement.dataset.theme=t; localStorage.setItem('stroma_theme',t);
   additive = t!=='light';                                            // dark = additive glow (cosmic)
   edgeRGBA = t==='light' ? [.28,.36,.52,.75] : [.5,.62,1.,.5];       // light: solid line · dark: luminous filament
-  $('theme').textContent = t==='light' ? '☀' : '☾'; }
-$('theme').onclick=()=>applyTheme(document.documentElement.dataset.theme==='light'?'dark':'light');
+  document.querySelectorAll('#themeSeg button').forEach(b=>b.classList.toggle('on', b.dataset.v===t)); }
+$('themeSeg').onclick=e=>{ const b=e.target.closest('button'); if(b) applyTheme(b.dataset.v); };
 applyTheme(localStorage.getItem('stroma_theme')||'dark');
 
-// ---------- session ----------
-let curUser=null;
-function renderUser(){ if(!curUser){ return; } $('userPill').innerHTML=`${t('signedIn')} <b>${curUser}</b>`; $('userPill').style.display=''; }
-async function me(){ try{ const r=await fetch('/me'); if(r.ok){ perms=await r.json(); curUser=perms.user; renderUser(); renderAdmin(); } }catch(x){ console.warn('GET /me failed', x); } }
+// ---------- settings drawer: Appearance → Server → Admin → Danger zone (reset, always last) ----------
+// GET /me says what this caller may do and what it is talking to. A read-only caller gets no admin
+// group and no reset at all; without --allow-reset the reset stays visible but disabled, with the
+// server's own hint.
+let perms=null;
+async function me(){ try{ const r=await fetch('/me'); if(r.ok){ perms=await r.json(); renderSettings(); } }catch(x){ console.warn('GET /me failed', x); } }
+const fmtBytes = n => n<1024 ? n+' B' : n<1048576 ? (n/1024).toFixed(1)+' KiB' : (n/1048576).toFixed(1)+' MiB';
+// the server reports the MCP URL on its bound address; a wildcard bind (0.0.0.0 / ::) is not
+// reachable as such, so fall back to the address this page was loaded from
+function mcpUrl(){ if(!perms || !perms.mcp_url) return location.origin+'/mcp';
+  try{ const u=new URL(perms.mcp_url); return ['0.0.0.0','[::]','::'].includes(u.hostname) ? location.origin+'/mcp' : perms.mcp_url; }
+  catch(x){ return perms.mcp_url; } }
+function labelList(mask){ const on=[]; for(let i=0;i<64 && mask>=2**i;i++) if(Math.floor(mask/2**i)%2) on.push(i); return on.join(','); }
+function renderServer(){ const rows=[];
+  if(perms){ rows.push([t('version'), perms.version], [t('dbPath'), perms.db_path], [t('workers'), perms.workers]); }
+  if(_stats){ const s=_stats;
+    rows.push([t('nodes'), s.schema.nodes], [t('typesPreds'), s.schema.types+' · '+s.schema.predicates], [t('embeddingsLbl'), s.embeddings.count],
+      [t('durableHead'), s.facts.durable_head], [t('changelog'), fmtBytes(s.storage.wal_bytes)]); }
+  if(perms){ const who = perms.auth==='token' ? (perms.token_name ? t('viaToken',{n:perms.token_name}) : t('unnamedToken'))
+      : perms.auth==='open' ? t('authOpen') : perms.user;
+    const cap = perms.labels==null ? t('allLabels') : t('labelsCap',{l:labelList(perms.labels)});
+    rows.push([t('signedInAs'), who], [t('access'), (perms.read_only ? t('readOnlyLbl') : t('readWrite'))+' · '+cap]); }
+  // a long value (the db path) gets its own full-width line under its key
+  $('serverKv').innerHTML = rows.map(([k,v])=>{ const w=(''+v).length>28 ? ' wide' : '';
+    return `<span class="k${w}">${esc(k)}</span><span class="v${w}">${esc(''+v)}</span>`; }).join('');
+  $('mcpUrl').textContent = mcpUrl(); }
+function renderSettings(){ renderServer();
+  const admin = !!perms && !perms.read_only;
+  $('grpAdmin').classList.toggle('hidden', !admin); $('grpDanger').classList.toggle('hidden', !admin);
+  if(!admin) return;
+  const hint = perms.allow_reset ? '' : (perms.reset_hint || '');
+  const st=$('resetState'); st.textContent = perms.allow_reset ? t('enabled') : t('disabled'); st.className = perms.allow_reset ? 'on' : 'off';
+  $('resetStateHint').textContent = hint; $('resetStateHint').classList.toggle('hidden', !hint);
+  $('resetBtn').disabled = !perms.allow_reset; $('resetBtn').title = hint;
+  $('resetHint').textContent = hint; $('resetHint').classList.toggle('hidden', !hint); }
+function openSettings(open){ $('settings').classList.toggle('hidden', !open); $('settingsBtn').setAttribute('aria-expanded', String(open));
+  if(open){ stats(); me(); } }
+$('settingsBtn').onclick=()=>openSettings($('settings').classList.contains('hidden'));
+$('setClose').onclick=()=>openSettings(false);
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && $('resetModal').classList.contains('hidden') && !$('settings').classList.contains('hidden')) openSettings(false); });
+async function copyText(s){ if(navigator.clipboard && window.isSecureContext){ await navigator.clipboard.writeText(s); return; }
+  const ta=document.createElement('textarea'); ta.value=s; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select();
+  const ok=document.execCommand('copy'); ta.remove(); if(!ok) throw new Error('execCommand copy refused'); }
+$('mcpCopy').onclick=async()=>{ try{ await copyText(mcpUrl()); toast(t('copied')); }
+  catch(x){ console.warn('copy failed', x); toast(t('copyFailed'), true); } };
+$('compactBtn').onclick=async()=>{ const btn=$('compactBtn'), out=$('compactResult'); btn.disabled=true; out.className='tip'; out.textContent=t('compacting');
+  try{ const r=await fetch('/compact',{method:'POST'}); const j=await r.json();
+    if(!r.ok || j.error){ out.className='tip err-text'; out.textContent=t('compactFailed',{e:j.error||('HTTP '+r.status)}); return; }
+    out.textContent=t('compactDone',{n:j.compacted_upto, w:fmtBytes(j.wal_bytes), s:fmtBytes(j.snapshot_bytes)}); stats();
+  }catch(x){ out.className='tip err-text'; out.textContent=t('compactFailed',{e:''+x}); }
+  finally{ btn.disabled=false; } };
 
 // ---------- admin: reset database (POST /reset, opt-in via --allow-reset) ----------
-// /me says what this caller may do: a read-only caller gets no admin action at all; without
-// --allow-reset the action stays visible but disabled, with the server's own hint.
-let perms=null;
-function renderAdmin(){ const b=$('adminBtn');
-  if(!perms || perms.read_only){ b.classList.add('hidden'); $('adminPop').classList.add('hidden'); return; }
-  b.classList.remove('hidden');
-  $('resetBtn').disabled = !perms.allow_reset;
-  $('resetHint').textContent = perms.allow_reset ? '' : (perms.reset_hint || '');
-  $('resetHint').classList.toggle('hidden', !!perms.allow_reset); }
 function closeReset(){ $('resetModal').classList.add('hidden'); }
 function afterReset(){ lastReq=null; overviewMode=false; viewStack=[]; curView=null; updateBack(); _cand.clear();
   loadGraph([], []); hideDetail(); $('focus').value=''; $('qresult').innerHTML=''; $('qresult2').innerHTML='';
-  stats(); loadSchema(); }
-$('adminBtn').onclick=()=>$('adminPop').classList.toggle('hidden');
-$('resetBtn').onclick=()=>{ if($('resetBtn').disabled) return; $('adminPop').classList.add('hidden');
+  $('compactResult').textContent=''; stats(); loadSchema(); }
+$('resetBtn').onclick=()=>{ if($('resetBtn').disabled) return; openSettings(false);
   $('resetType').value=''; $('resetConfirm').disabled=true; $('resetResult').textContent=''; $('resetResult').className='tip';
   $('resetModal').classList.remove('hidden'); $('resetType').focus(); };
 $('resetType').oninput=e=>{ $('resetConfirm').disabled = e.target.value!=='RESET'; };
