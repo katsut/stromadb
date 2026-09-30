@@ -2132,7 +2132,14 @@ impl ReadState {
     /// catalog (unknown names are a clear error), then [`conformance::evaluate`] composes the existing
     /// read primitives into `OK | ABSENT | MISMATCH | NOT_APPLICABLE` verdicts, authz-scoped by
     /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`. Returns
-    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of }, .. ] }`.
+    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of }, .. ],
+    /// "total", "returned", "truncated", "counts": {OK, ABSENT, MISMATCH, NOT_APPLICABLE} }`.
+    ///
+    /// Optional narrowing, all additive: `subject` / `subjects` evaluate only those ids (a non-subject
+    /// or masked id is simply absent); `only: [verdict names]` keeps those outcomes; `offset` / `limit`
+    /// page the kept rows. `counts` covers every evaluated subject before `only` and paging, `total`
+    /// is the kept count, and `truncated` means rows remain after this page. With none of them the
+    /// op returns every verdict, as before; the MCP tool applies its own smaller defaults.
     fn conformance(&self, req: &Value) -> DbResult<Value> {
         let rule = if let Some(name) = req["rule_name"].as_str() {
             self.schema
@@ -2158,9 +2165,86 @@ impl ReadState {
             .as_u64()
             .map(|m| m as u32)
             .unwrap_or(u32::MAX);
-        let verdicts = conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels);
-        let out: Vec<Value> = verdicts.iter().map(verdict_json).collect();
-        Ok(json!({ "verdicts": out }))
+        // `subject` (one id) or `subjects` (a list): evaluate only those.
+        let subjects: Option<Vec<NodeId>> =
+            if let Some(s) = req.get("subjects").filter(|v| !v.is_null()) {
+                let arr = s
+                    .as_array()
+                    .ok_or("conformance.subjects must be an array of node ids")?;
+                Some(
+                    arr.iter()
+                        .map(|v| {
+                            v.as_u64()
+                                .ok_or("conformance.subjects entries must be node ids")
+                        })
+                        .collect::<Result<_, _>>()?,
+                )
+            } else if let Some(s) = req.get("subject").filter(|v| !v.is_null()) {
+                Some(vec![
+                    s.as_u64().ok_or("conformance.subject must be a node id")?,
+                ])
+            } else {
+                None
+            };
+        let only: Option<Vec<&str>> = match req.get("only") {
+            None | Some(Value::Null) => None,
+            Some(v) => {
+                let arr = v
+                    .as_array()
+                    .ok_or("conformance.only must be an array of verdict names")?;
+                let mut names = Vec::with_capacity(arr.len());
+                for o in arr {
+                    let name = o
+                        .as_str()
+                        .filter(|n| CONFORMANCE_OUTCOMES.contains(n))
+                        .ok_or(format!(
+                            "conformance.only entries must be one of {}",
+                            CONFORMANCE_OUTCOMES.join(", ")
+                        ))?;
+                    names.push(name);
+                }
+                Some(names)
+            }
+        };
+        let offset = req["offset"].as_u64().unwrap_or(0) as usize;
+        let limit = req["limit"].as_u64().map(|l| l as usize);
+        let verdicts = match &subjects {
+            Some(s) => {
+                conformance::evaluate_subjects(&self.snap, &self.schema.cat, &rule, labels, s)
+            }
+            None => conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels),
+        };
+        // Counts per verdict over every evaluated (visible) subject, before `only`/paging.
+        let mut counts = serde_json::Map::new();
+        for name in CONFORMANCE_OUTCOMES {
+            counts.insert(name.to_string(), json!(0));
+        }
+        for v in &verdicts {
+            let c = &mut counts[v.verdict.as_str()];
+            *c = json!(c.as_u64().unwrap_or(0) + 1);
+        }
+        let selected: Vec<&conformance::Verdict> = verdicts
+            .iter()
+            .filter(|v| {
+                only.as_ref()
+                    .is_none_or(|o| o.contains(&v.verdict.as_str()))
+            })
+            .collect();
+        let total = selected.len();
+        let out: Vec<Value> = selected
+            .into_iter()
+            .skip(offset)
+            .take(limit.unwrap_or(usize::MAX))
+            .map(verdict_json)
+            .collect();
+        let returned = out.len();
+        Ok(json!({
+            "verdicts": out,
+            "total": total,
+            "returned": returned,
+            "truncated": offset.saturating_add(returned) < total,
+            "counts": counts,
+        }))
     }
 
     /// Report, per node of a type, the schema-required predicates that are *absent* — the
@@ -2585,6 +2669,9 @@ fn parse_conformance_cond(v: &Value) -> DbResult<Option<conformance::Cond>> {
     };
     Ok(Some(conformance::Cond { predicate, equals }))
 }
+
+/// The wire names of every conformance outcome, in `counts` order.
+const CONFORMANCE_OUTCOMES: [&str; 4] = ["OK", "ABSENT", "MISMATCH", "NOT_APPLICABLE"];
 
 /// One verdict in the wire shape shared by the `conformance` op, `conformance_watch`, and the
 /// `conformance_changes` diff entries.

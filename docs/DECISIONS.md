@@ -372,6 +372,25 @@
   `(predicate, value) → nodes` map for predicates declared `key: true` on `pred_def`, maintained on
   the write side next to the node-label map. The op contract stays the same.
 
+### D29. Conformance answers are scoped to subjects and bounded by default over MCP
+- **Context:** `conformance` returned a verdict for every subject of the rule's type, out-of-scope
+  ones included as `NOT_APPLICABLE`. On a namespace with about 5k issues that is one ~600 KB JSON
+  line. An MCP client stores a tool result that large in a file the agent cannot read, so an agent
+  deciding one issue never saw its own verdict.
+- **Decision:** the op accepts `subject` or `subjects` and judges only those ids, in O(listed). It
+  also accepts `only` (verdict names), `limit` and `offset`. The response adds `total` (rows kept by
+  `only`), `returned`, `truncated` (rows remain after this page) and `counts` per verdict over every
+  evaluated subject. A listed id that is not a subject of the rule's type, is unknown, or is masked
+  is absent from the answer, so the three cases look the same.
+- **Two defaults:** the HTTP op keeps its old behaviour, every verdict with no filter, because
+  existing callers (the console's conformance panel, scripts) read the full list. The fields above
+  are additive. The MCP tool defaults to `limit: 50` and, for a full evaluation, drops
+  `NOT_APPLICABLE` rows while still counting them. A subject-scoped MCP call returns every requested
+  row, so asking for one subject always yields its verdict.
+- **Why not a scope-only fix:** a narrowing inline `scope` still reports the rest as
+  `NOT_APPLICABLE`, and it makes the caller encode a key lookup as a rule. `lookup` (D28) plus
+  `subjects` keeps rules declarative and the call order simple: key → id → verdict.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |

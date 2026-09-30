@@ -175,6 +175,34 @@ pub fn evaluate(
         .collect()
 }
 
+/// [`evaluate`] restricted to the given `subjects`: one verdict per listed node that is a subject
+/// of the rule's type and visible to `principal_labels`, sorted by id and deduplicated. A listed
+/// node of another type, an unknown id, and a masked node are all simply absent from the result,
+/// so the answer does not reveal which of the three it was. Cost is O(listed), not O(subjects).
+pub fn evaluate_subjects(
+    snap: &Snapshot,
+    cat: &Catalog,
+    rule: &Rule,
+    principal_labels: u32,
+    subjects: &[NodeId],
+) -> Vec<Verdict> {
+    let Some(subject_ty) = cat.field_id(&rule.subject_type) else {
+        return Vec::new();
+    };
+    let mut picked: Vec<NodeId> = subjects
+        .iter()
+        .copied()
+        .filter(|n| snap.node_types.get(n) == Some(&subject_ty))
+        .filter(|&n| visible(snap, n, principal_labels))
+        .collect();
+    picked.sort_unstable();
+    picked.dedup();
+    picked
+        .into_iter()
+        .map(|s| judge(snap, cat, rule, s))
+        .collect()
+}
+
 /// Whether `node` is visible to a principal with `allowed_labels` (unlabeled = public).
 fn visible(snap: &Snapshot, node: NodeId, allowed_labels: u32) -> bool {
     snap.node_labels
@@ -624,6 +652,27 @@ mod tests {
         assert_eq!(by[&1].mismatch_kind, None);
         assert_eq!(by[&2].mismatch_kind, None);
         assert_eq!(by[&4].mismatch_kind, None);
+    }
+
+    #[test]
+    fn evaluate_subjects_matches_the_full_evaluation_for_those_subjects() {
+        let mut f = fixture();
+        let full = evaluate(&f.snap, &f.cat, &rule(), u32::MAX);
+        // unsorted, duplicated, a non-subject (person 10) and an unknown id (999)
+        let some = evaluate_subjects(&f.snap, &f.cat, &rule(), u32::MAX, &[6, 3, 6, 10, 999]);
+        let expect: Vec<Verdict> = full
+            .iter()
+            .filter(|v| v.subject == 3 || v.subject == 6)
+            .cloned()
+            .collect();
+        assert_eq!(some, expect);
+        // the label mask applies as in evaluate
+        std::sync::Arc::make_mut(&mut f.snap.node_labels).insert(3, 1);
+        let masked = evaluate_subjects(&f.snap, &f.cat, &rule(), 0b1, &[3, 6]);
+        assert_eq!(
+            masked.iter().map(|v| v.subject).collect::<Vec<_>>(),
+            vec![6]
+        );
     }
 
     #[test]

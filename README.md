@@ -61,6 +61,13 @@ Give each agent its own identity with a token registry (`--tokens tokens.json`):
   narrow itself, never widen);
 - `read_only` tokens get a clear 403 on any write.
 
+Agents start from what they are handed, usually an external key rather than a node id. The MCP
+`lookup` tool resolves a key such as an issue key to node ids by an exact predicate value, and
+`conformance` takes `subjects: [id]` to return just the verdicts for the items being decided. A
+full `conformance` evaluation over MCP is paged (50 rows by default, `NOT_APPLICABLE` rows counted
+but omitted), while the HTTP op still returns every verdict. The server's MCP instructions spell
+out the call order: `schema`, `lookup`, `point`/`expand`/`timeline`, then `conformance`.
+
 For a single-process/offline setup, `stroma-mcp --db ./mydb` speaks MCP over stdio against the
 directory directly (one process at a time — the directory is locked while a server runs).
 
@@ -176,6 +183,7 @@ curl -s -X POST localhost:7687/query  -d '{"op":"lookup","predicate":"issue-key"
 curl -s -X POST localhost:7687/query  -d '{"op":"point","subject":1,"predicate":"age"}'
 curl -s -X POST localhost:7687/query  -d '{"op":"timeline","subject":1,"hops":["member-of","manager-of"]}'
 curl -s -X POST localhost:7687/query  -d '{"op":"conformance","rule_name":"release-approval"}'
+curl -s -X POST localhost:7687/query  -d '{"op":"conformance","rule_name":"release-approval","subjects":[1005]}'
 curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"works-on","object":{"node":2},"props":{"role":"lead"}}}'
 curl -s localhost:7687/stats
 ```
