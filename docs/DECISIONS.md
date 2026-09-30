@@ -351,6 +351,46 @@
   fleet gateway (#237), which routes to one server per tenant. The two compose: a gateway child can
   itself serve namespaces.
 
+### D28. External keys resolve by an exact-value scan, not a maintained value index
+- **Context:** every read op and MCP tool takes a numeric node id, but an agent is usually handed an
+  external identifier: an issue key stored as the one-cardinality text predicate `issue-key`. With no
+  key → id step, an agent in an end-to-end run probed `point` with guessed ids, then gave up. `find`
+  is a case-insensitive substring match over every text value, so it answers "which nodes mention X",
+  not "which node has key X".
+- **Decision:** a `lookup` op and MCP tool, `{predicate, value, type?, limit?, valid_at?}` →
+  `{nodes:[{id, type, display}], truncated}`. It is an exact match on the current value of a
+  one-cardinality predicate, or on the value in effect at `valid_at`. The label mask applies as on
+  every read, so a masked node is absent. `limit` defaults to 10 and is capped at 100.
+- **Why a scan:** the snapshot is keyed `(node, predicate)`, so a value index would be a second
+  structure to keep consistent on every publish, compaction and as-of history change, plus a schema
+  flag to opt predicates in. The scan walks the snapshot's one-cardinality map once, touching only
+  entries of the given predicate for the comparison. An as-of lookup walks the history keys and does
+  one `point_one_asof` probe per key of that predicate. Both are linear in stored keys, which is
+  bounded by the per-org envelope. A lookup over a few thousand issues is dominated by the JSON
+  round trip, not the walk.
+- **Revisit when:** lookups become a hot path on large namespaces. The upgrade is a
+  `(predicate, value) → nodes` map for predicates declared `key: true` on `pred_def`, maintained on
+  the write side next to the node-label map. The op contract stays the same.
+
+### D29. Conformance answers are scoped to subjects and bounded by default over MCP
+- **Context:** `conformance` returned a verdict for every subject of the rule's type, out-of-scope
+  ones included as `NOT_APPLICABLE`. On a namespace with about 5k issues that is one ~600 KB JSON
+  line. An MCP client stores a tool result that large in a file the agent cannot read, so an agent
+  deciding one issue never saw its own verdict.
+- **Decision:** the op accepts `subject` or `subjects` and judges only those ids, in O(listed). It
+  also accepts `only` (verdict names), `limit` and `offset`. The response adds `total` (rows kept by
+  `only`), `returned`, `truncated` (rows remain after this page) and `counts` per verdict over every
+  evaluated subject. A listed id that is not a subject of the rule's type, is unknown, or is masked
+  is absent from the answer, so the three cases look the same.
+- **Two defaults:** the HTTP op keeps its old behaviour, every verdict with no filter, because
+  existing callers (the console's conformance panel, scripts) read the full list. The fields above
+  are additive. The MCP tool defaults to `limit: 50` and, for a full evaluation, drops
+  `NOT_APPLICABLE` rows while still counting them. A subject-scoped MCP call returns every requested
+  row, so asking for one subject always yields its verdict.
+- **Why not a scope-only fix:** a narrowing inline `scope` still reports the rest as
+  `NOT_APPLICABLE`, and it makes the caller encode a key lookup as a rule. `lookup` (D28) plus
+  `subjects` keeps rules declarative and the call order simple: key → id → verdict.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |

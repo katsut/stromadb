@@ -477,6 +477,7 @@ fn serve_mcp_endpoint() {
         .collect();
     for tool in [
         "schema",
+        "lookup",
         "point",
         "expand",
         "search",

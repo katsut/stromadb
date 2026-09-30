@@ -6,7 +6,7 @@
 //! response — a request (a message with an `id`) yields `Some(response)`, a notification yields
 //! `None`. Framing (newline-delimited stdio, HTTP request/response) is the caller's concern.
 //!
-//! Tools: `schema`, `point`, `expand`, `search` (authz-scoped hybrid), `retrieve_context`,
+//! Tools: `schema`, `lookup` (exact-value key → node id), `point`, `expand`, `search` (authz-scoped hybrid), `retrieve_context`,
 //! `conformance` (declared-rule per-subject verdicts), `stats`, `ingest`. Read tools map to
 //! [`Db::query`]; `ingest` writes facts (serialized on the database's internal write mutex).
 
@@ -23,6 +23,21 @@ fn tools() -> Value {
             "name": "schema",
             "description": "Discover what is queryable: the registered predicates (each with `card` one|many and its `domain`/`range`) and the node labels in use. Call this first to learn which predicate names exist and their cardinality before composing point/expand queries.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "lookup",
+            "description": "Resolve an external key such as an issue key to node ids: the nodes whose one-cardinality `predicate` exactly equals `value` (current value, or the value in effect at `valid_at`). Call this first when you are given an identifier string instead of a node id, then pass the returned `id` to point/expand/timeline/conformance. Returns `{nodes:[{id, type, display}], truncated}`; an unknown key returns an empty `nodes` list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "predicate": { "type": "string", "description": "one-cardinality predicate holding the key (e.g. \"issue-key\"); see `schema`" },
+                    "value": { "description": "the exact value to match: a string for text, a number for int, or an object form such as {\"int\": 7} / {\"node\": N}" },
+                    "type": { "type": "string", "description": "optional node type to restrict to (e.g. \"Issue\")" },
+                    "limit": { "type": "integer", "default": 10, "description": "maximum nodes returned (at most 100); `truncated` reports more matches" },
+                    "valid_at": { "type": "integer", "description": "as-of valid-time: match the value in effect at instant T instead of the current one" }
+                },
+                "required": ["predicate", "value"]
+            }
         },
         {
             "name": "point",
@@ -100,12 +115,16 @@ fn tools() -> Value {
         },
         {
             "name": "conformance",
-            "description": "Evaluate a declared conformance rule and return a deterministic verdict per subject: `OK` / `ABSENT` / `MISMATCH` / `NOT_APPLICABLE` (a `MISMATCH` carries a `kind` of `stale`|`wrong`). Pass either `rule` (an inline declaration) or `rule_name` (a rule stored earlier via a `rule_def` ingest line). Act on the verdicts instead of composing the multi-hop as-of check yourself. Rule shape: `{subject_type, scope?{predicate,equals}, required?{hops:[{predicate, as_of?}]}, distinct_from?{hops:[...]}, actual, absent_when?{predicate,equals}}` — `required` and `distinct_from` are derived paths of one-cardinality hops walked from each subject (the last hop optionally read as-of a valid-time instant given by the `as_of` predicate on the subject): the `actual` predicate must equal the `required` value and must NOT equal the `distinct_from` value (declare either or both; e.g. a self-approval ban is `distinct_from: {hops:[{predicate:\"assigned-to\"}]}`). `scope` restricts which subjects are in scope (others are `NOT_APPLICABLE`); `absent_when` marks a missing `actual` as `ABSENT` rather than `OK`. Condition `equals` values take the ingest object forms (`{\"node\": N}`, `{\"int\": ...}`) or a bare string for text.",
+            "description": "Evaluate a declared conformance rule and return a deterministic verdict per subject: `OK` / `ABSENT` / `MISMATCH` / `NOT_APPLICABLE` (a `MISMATCH` carries a `kind` of `stale`|`wrong`). Pass either `rule` (an inline declaration) or `rule_name` (a rule stored earlier via a `rule_def` ingest line). Act on the verdicts instead of composing the multi-hop as-of check yourself. Rule shape: `{subject_type, scope?{predicate,equals}, required?{hops:[{predicate, as_of?}]}, distinct_from?{hops:[...]}, actual, absent_when?{predicate,equals}}` — `required` and `distinct_from` are derived paths of one-cardinality hops walked from each subject (the last hop optionally read as-of a valid-time instant given by the `as_of` predicate on the subject): the `actual` predicate must equal the `required` value and must NOT equal the `distinct_from` value (declare either or both; e.g. a self-approval ban is `distinct_from: {hops:[{predicate:\"assigned-to\"}]}`). `scope` restricts which subjects are in scope (others are `NOT_APPLICABLE`); `absent_when` marks a missing `actual` as `ABSENT` rather than `OK`. Condition `equals` values take the ingest object forms (`{\"node\": N}`, `{\"int\": ...}`) or a bare string for text. To decide on specific items, pass `subjects: [id, ..]` (ids from `lookup`): only those are evaluated and every requested row is returned. Without `subjects` the answer is bounded: at most `limit` rows (default 50), `NOT_APPLICABLE` rows omitted unless `only` lists them, and `offset` pages further. The response carries `total` (rows matching `only`), `returned`, `truncated` (more rows after this page), and `counts` per verdict over every evaluated subject.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "rule": { "type": "object", "description": "an inline rule declaration (see description for shape)" },
-                    "rule_name": { "type": "string", "description": "the name of a rule stored via a `rule_def` ingest line (alternative to `rule`)" }
+                    "rule_name": { "type": "string", "description": "the name of a rule stored via a `rule_def` ingest line (alternative to `rule`)" },
+                    "subjects": { "type": "array", "items": { "type": "integer" }, "description": "evaluate only these subject node ids (e.g. the id `lookup` returned); an id that is not a subject of the rule's type is omitted" },
+                    "only": { "type": "array", "items": { "type": "string", "enum": ["OK", "ABSENT", "MISMATCH", "NOT_APPLICABLE"] }, "description": "keep only these verdicts (default without `subjects`: OK, ABSENT, MISMATCH)" },
+                    "limit": { "type": "integer", "default": 50, "description": "maximum rows returned" },
+                    "offset": { "type": "integer", "default": 0, "description": "rows to skip, for paging with `limit`" }
                 }
             }
         },
@@ -150,12 +169,35 @@ impl Scope {
     }
 }
 
+/// Default page size of the MCP `conformance` tool when the caller gives no `limit`.
+pub const MCP_CONFORMANCE_LIMIT: u64 = 50;
+
+fn absent(req: &Value, key: &str) -> bool {
+    req.get(key).is_none_or(Value::is_null)
+}
+
+/// The MCP `conformance` tool keeps answers small by default, unlike the HTTP op (which returns
+/// every verdict for compatibility): `limit` defaults to [`MCP_CONFORMANCE_LIMIT`], and a full
+/// evaluation (no `subject`/`subjects`) omits `NOT_APPLICABLE` rows unless `only` says otherwise —
+/// their number stays visible in `counts`. A subject-scoped call returns the requested rows as is.
+fn apply_conformance_defaults(req: &mut Value) {
+    if absent(req, "limit") {
+        req["limit"] = json!(MCP_CONFORMANCE_LIMIT);
+    }
+    if absent(req, "only") && absent(req, "subject") && absent(req, "subjects") {
+        req["only"] = json!(["OK", "ABSENT", "MISMATCH"]);
+    }
+}
+
 fn call_tool(db: &Db, name: &str, args: &Value, scope: &Scope) -> Result<Value, String> {
     match name {
-        "schema" | "point" | "expand" | "timeline" | "search" | "retrieve_context"
+        "schema" | "lookup" | "point" | "expand" | "timeline" | "search" | "retrieve_context"
         | "conformance" => {
             let mut req = args.clone();
             req["op"] = json!(name);
+            if name == "conformance" {
+                apply_conformance_defaults(&mut req);
+            }
             scope.cap_labels(&mut req);
             db.query(&req)
         }
@@ -206,7 +248,7 @@ pub fn handle_message_scoped(db: &Db, msg: &Value, scope: &Scope) -> Option<Valu
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "stroma-mcp", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Use `point` for one-cardinality predicates and `expand` for many-cardinality ones (both accept `valid_at` for an as-of read of the state in effect at that instant). There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`. For 'over which intervals / when was' questions, call `timeline` with a chain of one-cardinality predicates instead of probing `valid_at` repeatedly."
+                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Every read tool takes a numeric node id: when you are given an external identifier instead (an issue key, an email, a document number), call `lookup` with the predicate that holds it (e.g. `issue-key`) to get the node id; never guess ids. Suggested order for a decision on a tracker item: (1) `schema`; (2) `lookup` the key to its id; (3) `point` / `expand` / `timeline` around that id for the facts you need; (4) `conformance` with `rule_name` and `subjects: [id]` for the declared verdict; (5) cite the verdict with its `required`, `actual` and `as_of` values. Use `point` for one-cardinality predicates and `expand` for many-cardinality ones (both accept `valid_at` for an as-of read of the state in effect at that instant). There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`; pass `subjects` for the items you are deciding, since a full evaluation is paged (`limit`, `offset`) and reports `counts`. For 'over which intervals / when was' questions, call `timeline` with a chain of one-cardinality predicates instead of probing `valid_at` repeatedly."
             }),
         ),
         "ping" => rpc_result(&id, json!({})),

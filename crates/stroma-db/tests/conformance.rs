@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
-use stromadb_store::Db;
+use stromadb_store::{Db, mcp};
 
 // The fixture schema + data (backlog release-approval). `manager-of` for the Platform department (1)
 // transfers from Alice(10) to Carol(12) at valid-time 5000, which is what the as-of hop turns on.
@@ -509,5 +509,208 @@ fn node_scope_and_distinct_from_via_json() {
         "unexpected error: {err}"
     );
 
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+fn fixture_db(tag: &str) -> (std::path::PathBuf, Db) {
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "stroma_conformance_{}_test_{}",
+            tag,
+            std::process::id()
+        ))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(FIXTURE).unwrap();
+    (dir, db)
+}
+
+fn subjects_of(r: &serde_json::Value) -> Vec<u64> {
+    r["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["subject"].as_u64().unwrap())
+        .collect()
+}
+
+// Subject-scoped evaluation: only the listed subjects are judged, with exactly the verdicts a full
+// evaluation gives them; ids that are not subjects of the rule's type are simply absent.
+#[test]
+fn conformance_for_given_subjects() {
+    let (dir, db) = fixture_db("subjects");
+    let full = db.query(&rule()).unwrap();
+    // the unfiltered op keeps its shape and returns every row (compatibility)
+    assert_eq!(full["verdicts"].as_array().unwrap().len(), 8);
+    assert_eq!(full["total"], json!(8));
+    assert_eq!(full["returned"], json!(8));
+    assert_eq!(full["truncated"], json!(false));
+    assert_eq!(
+        full["counts"],
+        json!({"OK": 4, "ABSENT": 1, "MISMATCH": 2, "NOT_APPLICABLE": 1})
+    );
+
+    let mut req = rule();
+    req["subject"] = json!(1005);
+    let one = db.query(&req).unwrap();
+    assert_eq!(subjects_of(&one), vec![1005], "{one}");
+    let full_1005 = full["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["subject"] == 1005)
+        .unwrap();
+    assert_eq!(&one["verdicts"][0], full_1005);
+
+    // a list: sorted + deduplicated; a Person (10) and an unknown id are absent; an out-of-scope
+    // subject still answers NOT_APPLICABLE when asked for explicitly
+    let mut req = rule();
+    req["subjects"] = json!([1006, 1004, 1004, 10, 999_999]);
+    let some = db.query(&req).unwrap();
+    assert_eq!(subjects_of(&some), vec![1004, 1006], "{some}");
+    assert_eq!(some["verdicts"][1]["verdict"], json!("NOT_APPLICABLE"));
+    assert_eq!(some["counts"]["MISMATCH"], json!(1));
+    assert_eq!(some["counts"]["NOT_APPLICABLE"], json!(1));
+    assert_eq!(some["counts"]["OK"], json!(0));
+
+    // a masked subject is absent, like on every read
+    db.ingest_str("{\"node\":{\"id\":1004,\"type\":\"Issue\",\"label\":2}}\n")
+        .unwrap();
+    let mut req = rule();
+    req["subjects"] = json!([1004, 1006]);
+    req["allowed_labels"] = json!(1);
+    let masked = db.query(&req).unwrap();
+    assert_eq!(subjects_of(&masked), vec![1006], "{masked}");
+
+    // bad shapes are clear errors
+    for bad in [
+        json!({"subjects": 1004}),
+        json!({"subjects": ["x"]}),
+        json!({"subject": "x"}),
+        json!({"only": ["BROKEN"]}),
+        json!({"only": "OK"}),
+    ] {
+        let mut req = rule();
+        for (k, v) in bad.as_object().unwrap() {
+            req[k] = v.clone();
+        }
+        assert!(db.query(&req).is_err(), "expected an error for {bad}");
+    }
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+// Bounded results: `only` filters outcomes, `limit`/`offset` page the kept rows, `total` counts
+// them and `truncated` says whether rows remain; `counts` stays over every evaluated subject.
+#[test]
+fn conformance_only_limit_offset() {
+    let (dir, db) = fixture_db("paging");
+    let mut req = rule();
+    req["only"] = json!(["MISMATCH", "ABSENT"]);
+    let r = db.query(&req).unwrap();
+    assert_eq!(subjects_of(&r), vec![1003, 1004, 1005], "{r}");
+    assert_eq!(r["total"], json!(3));
+    assert_eq!(r["counts"]["OK"], json!(4), "counts are before `only`");
+
+    let mut req = rule();
+    req["limit"] = json!(3);
+    let p1 = db.query(&req).unwrap();
+    assert_eq!(subjects_of(&p1), vec![1001, 1002, 1003]);
+    assert_eq!(p1["total"], json!(8));
+    assert_eq!(p1["returned"], json!(3));
+    assert_eq!(p1["truncated"], json!(true));
+    req["offset"] = json!(6);
+    let p3 = db.query(&req).unwrap();
+    assert_eq!(subjects_of(&p3), vec![1007, 1008]);
+    assert_eq!(p3["truncated"], json!(false));
+    req["offset"] = json!(50);
+    let past = db.query(&req).unwrap();
+    assert!(subjects_of(&past).is_empty());
+    assert_eq!(past["truncated"], json!(false));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+fn mcp_conformance(db: &Db, args: serde_json::Value) -> serde_json::Value {
+    let msg = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                     "params":{"name":"conformance","arguments":args}});
+    let resp = mcp::handle_message(db, &msg).unwrap();
+    assert_ne!(resp["result"]["isError"], json!(true), "{resp}");
+    serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+// The MCP tool bounds a full evaluation by default (small limit, NOT_APPLICABLE omitted but
+// counted), returns exactly the requested rows for `subjects`, and documents both.
+#[test]
+fn conformance_mcp_defaults_are_bounded() {
+    let (dir, db) = fixture_db("mcp");
+    let full = mcp_conformance(&db, json!({"rule": rule_body()}));
+    assert!(
+        !subjects_of(&full).contains(&1006),
+        "NOT_APPLICABLE omitted by default: {full}"
+    );
+    assert_eq!(full["total"], json!(7));
+    assert_eq!(full["counts"]["NOT_APPLICABLE"], json!(1));
+
+    let na = mcp_conformance(
+        &db,
+        json!({"rule": rule_body(), "only": ["NOT_APPLICABLE"]}),
+    );
+    assert_eq!(subjects_of(&na), vec![1006]);
+
+    let one = mcp_conformance(&db, json!({"rule": rule_body(), "subjects": [1006]}));
+    assert_eq!(
+        subjects_of(&one),
+        vec![1006],
+        "subject-scoped keeps every row"
+    );
+
+    let page = mcp_conformance(&db, json!({"rule": rule_body(), "limit": 2}));
+    assert_eq!(page["returned"], json!(2));
+    assert_eq!(page["truncated"], json!(true));
+
+    // the default limit applies when none is given
+    let mut many = String::new();
+    for i in 0..(mcp::MCP_CONFORMANCE_LIMIT + 20) {
+        let id = 50_000 + i;
+        many.push_str(&format!(
+            "{{\"node\":{{\"id\":{id},\"type\":\"Issue\",\"label\":0}}}}\n{{\"fact\":{{\"subject\":{id},\"predicate\":\"issue-type\",\"object\":{{\"text\":\"release\"}}}}}}\n"
+        ));
+    }
+    db.ingest_str(&many).unwrap();
+    let bounded = mcp_conformance(&db, json!({"rule": rule_body()}));
+    assert_eq!(bounded["returned"], json!(mcp::MCP_CONFORMANCE_LIMIT));
+    assert_eq!(bounded["truncated"], json!(true));
+    // the HTTP/query op itself is unchanged: every row
+    let all = db.query(&rule()).unwrap();
+    assert_eq!(all["returned"], all["total"]);
+    assert_eq!(all["truncated"], json!(false));
+
+    // tool list + instructions describe the subjects parameter and the key → id step
+    let list =
+        mcp::handle_message(&db, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
+    let tool = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "conformance")
+        .unwrap()
+        .clone();
+    for p in ["subjects", "only", "limit", "offset"] {
+        assert!(
+            tool["inputSchema"]["properties"].get(p).is_some(),
+            "missing {p}"
+        );
+    }
+    let init = mcp::handle_message(
+        &db,
+        &json!({"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}),
+    )
+    .unwrap();
+    let text = init["result"]["instructions"].as_str().unwrap();
+    assert!(
+        text.contains("`lookup`") && text.contains("subjects: [id]"),
+        "{text}"
+    );
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }

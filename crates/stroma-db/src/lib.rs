@@ -449,6 +449,9 @@ impl Db {
     ///   (properties on the edge `(subject, predicate, object)`; set at ingest via a fact's `props`)
     /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
     ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
+    /// - `{"op":"lookup","predicate":"name","value":V[,"type":"T"][,"limit":L][,"valid_at":T]}` →
+    ///   `{"nodes":[{id,type,display}],"truncated":bool}` (exact match on a one-cardinality value;
+    ///   the external key → node id read)
     pub fn query(&self, req: &Value) -> DbResult<Value> {
         // The two live-maintenance ops run against the write-side registry (they mutate / read the
         // maintained state under the write lock); everything else is a lock-free read on the
@@ -1435,6 +1438,7 @@ impl ReadState {
             "retrieve_context" => self.retrieve_context(req),
             "find" => self.find(req),
             "type_nodes" => self.type_nodes(req),
+            "lookup" => self.lookup(req),
             "neighborhood" => self.neighborhood(req),
             "node" => self.node_detail(req),
             "graph" => self.graph(req),
@@ -1860,6 +1864,96 @@ impl ReadState {
         Ok(json!({ "nodes": nodes, "truncated": hits.len() > limit }))
     }
 
+    /// Exact-value node resolution — the "external key → node id" read. Returns the nodes whose
+    /// one-cardinality `predicate` currently equals `value` (or, with `valid_at`, equalled it at
+    /// that valid-time instant), optionally restricted to a `type`, post-authz scoped (a masked node
+    /// is absent), ascending by id, cut to `limit` (default 10, capped at 100) with a `truncated`
+    /// flag. `value` takes a bare scalar (a string is text) or the ingest object form
+    /// (`{"text": ..}`, `{"int": ..}`, `{"node": N}`); `equals` is accepted as an alias.
+    ///
+    /// Cost: a scan of the predicate's keys in the snapshot — O(one-cardinality keys) for a
+    /// current read, O(history keys) plus one as-of probe per key of that predicate for `valid_at`.
+    /// There is no value index; see DECISIONS D28.
+    fn lookup(&self, req: &Value) -> DbResult<Value> {
+        let pname = req["predicate"]
+            .as_str()
+            .ok_or("lookup.predicate missing")?;
+        let pid = self
+            .schema
+            .cat
+            .field_id(pname)
+            .ok_or(format!("unknown predicate: {pname}"))?;
+        if !matches!(self.schema.cardinality.get(pname), Some(Cardinality::One)) {
+            return Err(format!("lookup.predicate must be one-cardinality: {pname}"));
+        }
+        let raw = if req["value"].is_null() {
+            &req["equals"]
+        } else {
+            &req["value"]
+        };
+        let want = match raw {
+            Value::Null => return Err("lookup.value missing".into()),
+            Value::Object(_) => obj_key(raw)?,
+            _ => value_key(raw)?,
+        };
+        let ty = match req["type"].as_str() {
+            Some(t) => Some(
+                self.schema
+                    .cat
+                    .field_id(t)
+                    .ok_or(format!("unknown type: {t}"))?,
+            ),
+            None => None,
+        };
+        let limit = req["limit"].as_u64().unwrap_or(10).min(100) as usize;
+        let valid_at = req["valid_at"].as_i64();
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let keep = |n: NodeId| {
+            label_visible(&self.snap, n, labels)
+                && ty.is_none_or(|t| self.snap.node_types.get(&n) == Some(&t))
+        };
+        // Both maps are keyed (node, predicate), so each node appears at most once, in id order.
+        let ids: Vec<NodeId> = match valid_at {
+            None => self
+                .snap
+                .one
+                .iter()
+                .filter(|&(&(n, p), v)| p == pid && v.as_ref() == Some(&want) && keep(n))
+                .map(|(&(n, _), _)| n)
+                .collect(),
+            Some(at) => self
+                .snap
+                .one_history
+                .keys()
+                .filter(|&&(n, p)| {
+                    p == pid
+                        && keep(n)
+                        && query::point_one_asof(&self.snap, n, pid, at).as_ref() == Some(&want)
+                })
+                .map(|&(n, _)| n)
+                .collect(),
+        };
+        let nodes: Vec<Value> = ids
+            .iter()
+            .take(limit)
+            .map(|&n| {
+                json!({
+                    "id": n,
+                    "type": self.snap.node_types.get(&n).and_then(|&t| self.schema.cat.name(t)),
+                    "display": self.display_name(n),
+                })
+            })
+            .collect();
+        let mut resp = json!({ "nodes": nodes, "truncated": ids.len() > limit });
+        if let Some(at) = valid_at {
+            resp["valid_at"] = json!(at);
+        }
+        Ok(resp)
+    }
+
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,
     /// `k`, `allowed_labels`, `expand`, `mode`, `max_nodes`) and evaluates it, authz-scoped.
     fn run_hybrid(&self, req: &Value) -> DbResult<Traverser> {
@@ -2038,7 +2132,14 @@ impl ReadState {
     /// catalog (unknown names are a clear error), then [`conformance::evaluate`] composes the existing
     /// read primitives into `OK | ABSENT | MISMATCH | NOT_APPLICABLE` verdicts, authz-scoped by
     /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`. Returns
-    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of }, .. ] }`.
+    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of }, .. ],
+    /// "total", "returned", "truncated", "counts": {OK, ABSENT, MISMATCH, NOT_APPLICABLE} }`.
+    ///
+    /// Optional narrowing, all additive: `subject` / `subjects` evaluate only those ids (a non-subject
+    /// or masked id is simply absent); `only: [verdict names]` keeps those outcomes; `offset` / `limit`
+    /// page the kept rows. `counts` covers every evaluated subject before `only` and paging, `total`
+    /// is the kept count, and `truncated` means rows remain after this page. With none of them the
+    /// op returns every verdict, as before; the MCP tool applies its own smaller defaults.
     fn conformance(&self, req: &Value) -> DbResult<Value> {
         let rule = if let Some(name) = req["rule_name"].as_str() {
             self.schema
@@ -2064,9 +2165,86 @@ impl ReadState {
             .as_u64()
             .map(|m| m as u32)
             .unwrap_or(u32::MAX);
-        let verdicts = conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels);
-        let out: Vec<Value> = verdicts.iter().map(verdict_json).collect();
-        Ok(json!({ "verdicts": out }))
+        // `subject` (one id) or `subjects` (a list): evaluate only those.
+        let subjects: Option<Vec<NodeId>> =
+            if let Some(s) = req.get("subjects").filter(|v| !v.is_null()) {
+                let arr = s
+                    .as_array()
+                    .ok_or("conformance.subjects must be an array of node ids")?;
+                Some(
+                    arr.iter()
+                        .map(|v| {
+                            v.as_u64()
+                                .ok_or("conformance.subjects entries must be node ids")
+                        })
+                        .collect::<Result<_, _>>()?,
+                )
+            } else if let Some(s) = req.get("subject").filter(|v| !v.is_null()) {
+                Some(vec![
+                    s.as_u64().ok_or("conformance.subject must be a node id")?,
+                ])
+            } else {
+                None
+            };
+        let only: Option<Vec<&str>> = match req.get("only") {
+            None | Some(Value::Null) => None,
+            Some(v) => {
+                let arr = v
+                    .as_array()
+                    .ok_or("conformance.only must be an array of verdict names")?;
+                let mut names = Vec::with_capacity(arr.len());
+                for o in arr {
+                    let name = o
+                        .as_str()
+                        .filter(|n| CONFORMANCE_OUTCOMES.contains(n))
+                        .ok_or(format!(
+                            "conformance.only entries must be one of {}",
+                            CONFORMANCE_OUTCOMES.join(", ")
+                        ))?;
+                    names.push(name);
+                }
+                Some(names)
+            }
+        };
+        let offset = req["offset"].as_u64().unwrap_or(0) as usize;
+        let limit = req["limit"].as_u64().map(|l| l as usize);
+        let verdicts = match &subjects {
+            Some(s) => {
+                conformance::evaluate_subjects(&self.snap, &self.schema.cat, &rule, labels, s)
+            }
+            None => conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels),
+        };
+        // Counts per verdict over every evaluated (visible) subject, before `only`/paging.
+        let mut counts = serde_json::Map::new();
+        for name in CONFORMANCE_OUTCOMES {
+            counts.insert(name.to_string(), json!(0));
+        }
+        for v in &verdicts {
+            let c = &mut counts[v.verdict.as_str()];
+            *c = json!(c.as_u64().unwrap_or(0) + 1);
+        }
+        let selected: Vec<&conformance::Verdict> = verdicts
+            .iter()
+            .filter(|v| {
+                only.as_ref()
+                    .is_none_or(|o| o.contains(&v.verdict.as_str()))
+            })
+            .collect();
+        let total = selected.len();
+        let out: Vec<Value> = selected
+            .into_iter()
+            .skip(offset)
+            .take(limit.unwrap_or(usize::MAX))
+            .map(verdict_json)
+            .collect();
+        let returned = out.len();
+        Ok(json!({
+            "verdicts": out,
+            "total": total,
+            "returned": returned,
+            "truncated": offset.saturating_add(returned) < total,
+            "counts": counts,
+        }))
     }
 
     /// Report, per node of a type, the schema-required predicates that are *absent* — the
@@ -2491,6 +2669,9 @@ fn parse_conformance_cond(v: &Value) -> DbResult<Option<conformance::Cond>> {
     };
     Ok(Some(conformance::Cond { predicate, equals }))
 }
+
+/// The wire names of every conformance outcome, in `counts` order.
+const CONFORMANCE_OUTCOMES: [&str; 4] = ["OK", "ABSENT", "MISMATCH", "NOT_APPLICABLE"];
 
 /// One verdict in the wire shape shared by the `conformance` op, `conformance_watch`, and the
 /// `conformance_changes` diff entries.
