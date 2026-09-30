@@ -449,6 +449,9 @@ impl Db {
     ///   (properties on the edge `(subject, predicate, object)`; set at ingest via a fact's `props`)
     /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
     ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
+    /// - `{"op":"lookup","predicate":"name","value":V[,"type":"T"][,"limit":L][,"valid_at":T]}` →
+    ///   `{"nodes":[{id,type,display}],"truncated":bool}` (exact match on a one-cardinality value;
+    ///   the external key → node id read)
     pub fn query(&self, req: &Value) -> DbResult<Value> {
         // The two live-maintenance ops run against the write-side registry (they mutate / read the
         // maintained state under the write lock); everything else is a lock-free read on the
@@ -1435,6 +1438,7 @@ impl ReadState {
             "retrieve_context" => self.retrieve_context(req),
             "find" => self.find(req),
             "type_nodes" => self.type_nodes(req),
+            "lookup" => self.lookup(req),
             "neighborhood" => self.neighborhood(req),
             "node" => self.node_detail(req),
             "graph" => self.graph(req),
@@ -1858,6 +1862,96 @@ impl ReadState {
             })
             .collect();
         Ok(json!({ "nodes": nodes, "truncated": hits.len() > limit }))
+    }
+
+    /// Exact-value node resolution — the "external key → node id" read. Returns the nodes whose
+    /// one-cardinality `predicate` currently equals `value` (or, with `valid_at`, equalled it at
+    /// that valid-time instant), optionally restricted to a `type`, post-authz scoped (a masked node
+    /// is absent), ascending by id, cut to `limit` (default 10, capped at 100) with a `truncated`
+    /// flag. `value` takes a bare scalar (a string is text) or the ingest object form
+    /// (`{"text": ..}`, `{"int": ..}`, `{"node": N}`); `equals` is accepted as an alias.
+    ///
+    /// Cost: a scan of the predicate's keys in the snapshot — O(one-cardinality keys) for a
+    /// current read, O(history keys) plus one as-of probe per key of that predicate for `valid_at`.
+    /// There is no value index; see DECISIONS D28.
+    fn lookup(&self, req: &Value) -> DbResult<Value> {
+        let pname = req["predicate"]
+            .as_str()
+            .ok_or("lookup.predicate missing")?;
+        let pid = self
+            .schema
+            .cat
+            .field_id(pname)
+            .ok_or(format!("unknown predicate: {pname}"))?;
+        if !matches!(self.schema.cardinality.get(pname), Some(Cardinality::One)) {
+            return Err(format!("lookup.predicate must be one-cardinality: {pname}"));
+        }
+        let raw = if req["value"].is_null() {
+            &req["equals"]
+        } else {
+            &req["value"]
+        };
+        let want = match raw {
+            Value::Null => return Err("lookup.value missing".into()),
+            Value::Object(_) => obj_key(raw)?,
+            _ => value_key(raw)?,
+        };
+        let ty = match req["type"].as_str() {
+            Some(t) => Some(
+                self.schema
+                    .cat
+                    .field_id(t)
+                    .ok_or(format!("unknown type: {t}"))?,
+            ),
+            None => None,
+        };
+        let limit = req["limit"].as_u64().unwrap_or(10).min(100) as usize;
+        let valid_at = req["valid_at"].as_i64();
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let keep = |n: NodeId| {
+            label_visible(&self.snap, n, labels)
+                && ty.is_none_or(|t| self.snap.node_types.get(&n) == Some(&t))
+        };
+        // Both maps are keyed (node, predicate), so each node appears at most once, in id order.
+        let ids: Vec<NodeId> = match valid_at {
+            None => self
+                .snap
+                .one
+                .iter()
+                .filter(|&(&(n, p), v)| p == pid && v.as_ref() == Some(&want) && keep(n))
+                .map(|(&(n, _), _)| n)
+                .collect(),
+            Some(at) => self
+                .snap
+                .one_history
+                .keys()
+                .filter(|&&(n, p)| {
+                    p == pid
+                        && keep(n)
+                        && query::point_one_asof(&self.snap, n, pid, at).as_ref() == Some(&want)
+                })
+                .map(|&(n, _)| n)
+                .collect(),
+        };
+        let nodes: Vec<Value> = ids
+            .iter()
+            .take(limit)
+            .map(|&n| {
+                json!({
+                    "id": n,
+                    "type": self.snap.node_types.get(&n).and_then(|&t| self.schema.cat.name(t)),
+                    "display": self.display_name(n),
+                })
+            })
+            .collect();
+        let mut resp = json!({ "nodes": nodes, "truncated": ids.len() > limit });
+        if let Some(at) = valid_at {
+            resp["valid_at"] = json!(at);
+        }
+        Ok(resp)
     }
 
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,

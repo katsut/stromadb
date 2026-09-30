@@ -172,6 +172,7 @@ feeding it). Session login, light/dark themes, and EN / JA / ZH are built in.
 stroma serve --db ./mydb --addr 127.0.0.1:7687   # or: stroma up  (init-if-missing + serve)
 
 curl -s localhost:7687/health
+curl -s -X POST localhost:7687/query  -d '{"op":"lookup","predicate":"issue-key","value":"PROJ-123"}'
 curl -s -X POST localhost:7687/query  -d '{"op":"point","subject":1,"predicate":"age"}'
 curl -s -X POST localhost:7687/query  -d '{"op":"timeline","subject":1,"hops":["member-of","manager-of"]}'
 curl -s -X POST localhost:7687/query  -d '{"op":"conformance","rule_name":"release-approval"}'

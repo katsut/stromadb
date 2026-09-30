@@ -351,6 +351,27 @@
   fleet gateway (#237), which routes to one server per tenant. The two compose: a gateway child can
   itself serve namespaces.
 
+### D28. External keys resolve by an exact-value scan, not a maintained value index
+- **Context:** every read op and MCP tool takes a numeric node id, but an agent is usually handed an
+  external identifier: an issue key stored as the one-cardinality text predicate `issue-key`. With no
+  key → id step, an agent in an end-to-end run probed `point` with guessed ids, then gave up. `find`
+  is a case-insensitive substring match over every text value, so it answers "which nodes mention X",
+  not "which node has key X".
+- **Decision:** a `lookup` op and MCP tool, `{predicate, value, type?, limit?, valid_at?}` →
+  `{nodes:[{id, type, display}], truncated}`. It is an exact match on the current value of a
+  one-cardinality predicate, or on the value in effect at `valid_at`. The label mask applies as on
+  every read, so a masked node is absent. `limit` defaults to 10 and is capped at 100.
+- **Why a scan:** the snapshot is keyed `(node, predicate)`, so a value index would be a second
+  structure to keep consistent on every publish, compaction and as-of history change, plus a schema
+  flag to opt predicates in. The scan walks the snapshot's one-cardinality map once, touching only
+  entries of the given predicate for the comparison. An as-of lookup walks the history keys and does
+  one `point_one_asof` probe per key of that predicate. Both are linear in stored keys, which is
+  bounded by the per-org envelope. A lookup over a few thousand issues is dominated by the JSON
+  round trip, not the walk.
+- **Revisit when:** lookups become a hot path on large namespaces. The upgrade is a
+  `(predicate, value) → nodes` map for predicates declared `key: true` on `pred_def`, maintained on
+  the write side next to the node-label map. The op contract stays the same.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |

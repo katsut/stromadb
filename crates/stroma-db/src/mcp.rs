@@ -6,7 +6,7 @@
 //! response — a request (a message with an `id`) yields `Some(response)`, a notification yields
 //! `None`. Framing (newline-delimited stdio, HTTP request/response) is the caller's concern.
 //!
-//! Tools: `schema`, `point`, `expand`, `search` (authz-scoped hybrid), `retrieve_context`,
+//! Tools: `schema`, `lookup` (exact-value key → node id), `point`, `expand`, `search` (authz-scoped hybrid), `retrieve_context`,
 //! `conformance` (declared-rule per-subject verdicts), `stats`, `ingest`. Read tools map to
 //! [`Db::query`]; `ingest` writes facts (serialized on the database's internal write mutex).
 
@@ -23,6 +23,21 @@ fn tools() -> Value {
             "name": "schema",
             "description": "Discover what is queryable: the registered predicates (each with `card` one|many and its `domain`/`range`) and the node labels in use. Call this first to learn which predicate names exist and their cardinality before composing point/expand queries.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "lookup",
+            "description": "Resolve an external key such as an issue key to node ids: the nodes whose one-cardinality `predicate` exactly equals `value` (current value, or the value in effect at `valid_at`). Call this first when you are given an identifier string instead of a node id, then pass the returned `id` to point/expand/timeline/conformance. Returns `{nodes:[{id, type, display}], truncated}`; an unknown key returns an empty `nodes` list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "predicate": { "type": "string", "description": "one-cardinality predicate holding the key (e.g. \"issue-key\"); see `schema`" },
+                    "value": { "description": "the exact value to match: a string for text, a number for int, or an object form such as {\"int\": 7} / {\"node\": N}" },
+                    "type": { "type": "string", "description": "optional node type to restrict to (e.g. \"Issue\")" },
+                    "limit": { "type": "integer", "default": 10, "description": "maximum nodes returned (at most 100); `truncated` reports more matches" },
+                    "valid_at": { "type": "integer", "description": "as-of valid-time: match the value in effect at instant T instead of the current one" }
+                },
+                "required": ["predicate", "value"]
+            }
         },
         {
             "name": "point",
@@ -152,7 +167,7 @@ impl Scope {
 
 fn call_tool(db: &Db, name: &str, args: &Value, scope: &Scope) -> Result<Value, String> {
     match name {
-        "schema" | "point" | "expand" | "timeline" | "search" | "retrieve_context"
+        "schema" | "lookup" | "point" | "expand" | "timeline" | "search" | "retrieve_context"
         | "conformance" => {
             let mut req = args.clone();
             req["op"] = json!(name);
