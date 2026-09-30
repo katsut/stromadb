@@ -916,6 +916,84 @@ fn overview_type_aggregate() {
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
+// The console's overview-bubble drill-down: list the members of one type, or (with no `type`) the
+// untyped nodes, ascending by id, authz-scoped and capped.
+#[test]
+fn type_nodes_lists_members_of_a_type() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_type_nodes_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"name\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\",\"display\":true}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\",\"label\":3}}\n",
+        "{\"node\":{\"id\":3,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":9,\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"name\",\"object\":{\"text\":\"Alice\"}}}\n",
+    ))
+    .unwrap();
+
+    let r = db
+        .query(&json!({"op":"type_nodes","type":"Person"}))
+        .unwrap();
+    let ids: Vec<u64> = r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(r["count"], json!(3));
+    assert_eq!(r["truncated"], json!(false));
+    let n1 = r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == 1)
+        .unwrap();
+    assert_eq!(n1["name"], json!("Alice"));
+
+    // authz: node 2 (label 3) hidden under a mask that excludes it
+    let r = db
+        .query(&json!({"op":"type_nodes","type":"Person","allowed_labels":1}))
+        .unwrap();
+    let ids: Vec<u64> = r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![1, 3]);
+    assert_eq!(r["count"], json!(2));
+
+    // no `type` → untyped nodes only
+    let r = db.query(&json!({"op":"type_nodes"})).unwrap();
+    let ids: Vec<u64> = r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_u64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![9]);
+
+    // limit caps the list but `count` still reports the full visible total
+    let r = db
+        .query(&json!({"op":"type_nodes","type":"Person","limit":2}))
+        .unwrap();
+    assert_eq!(r["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(r["count"], json!(3));
+    assert_eq!(r["truncated"], json!(true));
+
+    // unknown type name is a clear error
+    assert!(db.query(&json!({"op":"type_nodes","type":"Nope"})).is_err());
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 #[test]
 fn retrieve_context_current_value_chronological() {
     let dir = std::env::temp_dir()
@@ -1173,6 +1251,46 @@ fn display_flagged_predicate_labels_nodes() {
     )
     .unwrap();
     assert_eq!(name_of(&db), json!(null));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+// A predicate's optional human-friendly `label` (e.g. for a connector's opaque generated names
+// such as `backlog-cf-900001`): presentation metadata, defaults to absent, latest declaration wins.
+#[test]
+fn pred_def_label_is_presentation_metadata() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_predlabel_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Ticket\"}}\n",
+        "{\"pred_def\":{\"name\":\"backlog-cf-900001\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\"}}\n",
+    ))
+    .unwrap();
+    let pred = |db: &Db| -> serde_json::Value {
+        db.query(&json!({"op":"schema"})).unwrap()["predicates"][0].clone()
+    };
+    assert_eq!(pred(&db)["label"], json!(null));
+
+    db.ingest_str(
+        "{\"pred_def\":{\"name\":\"backlog-cf-900001\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\",\"label\":\"Story points\"}}\n",
+    )
+    .unwrap();
+    assert_eq!(pred(&db)["label"], json!("Story points"));
+
+    // survives a reopen (replayed from schema.jsonl)
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(pred(&db)["label"], json!("Story points"));
+
+    // a later def line without `label` clears it (latest declaration wins, same as `display`)
+    db.ingest_str(
+        "{\"pred_def\":{\"name\":\"backlog-cf-900001\",\"cardinality\":\"one\",\"domain\":\"Ticket\",\"range_value\":\"text\"}}\n",
+    )
+    .unwrap();
+    assert_eq!(pred(&db)["label"], json!(null));
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
