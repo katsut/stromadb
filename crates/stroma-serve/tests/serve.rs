@@ -138,6 +138,16 @@ fn serve_health_query_ingest() {
         body.contains("Draw neighbourhood"),
         "ui body missing app marker"
     );
+    // the left panel can be collapsed to a slim rail; the control is keyboard accessible
+    // and its state is exposed via aria-expanded
+    assert!(
+        body.contains("id=\"askCollapse\"") && body.contains("aria-expanded=\"true\""),
+        "ui body missing the panel collapse control"
+    );
+    assert!(
+        body.contains("aria-controls=\"askBody\"") && body.contains("id=\"askBody\""),
+        "collapse control must reference the panel body it toggles"
+    );
     // the settings drawer keeps its groups in order, with the reset action last of all
     let at = |needle: &str| {
         body.find(needle)
