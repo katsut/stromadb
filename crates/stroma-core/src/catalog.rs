@@ -53,6 +53,10 @@ pub struct PredicateDef {
     /// This predicate's text value labels its subject node in graph views (declared per schema;
     /// presentation metadata, not a constraint — re-declaring a predicate may change it).
     pub display: bool,
+    /// A human-friendly name for this predicate (declared per schema, e.g. by a connector whose
+    /// generated predicate names are otherwise opaque, such as `backlog-cf-900001`). Presentation
+    /// metadata, not a constraint: `None` means show the raw name, as before.
+    pub label: Option<String>,
 }
 
 /// Errors from minimal constraint validation.
@@ -141,6 +145,7 @@ impl Catalog {
                 domain,
                 range,
                 display: false,
+                label: None,
             },
         );
         id
@@ -150,6 +155,13 @@ impl Catalog {
     pub fn set_display(&mut self, pred: FieldId, display: bool) {
         if let Some(def) = self.predicates.get_mut(&pred) {
             def.display = display;
+        }
+    }
+
+    /// Set (or clear) a predicate's human-friendly label. No-op for unknown ids.
+    pub fn set_label(&mut self, pred: FieldId, label: Option<String>) {
+        if let Some(def) = self.predicates.get_mut(&pred) {
+            def.label = label;
         }
     }
 

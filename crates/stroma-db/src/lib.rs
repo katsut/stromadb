@@ -1434,6 +1434,7 @@ impl ReadState {
             }
             "retrieve_context" => self.retrieve_context(req),
             "find" => self.find(req),
+            "type_nodes" => self.type_nodes(req),
             "neighborhood" => self.neighborhood(req),
             "node" => self.node_detail(req),
             "graph" => self.graph(req),
@@ -1603,7 +1604,7 @@ impl ReadState {
                         ValueType::Bool => "bool",
                     } }),
                 };
-                json!({ "name": name, "card": card, "domain": domain, "range": range, "display": p.display })
+                json!({ "name": name, "card": card, "domain": domain, "range": range, "display": p.display, "label": p.label })
             })
             .collect();
         preds.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -1725,6 +1726,48 @@ impl ReadState {
             .collect();
         let edges: Vec<Value> = ew.iter().map(|(&(a, b), &w)| json!([a, b, w])).collect();
         Ok(json!({ "nodes": nodes, "edges": edges, "overview": true }))
+    }
+
+    /// The members of one entity type — the console's drill-down from an `overview` bubble: "list
+    /// the nodes of this type, then pick one to draw its neighbourhood." `{"op":"type_nodes",
+    /// "type":"Person","limit":50}`; omitting `type` lists untyped nodes (the `overview` response's
+    /// `(untyped)` bubble). Ascending node-id order, authz-scoped, capped at `limit` (default 50).
+    /// Returns `{"nodes":[{"id","name"}],"count","truncated"}` — `count` is the *visible* total
+    /// (before the cap), so the console can say "N nodes" even when the list itself is truncated.
+    fn type_nodes(&self, req: &Value) -> DbResult<Value> {
+        let type_id = match req["type"].as_str() {
+            Some(name) => Some(
+                self.schema
+                    .cat
+                    .field_id(name)
+                    .ok_or(format!("unknown type: {name}"))?,
+            ),
+            None => None,
+        };
+        let limit = req["limit"].as_u64().unwrap_or(50) as usize;
+        let labels = req["allowed_labels"]
+            .as_u64()
+            .map(|m| m as u32)
+            .unwrap_or(u32::MAX);
+        let visible = |n: u64| {
+            self.snap
+                .node_labels
+                .get(&n)
+                .is_none_or(|&l| (labels >> l) & 1 == 1)
+        };
+        let matches = |n: u64| self.snap.node_types.get(&n).copied() == type_id;
+
+        let members: Vec<u64> = node_ids(&self.snap)
+            .into_iter()
+            .filter(|&n| matches(n) && visible(n))
+            .collect();
+        let count = members.len();
+        let nodes: Vec<Value> = members
+            .into_iter()
+            .take(limit)
+            .map(|id| json!({ "id": id, "name": self.display_name(id) }))
+            .collect();
+        Ok(json!({ "nodes": nodes, "count": count, "truncated": count > limit }))
     }
 
     /// A node's display name — the value of a predicate the schema flags with `display: true`,
@@ -2319,6 +2362,11 @@ fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
         schema
             .cat
             .set_display(pid, p["display"].as_bool().unwrap_or(false));
+        // Optional human-friendly label (e.g. a connector's opaque generated predicate name, such
+        // as `backlog-cf-900001`): presentation metadata, latest declaration wins, same as display.
+        schema
+            .cat
+            .set_label(pid, p["label"].as_str().map(str::to_string));
         schema.cardinality.insert(name.to_string(), c);
         return Ok(());
     }
