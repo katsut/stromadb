@@ -14,7 +14,15 @@
     --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace; --sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
   }
   * { box-sizing:border-box; }
+  /* button labels stay on one line in every language; overflow (rather than an awkward
+     mid-word wrap) is the safety valve if a translation is ever too long for its button. */
+  button { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   html,body { height:100%; }
+  /* CJK-safe line breaking everywhere: keep CJK "words" intact, break only at real
+     phrase/punctuation boundaries, and fall back to breaking a token that still doesn't
+     fit (e.g. a long id or URL) rather than overflow. Buttons and single-line labels get
+     an explicit nowrap below so they never wrap at all. */
+  body { word-break:keep-all; line-break:strict; overflow-wrap:anywhere; }
   body { margin:0; color:var(--fg); font:14px/1.55 var(--sans); -webkit-font-smoothing:antialiased;
     background:
       radial-gradient(1.5px 1.5px at 24px 32px, rgba(255,255,255,.55), transparent 100%) 0 0/170px 190px,
@@ -44,7 +52,6 @@
   .pill.live-ind.on .dot { background:#ff5a6a; box-shadow:0 0 9px #ff5a6a; animation:livepulse 1.3s ease-in-out infinite; }
   .pill.live-ind:not(.on) .dot { background:var(--mut); box-shadow:none; }
   @keyframes livepulse { 0%,100%{opacity:1} 50%{opacity:.28} }
-  section.q.collapsed { padding-bottom:14px; } section.q.collapsed > :not(h2) { display:none; }
   #qresult { margin-top:10px; } #qresult pre { background:var(--bg); border:1px solid var(--line); border-radius:var(--r-sm); padding:9px 11px; font:11.5px var(--mono); color:var(--fg-dim); max-height:180px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:0; }
   #qresult .qchips { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; } #qresult .qchip { cursor:pointer; font:11px var(--mono); color:var(--accent); border:1px solid color-mix(in oklab,var(--accent) 40%,var(--line)); border-radius:100px; padding:3px 9px; } #qresult .qchip:hover { background:color-mix(in oklab,var(--accent) 14%,transparent); }
   #qresult .qerr { color:#ff7a90; font:12px var(--mono); }
@@ -79,16 +86,24 @@
   .cstep .cx { cursor:pointer; color:var(--mut); font-size:13px; flex:0 0 auto; } .cstep .cx:hover { color:#ff7a90; }
   .cflow { text-align:center; color:var(--mut); font-size:12px; line-height:.4; margin:-3px 0; }
   #qresult2 { margin-top:10px; }
-  h2.clp { cursor:pointer; display:flex; align-items:center; gap:6px; } h2.clp .caret { transition:transform .15s; } section.q.collapsed h2.clp .caret { transform:rotate(-90deg); }
-  .float-panel { position:absolute; top:56px; left:14px; z-index:4; width:298px; max-width:calc(100% - 28px); max-height:calc(100vh - 74px); overflow-y:auto; }
+  .float-panel { position:absolute; top:56px; left:14px; z-index:4; width:298px; max-width:calc(100% - 28px); max-height:calc(100vh - 74px); overflow-y:auto; transition:width .15s ease; }
   .q-overlay { position:absolute; top:56px; right:14px; bottom:14px; z-index:6; width:360px; max-width:calc(100% - 28px); display:flex; }
-  .tabs { display:flex; align-items:center; gap:4px; margin:-2px -2px 12px; }
-  .tabs-sp { flex:1; }
-  .tab { background:transparent; border:1px solid transparent; border-radius:100px; color:var(--mut); font:600 12.5px var(--sans); letter-spacing:.02em; padding:5px 12px; cursor:pointer; transition:color .12s, background .12s, border-color .12s; }
+  /* panel header: the scrollable mode-tab row plus the fixed collapse/expand control */
+  .panel-head { display:flex; align-items:center; gap:2px; margin:-2px -2px 12px; }
+  .tabs { flex:1; min-width:0; display:flex; align-items:center; gap:1px; overflow-x:auto; scrollbar-width:none; }
+  .tabs::-webkit-scrollbar { display:none; }
+  /* the panel is a fixed ~298px column regardless of window width, so the tab row's fit
+     problem is constant, not a narrow-viewport special case: the floor below is tuned so
+     all four EN labels fit without scrolling at that width; JA/ZH labels are shorter and
+     fit with room to spare. Longer labels than this (a 5th mode, a custom locale) still
+     never wrap — they scroll horizontally instead, and the collapse control's hit area
+     never shrinks because it sits outside the scrollable row. */
+  .tab { background:transparent; border:1px solid transparent; border-radius:100px; color:var(--mut); font:600 10.5px var(--sans); padding:5px 7px; cursor:pointer; transition:color .12s, background .12s, border-color .12s; white-space:nowrap; flex:0 0 auto; }
   .tab:hover { color:var(--fg-dim); }
   .tab.active { color:var(--accent); background:color-mix(in oklab, var(--accent) 15%, transparent); border-color:color-mix(in oklab, var(--accent) 42%, transparent); box-shadow:inset 0 1px 0 rgba(255,255,255,.06); }
-  .caret-btn { background:none; border:0; color:var(--mut); cursor:pointer; font-size:13px; padding:2px 4px; transition:transform .15s, color .12s; } .caret-btn:hover { color:var(--fg); }
-  #askPanel.collapsed .tab-body { display:none; } #askPanel.collapsed .caret-btn { transform:rotate(-90deg); }
+  .caret-btn { flex:0 0 auto; background:none; border:0; color:var(--mut); cursor:pointer; font-size:13px; width:26px; height:26px; line-height:1; padding:0; transition:color .12s; } .caret-btn:hover { color:var(--fg); }
+  #askPanel.rail-collapsed { width:auto; padding:12px 10px; }
+  #askPanel.rail-collapsed .tabs, #askPanel.rail-collapsed #askBody { display:none; }
   .pop { position:absolute; z-index:7; top:52px; left:14px; width:288px; max-width:calc(100% - 28px); background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r); padding:13px 15px; box-shadow:var(--shadow); }
   .pop-h { font:600 12.5px var(--sans); color:var(--fg); margin-bottom:8px; }
   .scope-chips { display:flex; flex-wrap:wrap; gap:7px; margin-bottom:9px; }
@@ -252,14 +267,16 @@
   </div>
 
   <section class="q float-panel" id="askPanel">
-    <div class="tabs">
-      <button class="tab active" id="tabExplore" data-tab="explore" data-i18n="explore">Explore</button>
-      <button class="tab" id="tabQuery" data-tab="query" data-i18n="queryTitle">Query</button>
-      <button class="tab" id="tabCompose" data-tab="compose" data-i18n="composeTitle">Compose</button>
-      <button class="tab" id="tabImport" data-tab="import" data-i18n="importTitle">Import</button>
-      <span class="tabs-sp"></span>
-      <button class="caret-btn" id="askCollapse" title="collapse">▾</button>
+    <div class="panel-head">
+      <div class="tabs">
+        <button class="tab active" id="tabExplore" data-tab="explore" data-i18n="explore">Explore</button>
+        <button class="tab" id="tabQuery" data-tab="query" data-i18n="queryTitle">Query</button>
+        <button class="tab" id="tabCompose" data-tab="compose" data-i18n="composeTitle">Compose</button>
+        <button class="tab" id="tabImport" data-tab="import" data-i18n="importTitle">Import</button>
+      </div>
+      <button class="caret-btn" id="askCollapse" aria-expanded="true" aria-controls="askBody" data-i18n-title="collapseSidebar" title="collapse">▾</button>
     </div>
+    <div id="askBody">
     <div class="tab-body" id="paneExplore">
       <div><label data-i18n="findNode">find node</label><input id="find" type="search" data-i18n-ph="findPh" placeholder="free-word search…" autocomplete="off"></div>
       <div id="findResults" class="find-results hidden"></div>
@@ -320,6 +337,7 @@
         <button class="primary" id="impRun" data-i18n="importRun">Import</button>
       </div>
       <div id="impResult"></div>
+    </div>
     </div>
   </section>
 
@@ -779,11 +797,28 @@ const PANES={explore:'paneExplore', query:'paneQuery', compose:'paneCompose', im
 const TABS={explore:'tabExplore', query:'tabQuery', compose:'tabCompose', import:'tabImport'};
 function setTab(name){
   for(const k in PANES){ $(TABS[k]).classList.toggle('active', k===name); $(PANES[k]).classList.toggle('hidden', k!==name); }
-  $('askPanel').classList.remove('collapsed');
   if(name==='compose' && !compose.ran) runCompose();
 }
 $('tabExplore').onclick=()=>setTab('explore'); $('tabQuery').onclick=()=>setTab('query'); $('tabCompose').onclick=()=>setTab('compose'); $('tabImport').onclick=()=>setTab('import');
-$('askCollapse').onclick=()=>$('askPanel').classList.toggle('collapsed');
+
+// panel collapse: a slim rail with a single expand handle, replacing the mode tabs.
+// The active tab and the panel's scroll position are untouched while collapsed, so
+// expanding restores exactly what was showing before. Persisted across reloads, and
+// nudges the canvas resize path since the freed width changes what's visible.
+let askPanelScroll = 0;
+function setPanelCollapsed(collapsed){
+  const panel = $('askPanel'), btn = $('askCollapse');
+  if(collapsed) askPanelScroll = panel.scrollTop;
+  panel.classList.toggle('rail-collapsed', collapsed);
+  btn.setAttribute('aria-expanded', String(!collapsed));
+  btn.textContent = collapsed ? '▸' : '▾';
+  btn.dataset.i18nTitle = collapsed ? 'expandSidebar' : 'collapseSidebar';
+  btn.title = t(btn.dataset.i18nTitle);
+  localStorage.setItem('stroma_panel_collapsed', collapsed ? '1' : '0');
+  if(!collapsed) panel.scrollTop = askPanelScroll;
+  resize();
+}
+$('askCollapse').onclick=()=>setPanelCollapsed(!$('askPanel').classList.contains('rail-collapsed'));
 
 // ---------- import: CSV → mapping → ingest JSONL (the console twin of `stroma import`) ----------
 // Node ids are the same deterministic 48-bit FNV-1a over `type \0 raw` the CLI computes, so a file
@@ -1166,7 +1201,7 @@ $('lang').onchange=e=>applyLang(e.target.value);
 $('logout').onclick=async()=>{ try{ await fetch('/logout',{method:'POST'}); }catch(x){} location.href='/login'; };
 if(NS){ $('nsPill').textContent=NS; $('nsPill').classList.remove('hidden'); }
 
-resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); stats(); me(); loadSchema(); qopFields(); loop();
+resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); setPanelCollapsed(localStorage.getItem('stroma_panel_collapsed')==='1'); stats(); me(); loadSchema(); qopFields(); loop();
 </script>
 </body>
 </html>
