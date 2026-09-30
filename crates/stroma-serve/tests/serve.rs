@@ -695,3 +695,88 @@ fn serve_namespaces() {
     drop(_guard);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// `--app-url` / `$STROMA_APP_URL`: an optional link back to the app the database feeds, reported
+// by `GET /me` as `app_url` (the console's topbar "Back to app" link; hidden when unset).
+#[test]
+fn me_reports_app_url_when_set_by_flag_or_env() {
+    let base = std::env::temp_dir().join(format!("stroma_appurl_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    Db::init(&dir).unwrap();
+    drop(Db::open(&dir).unwrap());
+
+    let login = |addr: &str| -> String {
+        let (st, cookie, _) = http(
+            addr,
+            "POST",
+            "/login",
+            "{\"user\":\"admin\",\"password\":\"password\"}",
+            None,
+        );
+        assert_eq!(st, 200, "login must succeed");
+        cookie.expect("login must set a session cookie")
+    };
+    let me = |addr: &str, tok: &str| -> serde_json::Value {
+        let (st, _, body) = http(addr, "GET", "/me", "", Some(tok));
+        assert_eq!(st, 200);
+        serde_json::from_str(&body).unwrap()
+    };
+
+    // unset: `app_url` is absent (null)
+    let port = 11100 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+        .args(["--db", dir.to_str().unwrap(), "--addr", &addr])
+        .spawn()
+        .unwrap();
+    let _guard = Kill(child);
+    wait_up(&addr);
+    let tok = login(&addr);
+    assert!(me(&addr, &tok)["app_url"].is_null(), "unset app_url");
+    drop(_guard);
+
+    // set via --app-url
+    let port = 11200 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+        .args([
+            "--db",
+            dir.to_str().unwrap(),
+            "--addr",
+            &addr,
+            "--app-url",
+            "https://app.example.com/",
+        ])
+        .spawn()
+        .unwrap();
+    let _guard = Kill(child);
+    wait_up(&addr);
+    let tok = login(&addr);
+    assert_eq!(
+        me(&addr, &tok)["app_url"],
+        "https://app.example.com/",
+        "flag-set app_url"
+    );
+    drop(_guard);
+
+    // set via $STROMA_APP_URL
+    let port = 11300 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+        .args(["--db", dir.to_str().unwrap(), "--addr", &addr])
+        .env("STROMA_APP_URL", "https://app.example.com/env")
+        .spawn()
+        .unwrap();
+    let _guard = Kill(child);
+    wait_up(&addr);
+    let tok = login(&addr);
+    assert_eq!(
+        me(&addr, &tok)["app_url"],
+        "https://app.example.com/env",
+        "env-set app_url"
+    );
+    drop(_guard);
+
+    let _ = std::fs::remove_dir_all(&base);
+}
