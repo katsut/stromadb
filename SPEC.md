@@ -314,17 +314,23 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
   - `OK` — present, equal to the `required` value (when declared), and different from the
     `distinct_from` value (when declared).
   - `MISMATCH` — present but unequal to `required`, or colliding with `distinct_from`; `kind`
-    sub-classifies an equality mismatch via valid-time history as `stale` (was once correct) or
-    `wrong` (never correct) — a must-differ collision holds *now*, so it is always `wrong`.
+    sub-classifies an equality mismatch via the valid-time history of the last as-of hop as
+    `stale` (the `actual` value held that hop at some other valid-time, earlier or later) or
+    `wrong` (it never did) — a must-differ collision holds *now*, so it is always `wrong`. An
+    equality mismatch is only ever judged against a `required` value that was in effect at the
+    anchor; when none was (see `required_unresolved`), the row is not a `MISMATCH` of any kind.
   - `ABSENT` — `actual` is missing where `absent_when` says it should exist.
   - `NOT_APPLICABLE` — the rule does not judge the subject. Every `NOT_APPLICABLE` row, and only
     such a row, carries a `reason`:
     - `out_of_scope` — the subject falls outside `scope`.
     - `no_matching_case` — a banded rule matched no `cases` entry.
     - `required_unresolved` — `actual` is present but the required path resolves to no value (a
-      hop along it has no value, or its as-of anchor is missing), so equality cannot be judged.
-      The row keeps its `actual`, `distinct`, `as_of` and `case` values. Missing data on the
-      required path is never reported as a violation.
+      hop along it has no value, its as-of anchor is missing, or no value was in effect at the
+      anchor because the hop's history starts later or is closed over it), so equality cannot be
+      judged. The row keeps its `actual`, `distinct`, `as_of` and `case` values. Missing data on
+      the required path is never reported as a violation, and never as `stale`: an approval dated
+      before the first recorded manager reads as "no history at `as_of`", not as a lapsed
+      authority.
 
 Precedence when the required path is unresolved: a missing `actual` is still `ABSENT` (when
 `absent_when` holds) or `OK`, since absence does not depend on the expected value. A present

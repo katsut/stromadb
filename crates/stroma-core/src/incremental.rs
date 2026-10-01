@@ -467,6 +467,7 @@ mod tests {
             valid_to: None,
         };
         let mut rng = 0xfeed_beef_dead_c0deu64;
+        let mut backfilled = 0usize;
         for step in 0..2500u64 {
             let pick = |r: u64, xs: &[u64]| xs[(r % xs.len() as u64) as usize];
             let i = pick(splitmix(&mut rng), &issues);
@@ -519,7 +520,162 @@ mod tests {
                 &full(&snap),
                 "diverged at step {step} (diffs that round: {diffs:?})"
             );
+            // an as-of read that found no value in effect (anchor known, required unresolved) and
+            // is later covered by a backfilled interval must resolve to a judged verdict
+            backfilled += diffs
+                .iter()
+                .filter(|d| {
+                    d.old.as_ref().is_some_and(|v| {
+                        v.reason == Some(conformance::NotApplicableReason::RequiredUnresolved)
+                            && v.as_of.is_some()
+                    }) && d.new.as_ref().is_some_and(|v| {
+                        matches!(
+                            v.verdict,
+                            conformance::Outcome::Ok | conformance::Outcome::Mismatch
+                        )
+                    })
+                })
+                .count();
         }
+        assert!(
+            backfilled > 0,
+            "no unresolved as-of read was ever backfilled"
+        );
+    }
+
+    #[test]
+    fn a_backfilled_interval_before_as_of_resolves_the_verdict_incrementally() {
+        use crate::catalog::{Cardinality, Range, RelProps, ValueType};
+        use conformance::{Hop, MismatchKind, NotApplicableReason, Outcome};
+
+        // Dept 100's `manager-of` history starts at 1000; two approvals anchored at 500, before any
+        // value was in effect: Alice(10) approved 1000, Dave(20) approved 1001.
+        let mut cat = Catalog::new();
+        let issue = cat.register_type("Issue");
+        let person = cat.register_type("Person");
+        let dept = cat.register_type("Department");
+        let d = RelProps::default();
+        let one = Cardinality::One;
+        let assigned_to = cat.register_predicate("assigned-to", one, d, issue, Range::Type(person));
+        let member_of = cat.register_predicate("member-of", one, d, person, Range::Type(dept));
+        let manager_of = cat.register_predicate("manager-of", one, d, dept, Range::Type(person));
+        let approved_by = cat.register_predicate("approved-by", one, d, issue, Range::Type(person));
+        let approved_at =
+            cat.register_predicate("approved-at", one, d, issue, Range::Value(ValueType::Int));
+        let rule = Rule {
+            subject_type: "Issue".into(),
+            scope: None,
+            required: vec![
+                Hop {
+                    predicate: "assigned-to".into(),
+                    as_of: None,
+                },
+                Hop {
+                    predicate: "member-of".into(),
+                    as_of: None,
+                },
+                Hop {
+                    predicate: "manager-of".into(),
+                    as_of: Some("approved-at".into()),
+                },
+            ],
+            cases: Vec::new(),
+            distinct_from: Vec::new(),
+            actual: "approved-by".into(),
+            absent_when: None,
+        };
+        let mut eng = Engine::new(1 << 20);
+        let typed = |eng: &mut Engine, node: NodeId, type_id: FieldId| {
+            eng.write(0, WriteKind::SetNodeType { node, type_id })
+                .unwrap();
+        };
+        let set = |eng: &mut Engine, s: NodeId, p: FieldId, o: ObjKey, vf: i64| {
+            eng.write(
+                0,
+                WriteKind::SetOne {
+                    subject: s,
+                    predicate: p,
+                    object: o,
+                    valid_from: vf,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        };
+        typed(&mut eng, 100, dept);
+        for p in [10, 11, 20, 201] {
+            typed(&mut eng, p, person);
+        }
+        set(&mut eng, 100, manager_of, ObjKey::Node(10), 1000);
+        set(&mut eng, 201, member_of, ObjKey::Node(100), 0);
+        for (i, approver) in [(1000, 10), (1001, 20)] {
+            typed(&mut eng, i, issue);
+            set(&mut eng, i, assigned_to, ObjKey::Node(201), 0);
+            set(&mut eng, i, approved_by, ObjKey::Node(approver), 0);
+            set(&mut eng, i, approved_at, ObjKey::Int(500), 0);
+        }
+        eng.materialize();
+        let snap = eng.snapshot();
+        let mut m = MaintainedConformance::new(rule.clone(), &snap, &cat);
+        assert_eq!(m.verdicts(), &full_eval(&snap, &cat, &rule));
+        for s in [1000, 1001] {
+            let v = &m.verdicts()[&s];
+            assert_eq!(
+                (v.verdict, v.reason, v.mismatch_kind, v.required.clone()),
+                (
+                    Outcome::NotApplicable,
+                    Some(NotApplicableReason::RequiredUnresolved),
+                    None,
+                    None
+                )
+            );
+            assert_eq!(v.as_of, Some(500));
+        }
+        // the as-of read that found nothing is in both subjects' support sets
+        assert_eq!(
+            m.dependents.get(&(100, manager_of)),
+            Some(&BTreeSet::from([1000, 1001]))
+        );
+
+        let backfill = |eng: &mut Engine, m: &mut MaintainedConformance, who: NodeId| {
+            set(eng, 100, manager_of, ObjKey::Node(who), 0);
+            let (keys, nodes) = eng.materialize_tracked_with_nodes();
+            let snap = eng.snapshot();
+            let diffs = m.apply(&snap, &cat, &keys, &nodes);
+            assert_eq!(m.verdicts(), &full_eval(&snap, &cat, &rule));
+            let mut subjects: Vec<NodeId> = diffs.iter().map(|d| d.subject).collect();
+            subjects.sort_unstable();
+            assert_eq!(subjects, vec![1000, 1001], "{diffs:?}");
+        };
+
+        // a backfilled interval [0, 1000) for Alice covers the anchor: 1000 → OK, 1001 → wrong
+        backfill(&mut eng, &mut m, 10);
+        let v = &m.verdicts()[&1000];
+        assert_eq!((v.verdict, v.reason), (Outcome::Ok, None));
+        assert_eq!(v.required, Some(ObjKey::Node(10)));
+        let v = &m.verdicts()[&1001];
+        assert_eq!(
+            (v.verdict, v.mismatch_kind),
+            (Outcome::Mismatch, Some(MismatchKind::Wrong))
+        );
+
+        // a later correction says Bob(11) held it over [0, 1000) instead: Alice still held the role
+        // at another time, so 1000 → stale; Dave never did, so 1001 stays wrong
+        backfill(&mut eng, &mut m, 11);
+        let v = &m.verdicts()[&1000];
+        assert_eq!(
+            (v.verdict, v.mismatch_kind, v.required.clone()),
+            (
+                Outcome::Mismatch,
+                Some(MismatchKind::Stale),
+                Some(ObjKey::Node(11))
+            )
+        );
+        let v = &m.verdicts()[&1001];
+        assert_eq!(
+            (v.verdict, v.mismatch_kind),
+            (Outcome::Mismatch, Some(MismatchKind::Wrong))
+        );
     }
 
     #[test]

@@ -484,6 +484,41 @@
   as-of and a current-value literal rule, with a full-evaluate oracle after every event, asserting
   that it reaches `stale` mismatches and crosses `required_unresolved` in both directions.
 
+### D33. No value in effect at the as-of anchor is `required_unresolved`, never `stale`
+- **Context:** with `required.hops[-1].as_of`, an approval dated before the first recorded value
+  of the last hop (the directory's `reports-to` or `manager-of` was first observed after the
+  approval) has nothing in effect at the anchor. Before D31 such a row was `MISMATCH` with
+  `kind: stale` and `required: null`, indistinguishable from "a different manager held the role
+  at approval time", so every approval older than the first directory sync read as a lapsed
+  authority. D31 moved every unresolved required path to `NOT_APPLICABLE`, which already covers
+  this case mechanically; this decision pins the semantics and the exact definitions.
+- **Decision:** an equality `MISMATCH` is only ever judged against a required value that was in
+  effect at the anchor. Its `kind` is decided by the valid-time history of the last as-of hop
+  alone:
+  - `stale` — the required value in effect at the anchor differs from the actual, and the actual
+    value appears in that hop's history at some other valid-time, earlier **or later** (the
+    approver was the manager before a transfer, or became the manager afterwards). The probe is
+    by value and ignores the instant, so a later-dated interval also counts.
+  - `wrong` — the required value in effect at the anchor differs from the actual, and the actual
+    value never appears in that hop's history. A mismatch on a timeless last hop, and every
+    `distinct_from` collision, is `wrong`.
+  - `required_unresolved` — no value was in effect at the anchor: the history starts after it, or
+    a close covers it with no successor, as well as the D31 cases (a missing hop value or anchor).
+    This holds even when the actual value held the hop at an earlier time: without a value in
+    effect there is no comparison, so there is nothing stale about the row. The row keeps `as_of`
+    and `actual`, so a caller can report "no history at `as_of`".
+- **Why not a new kind or a coverage field:** a `kind: unknown_at_as_of` would put a non-violation
+  under `MISMATCH`, which D31 rejected for the same reason callers act on `MISMATCH`. A
+  `required_coverage` start on the row was considered and deferred: the `as_of` instant together
+  with the `timeline` op already gives the first recorded interval, and the row shape stays as in
+  D31.
+- **Incremental maintenance:** exact, unchanged in mechanism. The as-of read that found nothing is
+  recorded on `(last reached node, hop predicate)`, so a backfilled interval that starts before the
+  anchor re-judges exactly the subjects anchored in it (D26). Tests: a backfill flips two
+  unresolved approvals to `OK` and `wrong`, and a later correction of the same interval to another
+  manager turns the `OK` into `stale`; the approval-shaped random stream asserts that it backfills
+  an unresolved as-of read into a judged verdict, with the full-evaluate oracle after every event.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |

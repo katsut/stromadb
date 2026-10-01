@@ -254,10 +254,16 @@ impl Outcome {
     }
 }
 
-/// Sub-classification of a [`Outcome::Mismatch`] via a valid-time history probe on the final as-of hop:
-/// `Stale` = the actual value once satisfied the required derivation at an earlier valid-time (it held
-/// the role before, but not as-of the anchor); `Wrong` = it never did. A mismatch on a timeless final
-/// hop (no as-of) is always `Wrong`, since there is no earlier time at which it could have held.
+/// Sub-classification of a [`Outcome::Mismatch`] via a valid-time history probe on the final as-of hop.
+/// A mismatch is only ever judged against a required value that was in effect at the anchor: `Stale`
+/// = that value differs from the actual, and the actual value appears in the hop's valid-time history
+/// at some other valid-time, earlier or later (it held the role before a transfer, or took it over
+/// afterwards); `Wrong` = the actual value never appears in that history. When no value was in effect
+/// at the anchor at all (the history starts later, or is closed over the instant) there is nothing to
+/// compare against, so the verdict is `NOT_APPLICABLE` with
+/// [`NotApplicableReason::RequiredUnresolved`], never `Stale`, whether or not the actual held earlier.
+/// A mismatch on a timeless final hop (no as-of) is always `Wrong`, since there is no other time at
+/// which it could have held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MismatchKind {
     Stale,
@@ -282,10 +288,11 @@ pub enum NotApplicableReason {
     OutOfScope,
     /// The rule is banded and no case's `when` holds.
     NoMatchingCase,
-    /// The actual is present but the required path resolves to no value (a missing hop value or a
-    /// missing as-of anchor), so equality cannot be judged. The row keeps its derived and observed
-    /// values. A resolved `distinct_from` collision still wins as `MISMATCH`, and a missing actual
-    /// is still judged `ABSENT` / `OK` as usual.
+    /// The actual is present but the required path resolves to no value (a missing hop value, a
+    /// missing as-of anchor, or no value in effect at the anchor because the hop's history starts
+    /// later or is closed over it), so equality cannot be judged. The row keeps its derived and
+    /// observed values. A resolved `distinct_from` collision still wins as `MISMATCH`, and a missing
+    /// actual is still judged `ABSENT` / `OK` as usual.
     RequiredUnresolved,
     /// Only from [`evaluate_subjects`]: the id names a visible node whose type is not the rule's
     /// `subject_type`.
@@ -1135,6 +1142,97 @@ mod tests {
         // without distinct_from, the self-approval is unresolved like any other present actual
         let vs = evaluate(&f.snap, &f.cat, &rule(), u32::MAX);
         assert_eq!(verdicts_by_subject(&vs)[&9].reason, unresolved);
+    }
+
+    // Dept 100's `manager-of` timeline: nothing before 1000, Alice(10) over [1000, 3000), closed over
+    // [3000, 5000), Carol(12) from 5000. Assignee 201 is a member. Five approvals by Alice, Carol or
+    // the non-manager Dave(20) at instants chosen to fall in each segment.
+    fn coverage_fixture() -> Fixture {
+        let cat = fixture().cat;
+        let id = |c: &Catalog, n: &str| c.field_id(n).unwrap();
+        let (issue, person) = (id(&cat, "Issue"), id(&cat, "Person"));
+        let assigned_to = id(&cat, "assigned-to");
+        let approved_by = id(&cat, "approved-by");
+        let approved_at = id(&cat, "approved-at");
+        let issue_type = id(&cat, "issue-type");
+        let status = id(&cat, "status");
+        let member_of = id(&cat, "member-of");
+        let manager_of = id(&cat, "manager-of");
+        let mut ops: Vec<Op> = Vec::new();
+        let mut seq = 0u64;
+        set_type(&mut ops, &mut seq, 100, id(&cat, "Department"));
+        for p in [10, 12, 20, 201] {
+            set_type(&mut ops, &mut seq, p, person);
+        }
+        set_one(&mut ops, &mut seq, 100, manager_of, ObjKey::Node(10), 1000);
+        ops.push(Op::CloseOne {
+            subject: 100,
+            predicate: manager_of,
+            valid_from: 3000,
+            ok: ok(seq),
+        });
+        seq += 1;
+        set_one(&mut ops, &mut seq, 100, manager_of, ObjKey::Node(12), 5000);
+        set_one(&mut ops, &mut seq, 201, member_of, ObjKey::Node(100), 0);
+        // (issue, approver, approved-at)
+        let rows: [(NodeId, NodeId, i64); 5] = [
+            (21, 10, 500),  // before the history starts
+            (22, 10, 4000), // inside the closed gap: Alice held earlier, nobody holds now
+            (23, 10, 6000), // Carol holds; Alice held earlier
+            (24, 20, 6000), // Carol holds; Dave never held
+            (25, 12, 1200), // Alice holds; Carol holds later
+        ];
+        for (i, approver, at) in rows {
+            set_type(&mut ops, &mut seq, i, issue);
+            set_one(&mut ops, &mut seq, i, issue_type, text("release"), 0);
+            set_one(&mut ops, &mut seq, i, assigned_to, ObjKey::Node(201), 0);
+            set_one(&mut ops, &mut seq, i, status, text("released"), 0);
+            set_one(
+                &mut ops,
+                &mut seq,
+                i,
+                approved_by,
+                ObjKey::Node(approver),
+                0,
+            );
+            set_one(&mut ops, &mut seq, i, approved_at, ObjKey::Int(at), 0);
+        }
+        Fixture {
+            snap: fold(&ops).observe(),
+            cat,
+        }
+    }
+
+    #[test]
+    fn no_value_at_as_of_is_unresolved_not_stale() {
+        let f = coverage_fixture();
+        let vs = evaluate(&f.snap, &f.cat, &rule(), u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        let unresolved = Some(NotApplicableReason::RequiredUnresolved);
+        // the history starts after as_of: no value was in effect, so nothing to compare against.
+        // The row keeps the anchor instant and the actual; it carries no mismatch kind.
+        assert_eq!(by[&21].verdict, Outcome::NotApplicable);
+        assert_eq!(by[&21].reason, unresolved);
+        assert_eq!(by[&21].mismatch_kind, None);
+        assert_eq!(by[&21].required, None);
+        assert_eq!(by[&21].actual, Some(ObjKey::Node(10)));
+        assert_eq!(by[&21].as_of, Some(500));
+        // the value is closed over as_of: the actual did hold earlier, but with no value in effect
+        // at the instant this is still unresolved, not stale
+        assert_eq!(by[&22].verdict, Outcome::NotApplicable);
+        assert_eq!(by[&22].reason, unresolved);
+        assert_eq!(by[&22].mismatch_kind, None);
+        assert_eq!(by[&22].as_of, Some(4000));
+        // a different value is in effect at as_of: stale when the actual held at some other
+        // valid-time (earlier or later), wrong when it never did
+        assert_eq!(by[&23].verdict, Outcome::Mismatch);
+        assert_eq!(by[&23].mismatch_kind, Some(MismatchKind::Stale));
+        assert_eq!(by[&23].required, Some(ObjKey::Node(12)));
+        assert_eq!(by[&24].verdict, Outcome::Mismatch);
+        assert_eq!(by[&24].mismatch_kind, Some(MismatchKind::Wrong));
+        assert_eq!(by[&25].verdict, Outcome::Mismatch);
+        assert_eq!(by[&25].mismatch_kind, Some(MismatchKind::Stale));
+        assert_eq!(by[&25].required, Some(ObjKey::Node(10)));
     }
 
     #[test]
