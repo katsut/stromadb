@@ -81,9 +81,12 @@ an ordinary database directory under it:
   `/mcp` and the console page, answers `404` and creates nothing.
 - **Lifetime.** Each namespace's database is opened on first use, with the same
   `--max-unmerged` bound as `default`, and stays open until the server exits.
-- **Listing.** `GET /namespaces` returns `{"namespaces":[{"name","nodes","facts"}, …]}`, `default`
-  first then the existing named ones sorted, each with its node and fact counts (from the same
-  counters `GET /stats` reports). The console's topbar namespace selector is built from this.
+- **Listing.** `GET /namespaces` returns `{"namespaces":[{"name","nodes","facts","loaded"}, …]}`,
+  `default` first then the existing named ones sorted, each with its node and fact counts (the
+  same counters `GET /stats` reports). Listing never opens a namespace: an open one (`"loaded":
+  true`) reports its live counters, an unopened one the counts its directory last persisted in
+  `counts.json` (rewritten after every write), or `null` counts if it has none yet. The console's
+  topbar namespace selector is built from this.
 - **Access.** Sessions and tokens are server-wide: one login or token reaches every namespace, and
   a token's label cap, read-only bit and provenance stamping apply unchanged inside each. There
   are no per-namespace credentials, so `GET /namespaces` lists every namespace to every
