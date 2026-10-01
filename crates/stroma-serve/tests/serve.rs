@@ -179,6 +179,17 @@ fn serve_health_query_ingest() {
         "fmtVal must coerce int/float values to strings before callers call .replace() on them"
     );
 
+    // inspect panel property rows (#288): value, source chip and confidence badge must be
+    // separate elements (not one string blob), and a resolved node-ref name must keep its id
+    // as a secondary, muted span rather than dropping it.
+    assert!(
+        body.contains("class=\"ins-vwrap\"")
+            && body.contains("class=\"ins-src\"")
+            && body.contains("class=\"ins-conf")
+            && body.contains("class=\"ins-sec\""),
+        "inspect panel rows must render value/source/confidence as separate elements"
+    );
+
     // a console session is unrestricted and reports itself as such (no token identity)
     let (st, _, body) = http(&addr, "GET", "/me", "", Some(&tok));
     assert_eq!(st, 200, "me: {body}");

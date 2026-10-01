@@ -153,10 +153,13 @@
   .ins-x { float:right; cursor:pointer; color:var(--mut); margin-left:8px; } .ins-x:hover { color:#ff7a90; }
   .ins-meta { color:var(--mut); font-size:11px; margin:5px 0 9px; }
   .ins-props { display:flex; flex-direction:column; gap:5px; max-height:216px; overflow:auto; }
-  .ins-r { display:flex; gap:10px; align-items:baseline; } .ins-k { color:var(--fg-dim); min-width:74px; flex:0 0 auto; } .ins-v { color:var(--fg); word-break:break-word; }
-  .ins-src { color:var(--mut); font-size:10.5px; font-family:ui-monospace,monospace; border:1px solid var(--line); border-radius:4px; padding:0 4px; margin-left:6px; white-space:nowrap; }
-  .ins-src.tier-high { color:#37b98c; border-color:rgba(55,185,140,.4); }
-  .ins-src.tier-low { color:#c98a4b; border-color:rgba(201,138,75,.4); }
+  .ins-r { display:flex; gap:10px; align-items:baseline; } .ins-k { color:var(--fg-dim); min-width:74px; flex:0 0 auto; }
+  .ins-vwrap { display:flex; flex-wrap:wrap; gap:6px; align-items:baseline; min-width:0; }
+  .ins-v { color:var(--fg); word-break:break-word; }
+  .ins-src, .ins-conf { color:var(--mut); font-size:10.5px; font-family:ui-monospace,monospace; border:1px solid var(--line); border-radius:4px; padding:0 4px; white-space:nowrap; flex:0 0 auto; }
+  .ins-conf.tier-high { color:#37b98c; border-color:rgba(55,185,140,.4); }
+  .ins-conf.tier-low { color:#c98a4b; border-color:rgba(201,138,75,.4); }
+  .ins-sec { color:var(--mut); font-size:10.5px; margin-left:4px; }
   .find-results { display:flex; flex-direction:column; gap:2px; margin:6px 0 2px; max-height:220px; overflow:auto; }
   .find-r { padding:5px 7px; border:1px solid var(--line); border-radius:7px; cursor:pointer; }
   .find-r:hover { border-color:var(--accent); }
@@ -703,7 +706,8 @@ function resolveName(id){
 // MUST come back as strings — every caller below calls .replace() on the result.
 async function fmtVal(o){ if(o==null) return '∅';
   if(o.node!==undefined){ const nm=await resolveName(o.node);
-    return `<span class="ins-node" onclick="recenter(${o.node})">→ ${nm?esc(nm):(t('detNode')+' '+o.node)}</span>`; }
+    const sec = nm ? ` <span class="ins-sec">#${o.node}</span>` : '';
+    return `<span class="ins-node" onclick="recenter(${o.node})">→ ${nm?esc(nm):(t('detNode')+' '+o.node)}</span>${sec}`; }
   if(o.text!==undefined) return esc(o.text); if(o.int!==undefined) return String(o.int); if(o.float!==undefined) return String(o.float); if(o.bool!==undefined) return ''+o.bool; return esc(JSON.stringify(o)); }
 window.hideDetail = ()=> { selected=-1; $('inspect').classList.add('hidden'); };
 // make the inspect panel floating + draggable by its header
@@ -744,8 +748,8 @@ async function showDetail(id, dep){
     const rows=(await Promise.all((r.props||[]).map(async p=>{
       const v = p.card==='one' ? await fmtVal(p.value) : (p.values.length ? (await Promise.all(p.values.map(fmtVal))).join(', ') : '∅');
       const src = p.source ? `<span class="ins-src" title="${t('provTip')}">${esc(p.source)}</span>` : '';
-      const conf = p.confidence ? `<span class="ins-src tier-${esc(p.confidence)}" title="${t('confTip')}">${esc(p.confidence)}</span>` : '';
-      return `<div class="ins-r"><span class="ins-k">${esc(p.predicate)}</span><span class="ins-v">${v}${src}${conf}</span></div>`; }))).join('');
+      const conf = p.confidence ? `<span class="ins-conf tier-${esc(p.confidence)}" title="${t('confTip')}">${esc(p.confidence)}</span>` : '';
+      return `<div class="ins-r"><span class="ins-k">${esc(p.predicate)}</span><span class="ins-vwrap"><span class="ins-v">${v}</span>${src}${conf}</span></div>`; }))).join('');
     ins.innerHTML = insHead(id, dep, nm)
       + `<div class="ins-meta">${r.type?`${t('detType')} <b>${esc(r.type)}</b>`:t('untyped')}${r.label!=null?` · ${t('detLabel')} ${r.label}`:''}</div>`
       + `<div class="ins-props">${rows||`<span class="ins-load">${t('noProps')}</span>`}</div>`
@@ -1165,7 +1169,7 @@ async function qSummary(op,r,req){
   if(op==='node'){ if(r.denied) return t('restrictedScope'); const np=(r.props||[]).length; return t('nodeSummary',{type:r.type||t('untyped'),n:np}); }
   if(op==='similar'){ const n=(r.ids||[]).length; return n? t('nSimilar',{n}) : t('noSimilar'); }
   if(op==='timeline'){ const n=(r.segments||[]).length; let s = n? t('nSegments',{n}) : t('noSegments');
-    if(r.confidence) s += ` · <span class="ins-src tier-${esc(r.confidence.tier)}" title="${t('confTip')}">${esc(r.confidence.tier)}</span>`;
+    if(r.confidence) s += ` · <span class="ins-conf tier-${esc(r.confidence.tier)}" title="${t('confTip')}">${esc(r.confidence.tier)}</span>`;
     return s; }
   if(op==='conformance'){ const n=(r.verdicts||[]).length; return n? t('nVerdicts',{n}) : t('noVerdicts'); }
   return '';
