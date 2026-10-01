@@ -9,6 +9,12 @@
 //!      equal, **distinct_from** the value it must NOT equal (a rule declares either or both);
 //!   3. reads the **actual** value and compares.
 //!
+//! Every hop but the last reaches a node; the last hop may read a literal (a name, an amount), so
+//! a path derives either a node or a literal. The actual is compared with it exactly, as the two
+//! stored values are keyed at ingest: equal text equals, and an int never equals a float (the same
+//! as an `equals` condition). A path hop on a many-cardinality predicate, or a literal-valued hop before the last, can
+//! never resolve, so [`path_errors`] reports it and the DB boundary rejects the rule.
+//!
 //! Every `NOT_APPLICABLE` verdict carries a [`NotApplicableReason`]: `out_of_scope` (the scope
 //! failed), `no_matching_case` (a banded rule matched no case), or `required_unresolved` (the actual
 //! is present but the required path resolved to no value, so equality cannot be judged). Missing
@@ -79,7 +85,7 @@
 
 use std::cmp::Ordering;
 
-use crate::catalog::Catalog;
+use crate::catalog::{Cardinality, Catalog, Range};
 use crate::fact::{FieldId, NodeId};
 use crate::fold::{ObjKey, Snapshot};
 use crate::query::{point_one, point_one_asof};
@@ -201,7 +207,8 @@ pub struct Case {
 
 /// One hop of a required derived path. A plain hop reads the current one-cardinality value
 /// (`point_one`); a hop carrying `as_of` names a predicate on the *original* subject whose integer
-/// value is the valid-time instant at which this hop is read (`point_one_asof`).
+/// value is the valid-time instant at which this hop is read (`point_one_asof`). Only the last hop
+/// of a path may name a literal-valued predicate.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hop {
     pub predicate: String,
@@ -311,8 +318,8 @@ impl NotApplicableReason {
     }
 }
 
-/// A per-subject verdict. `required`/`distinct`/`actual` are the derived and observed values
-/// (node-valued in the first cut); `as_of` is the valid-time instant an as-of hop was read at, if a
+/// A per-subject verdict. `required`/`distinct`/`actual` are the derived and observed values (a
+/// node, or a literal when the path's last hop reads one); `as_of` is the valid-time instant an as-of hop was read at, if a
 /// path used one (the required path's anchor wins when both do).
 /// `mismatch_kind` is `Some` only when `verdict == Mismatch`, and `reason` only when
 /// `verdict == NotApplicable`. `case` is the index of the matched [`Case`] for a banded rule (`None`
@@ -379,6 +386,39 @@ pub fn unresolved_names(rule: &Rule, cat: &Catalog) -> Vec<String> {
         .filter(|n| cat.field_id(n).is_none())
         .map(str::to_string)
         .collect()
+}
+
+/// The derived-path hops of `rule` that can never resolve, as human-readable errors — the caller
+/// rejects the rule with them before evaluating. Empty = every path is walkable. A hop must name a
+/// one-cardinality predicate (a many-cardinality value is never a single expected value), and
+/// every hop but the last must be node-valued (a literal has no outgoing predicates to walk on);
+/// the last hop may be literal-valued. Hops whose predicate is not declared yet are left to
+/// [`unresolved_names`].
+pub fn path_errors(rule: &Rule, cat: &Catalog) -> Vec<String> {
+    let mut paths: Vec<(String, &[Hop])> = vec![("required".into(), &rule.required)];
+    for (i, c) in rule.cases.iter().enumerate() {
+        paths.push((format!("cases[{i}].required"), &c.required));
+    }
+    paths.push(("distinct_from".into(), &rule.distinct_from));
+    let mut errors = Vec::new();
+    for (path, hops) in paths {
+        for (i, hop) in hops.iter().enumerate() {
+            let Some(def) = cat.field_id(&hop.predicate).and_then(|p| cat.predicate(p)) else {
+                continue;
+            };
+            let name = &hop.predicate;
+            if def.cardinality == Cardinality::Many {
+                errors.push(format!(
+                    "{path}.hops[{i}] '{name}' is many-cardinality; a derived path walks one-cardinality predicates only"
+                ));
+            } else if i + 1 < hops.len() && matches!(def.range, Range::Value(_)) {
+                errors.push(format!(
+                    "{path}.hops[{i}] '{name}' is literal-valued; only the last hop of a path may read a literal"
+                ));
+            }
+        }
+    }
+    errors
 }
 
 /// Evaluate `rule` over `snap`, one verdict per subject of the rule's type, sorted by subject id.
@@ -448,11 +488,11 @@ fn visible(snap: &Snapshot, node: NodeId, allowed_labels: u32) -> bool {
         .is_none_or(|&l| (allowed_labels >> l) & 1 == 1)
 }
 
-/// What a derived-path walk produced: the terminal node (if the path resolved), the anchor instant
+/// What a derived-path walk produced: the terminal value (if the path resolved), the anchor instant
 /// an as-of hop read at, and the (node, predicate) of the LAST hop when it was an as-of read — the
 /// site to history-probe for a stale-vs-wrong mismatch (`None` if the final hop was timeless).
 struct Walk {
-    end: Option<NodeId>,
+    end: Option<ObjKey>,
     as_of: Option<i64>,
     final_asof_hop: Option<(NodeId, FieldId)>,
 }
@@ -460,7 +500,9 @@ struct Walk {
 /// Walk a derived path of one-cardinality hops left→right from `s`, reporting every
 /// `(node, predicate)` read to `rec` — the read's support set, for incremental maintenance. A hop
 /// with an as-of anchor reads the valid-time value of that hop at the anchor's integer value on
-/// the ORIGINAL subject `s`. An empty path derives nothing (no expectation), same as a broken one.
+/// the ORIGINAL subject `s`. Every hop but the last must reach a node to continue from; the last
+/// hop's value is the path's value as read, a node or a literal. An empty path derives nothing (no
+/// expectation), same as a broken one.
 fn walk(
     snap: &Snapshot,
     cat: &Catalog,
@@ -468,25 +510,19 @@ fn walk(
     hops: &[Hop],
     rec: &mut impl FnMut(NodeId, FieldId),
 ) -> Walk {
-    if hops.is_empty() {
-        return Walk {
-            end: None,
-            as_of: None,
-            final_asof_hop: None,
-        };
-    }
     let mut cur = Some(s);
+    let mut end: Option<ObjKey> = None;
     let mut as_of: Option<i64> = None;
     let mut final_asof_hop: Option<(NodeId, FieldId)> = None;
-    for hop in hops {
+    for (i, hop) in hops.iter().enumerate() {
         let Some(node) = cur else { break };
         let pid = cat.field_id(&hop.predicate);
         final_asof_hop = None;
-        cur = match (&hop.as_of, pid) {
+        let value = match (&hop.as_of, pid) {
             (_, None) => None,
             (None, Some(p)) => {
                 rec(node, p);
-                node_of(point_one(snap, node, p))
+                point_one(snap, node, p)
             }
             (Some(anchor), Some(p)) => {
                 let t = cat.field_id(anchor).and_then(|ap| {
@@ -498,12 +534,17 @@ fn walk(
                 // recorded whether or not the anchor resolved: once it does, this is the read that
                 // answers (and the key ever_held probes for the stale sub-classification)
                 rec(node, p);
-                t.and_then(|at| node_of(point_one_asof(snap, node, p, at)))
+                t.and_then(|at| point_one_asof(snap, node, p, at))
             }
         };
+        if i + 1 == hops.len() {
+            end = value;
+        } else {
+            cur = node_of(value);
+        }
     }
     Walk {
-        end: cur,
+        end,
         as_of,
         final_asof_hop,
     }
@@ -559,8 +600,8 @@ pub(crate) fn judge_traced(
     // one reported.
     let req = walk(snap, cat, s, required_hops, rec);
     let dis = walk(snap, cat, s, &rule.distinct_from, rec);
-    let required = req.end.map(ObjKey::Node);
-    let distinct = dis.end.map(ObjKey::Node);
+    let required = req.end;
+    let distinct = dis.end;
     let as_of = req.as_of.or(dis.as_of);
 
     // actual = the observed value on S.
@@ -608,10 +649,8 @@ pub(crate) fn judge_traced(
             if !required_hops.is_empty() && required.as_ref() != Some(a) {
                 // classify: stale if the actual value once satisfied the final as-of hop at an
                 // earlier valid-time, otherwise wrong.
-                let kind = match (req.final_asof_hop, a) {
-                    (Some((node, p)), ObjKey::Node(an)) if ever_held(snap, node, p, *an) => {
-                        MismatchKind::Stale
-                    }
+                let kind = match req.final_asof_hop {
+                    Some((node, p)) if ever_held(snap, node, p, a) => MismatchKind::Stale,
                     _ => MismatchKind::Wrong,
                 };
                 (Outcome::Mismatch, Some(kind), None)
@@ -637,14 +676,15 @@ pub(crate) fn judge_traced(
     }
 }
 
-/// Whether `(node, predicate)` ever held the value `Node(value)` at any valid-time — a scan of the
-/// one-cardinality valid-time history. Used to tell a stale mismatch (once valid) from a wrong one.
-fn ever_held(snap: &Snapshot, node: NodeId, predicate: FieldId, value: NodeId) -> bool {
+/// Whether `(node, predicate)` ever held `value` (a node or a literal, compared exactly) at any
+/// valid-time — a scan of the one-cardinality valid-time history. Used to tell a stale mismatch
+/// (once valid) from a wrong one.
+fn ever_held(snap: &Snapshot, node: NodeId, predicate: FieldId, value: &ObjKey) -> bool {
     snap.one_history
         .get(&(node, predicate))
         .is_some_and(|rows| {
             rows.iter()
-                .any(|(_, obj, _, _)| matches!(obj, Some(ObjKey::Node(n)) if *n == value))
+                .any(|(_, obj, _, _)| obj.as_ref() == Some(value))
         })
 }
 
@@ -1590,5 +1630,219 @@ mod tests {
         assert!(missing.contains(&"no-such-anchor".to_string()));
         assert!(missing.contains(&"no-such-hop".to_string()));
         assert!(unresolved_names(&banded_rule(Some("approved-at"), false), &f.cat).is_empty());
+    }
+
+    // A literal-terminal graph: each Person subject reports to a manager whose `name` is the
+    // expected value of the subject's `manager-name`. Manager 50 is "Grace" throughout; manager 51
+    // is renamed "Ada" → "Lin" at valid-time 5000; manager 52 has no name. Managers carry an int
+    // `level` (50 = 3) for the exact-keying check against the subject's float `manager-level`.
+    fn literal_fixture() -> Fixture {
+        let mut cat = Catalog::new();
+        let person = cat.register_type("Person");
+        let d = RelProps::default();
+        let one = Cardinality::One;
+        let txt = Range::Value(ValueType::Text);
+        let reports_to = cat.register_predicate("reports-to", one, d, person, Range::Type(person));
+        let name = cat.register_predicate("name", one, d, person, txt);
+        let manager_name = cat.register_predicate("manager-name", one, d, person, txt);
+        let review_time =
+            cat.register_predicate("review-time", one, d, person, Range::Value(ValueType::Int));
+        let status = cat.register_predicate("employment-status", one, d, person, txt);
+        let level = cat.register_predicate("level", one, d, person, Range::Value(ValueType::Int));
+        let manager_level = cat.register_predicate(
+            "manager-level",
+            one,
+            d,
+            person,
+            Range::Value(ValueType::Float),
+        );
+        let mut ops: Vec<Op> = Vec::new();
+        let mut seq = 0u64;
+        for p in [50, 51, 52] {
+            set_type(&mut ops, &mut seq, p, person);
+        }
+        set_one(&mut ops, &mut seq, 50, name, text("Grace"), 0);
+        set_one(&mut ops, &mut seq, 50, level, ObjKey::Int(3), 0);
+        set_one(&mut ops, &mut seq, 51, name, text("Ada"), 0);
+        set_one(&mut ops, &mut seq, 51, name, text("Lin"), 5000);
+        // (subject, manager, review-time, manager-name, employment-status)
+        type Row<'a> = (NodeId, NodeId, Option<i64>, Option<&'a str>, &'a str);
+        let rows: [Row; 7] = [
+            (1, 50, Some(1000), Some("Grace"), "active"), // OK
+            (2, 51, Some(6000), Some("Ada"), "active"),   // stale: Ada before the rename
+            (3, 51, Some(1000), Some("Ada"), "active"),   // OK as-of before the rename
+            (4, 51, Some(6000), Some("Bob"), "active"),   // wrong: never the name
+            (5, 52, Some(1000), Some("Ivy"), "active"),   // the manager has no name
+            (6, 50, None, Some("Grace"), "active"),       // no review instant
+            (7, 50, Some(1000), None, "active"),          // ABSENT
+        ];
+        for (s, mgr, at, mname, st) in rows {
+            set_type(&mut ops, &mut seq, s, person);
+            set_one(&mut ops, &mut seq, s, reports_to, ObjKey::Node(mgr), 0);
+            set_one(&mut ops, &mut seq, s, status, text(st), 0);
+            if let Some(t) = at {
+                set_one(&mut ops, &mut seq, s, review_time, ObjKey::Int(t), 0);
+            }
+            if let Some(m) = mname {
+                set_one(&mut ops, &mut seq, s, manager_name, text(m), 0);
+            }
+        }
+        set_one(&mut ops, &mut seq, 1, manager_level, float(3.0), 0);
+        Fixture {
+            snap: fold(&ops).observe(),
+            cat,
+        }
+    }
+
+    fn literal_rule(as_of: Option<&str>) -> Rule {
+        Rule {
+            subject_type: "Person".into(),
+            scope: None,
+            required: vec![
+                Hop {
+                    predicate: "reports-to".into(),
+                    as_of: None,
+                },
+                Hop {
+                    predicate: "name".into(),
+                    as_of: as_of.map(str::to_string),
+                },
+            ],
+            cases: Vec::new(),
+            distinct_from: Vec::new(),
+            actual: "manager-name".into(),
+            absent_when: Some(Cond::equals("employment-status", text("active"))),
+        }
+    }
+
+    #[test]
+    fn a_literal_terminal_is_compared_by_value_as_of_the_anchor() {
+        let f = literal_fixture();
+        let vs = evaluate(
+            &f.snap,
+            &f.cat,
+            &literal_rule(Some("review-time")),
+            u32::MAX,
+        );
+        let by = verdicts_by_subject(&vs);
+        let row = |s: NodeId| {
+            let v = by[&s];
+            (v.verdict, v.mismatch_kind, v.reason, v.required.clone())
+        };
+        let unresolved = Some(NotApplicableReason::RequiredUnresolved);
+        assert_eq!(row(1), (Outcome::Ok, None, None, Some(text("Grace"))));
+        assert_eq!(by[&1].actual, Some(text("Grace")));
+        assert_eq!(by[&1].as_of, Some(1000));
+        // the manager was renamed before the review: "Ada" held once, so the mismatch is stale
+        assert_eq!(
+            row(2),
+            (
+                Outcome::Mismatch,
+                Some(MismatchKind::Stale),
+                None,
+                Some(text("Lin"))
+            )
+        );
+        assert_eq!(by[&2].as_of, Some(6000));
+        assert_eq!(row(3), (Outcome::Ok, None, None, Some(text("Ada"))));
+        assert_eq!(
+            row(4),
+            (
+                Outcome::Mismatch,
+                Some(MismatchKind::Wrong),
+                None,
+                Some(text("Lin"))
+            )
+        );
+        // a missing literal or a missing anchor leaves the expected value unknown
+        assert_eq!(row(5), (Outcome::NotApplicable, None, unresolved, None));
+        assert_eq!(by[&5].actual, Some(text("Ivy")));
+        assert_eq!(row(6), (Outcome::NotApplicable, None, unresolved, None));
+        assert_eq!(row(7), (Outcome::Absent, None, None, Some(text("Grace"))));
+        // managers have no reports-to, no actual and no status: not expected, so OK
+        assert_eq!(row(50), (Outcome::Ok, None, None, None));
+    }
+
+    #[test]
+    fn a_timeless_literal_terminal_reads_the_current_value() {
+        let f = literal_fixture();
+        let vs = evaluate(&f.snap, &f.cat, &literal_rule(None), u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        // the current name of 51 is "Lin"; a timeless final hop mismatches as wrong, never stale
+        for s in [2, 3] {
+            assert_eq!(by[&s].verdict, Outcome::Mismatch);
+            assert_eq!(by[&s].mismatch_kind, Some(MismatchKind::Wrong));
+            assert_eq!(by[&s].required, Some(text("Lin")));
+            assert_eq!(by[&s].as_of, None);
+        }
+        // no anchor is needed, so subject 6 is judged
+        assert_eq!(by[&6].verdict, Outcome::Ok);
+    }
+
+    #[test]
+    fn a_literal_terminal_uses_the_ingest_keying() {
+        let f = literal_fixture();
+        let mut r = literal_rule(None);
+        r.required[1].predicate = "level".into();
+        r.actual = "manager-level".into();
+        r.absent_when = None;
+        let vs = evaluate_subjects(&f.snap, &f.cat, &r, u32::MAX, &[1]);
+        // an int 3 and a float 3.0 are different stored values, like an `equals` condition
+        assert_eq!(vs[0].verdict, Outcome::Mismatch);
+        assert_eq!(vs[0].required, Some(ObjKey::Int(3)));
+        assert_eq!(vs[0].actual, Some(float(3.0)));
+        // and a literal distinct_from terminal collides by value
+        let mut r = literal_rule(None);
+        r.required.clear();
+        r.distinct_from = hops(&["reports-to", "name"]);
+        let vs = evaluate_subjects(&f.snap, &f.cat, &r, u32::MAX, &[1, 2]);
+        assert_eq!(vs[0].verdict, Outcome::Mismatch);
+        assert_eq!(vs[0].distinct, Some(text("Grace")));
+        assert_eq!(vs[1].verdict, Outcome::Ok);
+    }
+
+    #[test]
+    fn unwalkable_paths_are_reported() {
+        let mut f = literal_fixture();
+        assert!(path_errors(&literal_rule(Some("review-time")), &f.cat).is_empty());
+        let person = f.cat.field_id("Person").unwrap();
+        f.cat.register_predicate(
+            "tags",
+            Cardinality::Many,
+            RelProps::default(),
+            person,
+            Range::Value(ValueType::Text),
+        );
+        // a literal before the last hop
+        let mut r = literal_rule(None);
+        r.required = hops(&["reports-to", "name", "reports-to"]);
+        assert_eq!(
+            path_errors(&r, &f.cat),
+            vec![
+                "required.hops[1] 'name' is literal-valued; only the last hop of a path may read a literal"
+                    .to_string()
+            ]
+        );
+        // a many-cardinality hop, in a case and in distinct_from
+        let mut r = literal_rule(None);
+        r.required.clear();
+        r.cases = vec![Case {
+            when: None,
+            required: hops(&["reports-to", "tags"]),
+        }];
+        r.distinct_from = hops(&["tags"]);
+        assert_eq!(
+            path_errors(&r, &f.cat),
+            vec![
+                "cases[0].required.hops[1] 'tags' is many-cardinality; a derived path walks one-cardinality predicates only"
+                    .to_string(),
+                "distinct_from.hops[0] 'tags' is many-cardinality; a derived path walks one-cardinality predicates only"
+                    .to_string(),
+            ]
+        );
+        // an undeclared hop is left to unresolved_names
+        let mut r = literal_rule(None);
+        r.required = hops(&["no-such", "name"]);
+        assert!(path_errors(&r, &f.cat).is_empty());
     }
 }

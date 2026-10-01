@@ -522,6 +522,143 @@ mod tests {
         }
     }
 
+    #[test]
+    fn literal_terminal_maintenance_equals_full_eval_over_random_stream() {
+        use crate::catalog::{Cardinality, Range, RelProps, ValueType};
+        use conformance::{Cond, Hop, MismatchKind, NotApplicableReason, Outcome};
+
+        // A path ending in a literal: the subject's `manager-name` must equal the `name` of whoever
+        // it reports to, read as-of the subject's `review-time` (and, in a second rule, read
+        // currently). Managers are renamed with valid-time, names are closed, reporting lines and
+        // anchors move, so verdicts cross OK / stale / wrong / required_unresolved.
+        let mut cat = Catalog::new();
+        let person = cat.register_type("Person");
+        let d = RelProps::default();
+        let one = Cardinality::One;
+        let txt = Range::Value(ValueType::Text);
+        let reports_to = cat.register_predicate("reports-to", one, d, person, Range::Type(person));
+        let name = cat.register_predicate("name", one, d, person, txt);
+        let manager_name = cat.register_predicate("manager-name", one, d, person, txt);
+        let review_time =
+            cat.register_predicate("review-time", one, d, person, Range::Value(ValueType::Int));
+        let status = cat.register_predicate("employment-status", one, d, person, txt);
+        let text = |s: &str| ObjKey::Text(s.to_string());
+        let rule = |as_of: Option<&str>| Rule {
+            subject_type: "Person".into(),
+            scope: None,
+            required: vec![
+                Hop {
+                    predicate: "reports-to".into(),
+                    as_of: None,
+                },
+                Hop {
+                    predicate: "name".into(),
+                    as_of: as_of.map(str::to_string),
+                },
+            ],
+            cases: Vec::new(),
+            distinct_from: Vec::new(),
+            actual: "manager-name".into(),
+            absent_when: Some(Cond::equals("employment-status", text("active"))),
+        };
+        let rules = [rule(Some("review-time")), rule(None)];
+        let people: Vec<NodeId> = (1..=12).collect();
+        let names = ["Ada", "Grace", "Lin"];
+
+        let mut eng = Engine::new(1 << 20);
+        for &p in &people {
+            eng.write(
+                0,
+                WriteKind::SetNodeType {
+                    node: p,
+                    type_id: person,
+                },
+            )
+            .unwrap();
+        }
+        eng.materialize();
+        let snap = eng.snapshot();
+        let mut ms: Vec<MaintainedConformance> = rules
+            .iter()
+            .map(|r| MaintainedConformance::new(r.clone(), &snap, &cat))
+            .collect();
+        let set_one = |s: NodeId, p: FieldId, o: ObjKey, vf: i64| WriteKind::SetOne {
+            subject: s,
+            predicate: p,
+            object: o,
+            valid_from: vf,
+            valid_to: None,
+        };
+        let mut rng = 0x1173_7a1e_0bad_f00du64;
+        let (mut stale, mut resolved, mut unresolved_again) = (0usize, 0usize, 0usize);
+        for step in 0..2500u64 {
+            let pick = |r: u64, xs: &[u64]| xs[(r % xs.len() as u64) as usize];
+            let s = pick(splitmix(&mut rng), &people);
+            let m = pick(splitmix(&mut rng), &people);
+            let nm = text(names[(splitmix(&mut rng) % 3) as usize]);
+            let vf = (splitmix(&mut rng) % 10_000) as i64;
+            let kind = match splitmix(&mut rng) % 8 {
+                0 => set_one(s, reports_to, ObjKey::Node(m), 0),
+                1 | 2 => set_one(m, name, nm, vf),
+                3 => set_one(s, manager_name, nm, 0),
+                4 => set_one(s, review_time, ObjKey::Int(vf), 0),
+                5 => WriteKind::CloseOne {
+                    subject: m,
+                    predicate: name,
+                    valid_from: vf,
+                },
+                6 => set_one(
+                    s,
+                    status,
+                    text(if splitmix(&mut rng).is_multiple_of(2) {
+                        "active"
+                    } else {
+                        "left"
+                    }),
+                    0,
+                ),
+                _ => WriteKind::CloseOne {
+                    subject: s,
+                    predicate: manager_name,
+                    valid_from: 0,
+                },
+            };
+            eng.write(0, kind).unwrap();
+            let (keys, nodes) = eng.materialize_tracked_with_nodes();
+            let snap = eng.snapshot();
+            for (m, rule) in ms.iter_mut().zip(&rules) {
+                for d in m.apply(&snap, &cat, &keys, &nodes) {
+                    let unresolved = |v: &Option<Verdict>| {
+                        v.as_ref().and_then(|v| v.reason)
+                            == Some(NotApplicableReason::RequiredUnresolved)
+                    };
+                    if unresolved(&d.old) && !unresolved(&d.new) {
+                        resolved += 1;
+                    }
+                    if !unresolved(&d.old) && unresolved(&d.new) {
+                        unresolved_again += 1;
+                    }
+                    if d.new.as_ref().is_some_and(|v| {
+                        v.verdict == Outcome::Mismatch
+                            && v.mismatch_kind == Some(MismatchKind::Stale)
+                    }) {
+                        stale += 1;
+                    }
+                }
+                assert_eq!(
+                    m.verdicts(),
+                    &full_eval(&snap, &cat, rule),
+                    "diverged at step {step}"
+                );
+            }
+        }
+        // the stream reached stale literal mismatches and crossed the unresolved boundary both ways
+        assert!(
+            stale > 0 && resolved > 0 && unresolved_again > 0,
+            "{stale} / {resolved} / {unresolved_again}"
+        );
+    }
+
     /// An amount-banded approval graph: team 100 (manager 10) → division 101 (manager 11) →
     /// company 102 (manager 12); requester 20 in team 100; requests `requests` typed up front.
     struct Banded {
