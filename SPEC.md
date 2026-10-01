@@ -112,6 +112,10 @@ An `object` (and any `props` / `equals` value) is a single-key object naming its
 {"bool": true}
 ```
 
+An `int` is a 64-bit signed integer and a `float` is an IEEE 754 double (`f64`): a float is stored,
+replayed, and compared with the full 64 bits, so `16777217.0` and `1234567.89` read back exactly as
+ingested. An int never equals a float, but the two compare numerically under a range test.
+
 ### Named rules
 
 A conformance rule (§3) can be stored by name for reuse:

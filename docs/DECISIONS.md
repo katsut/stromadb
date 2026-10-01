@@ -518,6 +518,30 @@
   unresolved approvals to `OK` and `wrong`, and a later correction of the same interval to another
   manager turns the `OK` into `stale`; the approval-shaped random stream asserts that it backfills
   an unresolved as-of read into a judged verdict, with the full-evaluate oracle after every event.
+### D34. Float literals are keyed and compared as `f64` end to end; no on-disk format change
+- **Context:** the JSON ingest path narrowed every `float` to `f32` before taking its bits as the
+  fold key, while the fold key, the WAL and snapshot codec, and the range comparison already
+  carried 64 bits. So an amount above 2^24 (16,777,216) or one with cents was rounded on the way
+  in: `16777217` stored as `16777216`, `1234567.89` as `1234567.875`, and a banded rule over such
+  amounts could pick the wrong band. Range bounds went through the same keying, so a bound rounded
+  the same way and the error was invisible to an equality test but not to a threshold.
+- **Decision:** a `float` is keyed by the bits of the `f64` the JSON number parses to, in every
+  form (`{"float": x}`, a bare edge-property number, an `equals` value, a range bound). The JSON
+  parser runs with exact float parsing (`serde_json/float_roundtrip`), since the default
+  best-effort parser can land one ulp off for long mantissas, which would break the bit-exact
+  read-back the property test asserts. Embeddings stay `f32`; ANN is unaffected.
+- **Why no format bump:** the WAL and snapshot records already hold an 8-byte `f64` bit pattern
+  for a float (tag `2`, `u64`). A record written before this change is a valid `f64` that happens to
+  be `f32`-representable, so the existing reader reads it unchanged and no version or migration is
+  needed. The stored history keeps whatever value was keyed at the time: a float ingested before
+  the change stays at its rounded value until the fact is written again with the exact one. A
+  deployment that needs the exact history re-ingests those facts from the authoritative input
+  (D4), which the fold then treats as ordinary later writes.
+- **Evidence:** round trip of `16777217.0` and `1234567.89` through a reopen (WAL replay) and a
+  compaction snapshot, bit-exact; inclusive and exclusive range bounds at those values select
+  exactly the right subjects, one cent apart in both directions; a property test over random
+  finite `f64` (normal, subnormal, zero, and cent-valued amounts) reads back bit-exact after replay
+  and is selected by a one-point `between` band.
 
 ## Core SLOs (the "unchanging core" bar) — measured
 
