@@ -699,14 +699,38 @@ fn serve_namespaces() {
         assert!(body.contains("Draw neighbourhood"), "namespace console");
         let (st, _, body) = http(&addr, "GET", "/namespaces", "", Some(&tok));
         assert_eq!(st, 200);
-        assert_eq!(body, "{\"namespaces\":[\"default\",\"a\"]}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let names: Vec<&str> = v["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["default", "a"]);
+        assert_eq!(
+            v["namespaces"][0]["nodes"], 0,
+            "default is untouched: {body}"
+        );
+        assert_eq!(v["namespaces"][1]["nodes"], 2, "a has 2 nodes: {body}");
+        assert_eq!(
+            v["namespaces"][1]["facts"], 3,
+            "a has 3 durable ops: {body}"
+        );
     }
-    // restart on the same directory: the namespace is still there
+    // restart on the same directory: the namespace is still there, counts survive
     let _guard = spawn();
     wait_up(&addr);
     let tok = login();
     let (_, _, body) = http(&addr, "GET", "/namespaces", "", Some(&tok));
-    assert_eq!(body, "{\"namespaces\":[\"default\",\"a\"]}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<&str> = v["namespaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["default", "a"]);
+    assert_eq!(v["namespaces"][1]["nodes"], 2, "a after restart: {body}");
     let (_, _, body) = http(&addr, "POST", "/ns/a/query", expand, Some(&tok));
     assert!(body.contains("[2]"), "a after restart: {body}");
     drop(_guard);
