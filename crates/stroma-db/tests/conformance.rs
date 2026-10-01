@@ -876,7 +876,13 @@ fn conformance_mcp_defaults_are_bounded() {
         );
     }
     let conf_desc = tool["description"].as_str().unwrap();
-    for term in ["not_subject_type", "unknown_subject", "exactly one row"] {
+    for term in [
+        "not_subject_type",
+        "unknown_subject",
+        "exactly one row",
+        "last hop may read a literal",
+        "many-cardinality hop",
+    ] {
         assert!(conf_desc.contains(term), "conformance lacks {term}");
     }
     // the `rule` read-back tool explains every construct a declaration may contain
@@ -895,6 +901,7 @@ fn conformance_mcp_defaults_are_bounded() {
         "`between",
         "own `as_of`",
         "unsatisfied",
+        "last may read a literal",
     ] {
         assert!(desc.contains(term), "rule description lacks {term}: {desc}");
     }
@@ -1104,6 +1111,149 @@ fn banded_rule_over_amount_ranges() {
     assert_eq!(changes[0]["new"]["verdict"], json!("MISMATCH"));
     assert_eq!(changes[0]["new"]["case"], json!(1));
     assert_eq!(changes[0]["new"]["required"], json!({"node": 11}));
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+// A path whose last hop reads a literal: each person's `manager-name` must equal the `name` of
+// whoever they report to, as-of their `review-time`. Manager 51 is renamed Ada → Lin at 5000.
+const LITERAL_FIXTURE: &str = r#"
+{"type_def":{"name":"Person"}}
+{"pred_def":{"name":"name","cardinality":"one","domain":"Person","range_value":"text"}}
+{"pred_def":{"name":"reports-to","cardinality":"one","domain":"Person","range":"Person"}}
+{"pred_def":{"name":"manager-name","cardinality":"one","domain":"Person","range_value":"text"}}
+{"pred_def":{"name":"review-time","cardinality":"one","domain":"Person","range_value":"int"}}
+{"pred_def":{"name":"employment-status","cardinality":"one","domain":"Person","range_value":"text"}}
+{"pred_def":{"name":"tags","cardinality":"many","domain":"Person","range_value":"text"}}
+{"node":{"id":50,"type":"Person"}}
+{"node":{"id":51,"type":"Person"}}
+{"node":{"id":52,"type":"Person"}}
+{"node":{"id":53,"type":"Person"}}
+{"node":{"id":1,"type":"Person"}}
+{"node":{"id":2,"type":"Person"}}
+{"node":{"id":3,"type":"Person"}}
+{"node":{"id":5,"type":"Person"}}
+{"fact":{"subject":50,"predicate":"name","object":{"text":"Grace"}}}
+{"fact":{"subject":51,"predicate":"name","object":{"text":"Ada"}}}
+{"fact":{"subject":51,"predicate":"name","object":{"text":"Lin"},"valid_from":5000}}
+{"fact":{"subject":52,"predicate":"name","object":{"text":"Ivy"}}}
+{"fact":{"subject":1,"predicate":"reports-to","object":{"node":50}}}
+{"fact":{"subject":1,"predicate":"review-time","object":{"int":1000}}}
+{"fact":{"subject":1,"predicate":"manager-name","object":{"text":"Grace"}}}
+{"fact":{"subject":1,"predicate":"employment-status","object":{"text":"active"}}}
+{"fact":{"subject":2,"predicate":"reports-to","object":{"node":51}}}
+{"fact":{"subject":2,"predicate":"review-time","object":{"int":6000}}}
+{"fact":{"subject":2,"predicate":"manager-name","object":{"text":"Ada"}}}
+{"fact":{"subject":2,"predicate":"employment-status","object":{"text":"active"}}}
+{"fact":{"subject":3,"predicate":"reports-to","object":{"node":53}}}
+{"fact":{"subject":3,"predicate":"review-time","object":{"int":1000}}}
+{"fact":{"subject":3,"predicate":"manager-name","object":{"text":"Ivy"}}}
+{"fact":{"subject":3,"predicate":"employment-status","object":{"text":"active"}}}
+{"fact":{"subject":5,"predicate":"reports-to","object":{"node":52}}}
+{"fact":{"subject":5,"predicate":"review-time","object":{"int":1000}}}
+{"fact":{"subject":5,"predicate":"employment-status","object":{"text":"active"}}}
+"#;
+
+fn literal_rule_body() -> serde_json::Value {
+    json!({
+        "subject_type": "Person",
+        "required": { "hops": [
+            { "predicate": "reports-to" },
+            { "predicate": "name", "as_of": "review-time" }
+        ] },
+        "actual": "manager-name",
+        "absent_when": { "predicate": "employment-status", "equals": {"text": "active"} }
+    })
+}
+
+#[test]
+fn literal_terminal_via_json_rule() {
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "stroma_conformance_literal_test_{}",
+            std::process::id()
+        ))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(LITERAL_FIXTURE).unwrap();
+    // the as-of literal read must survive the WAL replay
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+
+    let req = json!({"op": "conformance", "rule": literal_rule_body(), "subjects": [1, 2, 3, 5]});
+    let r = db.query(&req).unwrap();
+    let rows = r["verdicts"].as_array().unwrap();
+    let row = |s: u64| rows.iter().find(|v| v["subject"] == s).unwrap();
+    assert_eq!(row(1)["verdict"], json!("OK"));
+    assert_eq!(row(1)["required"], json!({"text": "Grace"}));
+    assert_eq!(row(1)["actual"], json!({"text": "Grace"}));
+    assert_eq!(row(1)["as_of"], json!(1000));
+    // reviewed after the rename: the expected name is Lin, and Ada held once → stale
+    assert_eq!(row(2)["verdict"], json!("MISMATCH"));
+    assert_eq!(row(2)["kind"], json!("stale"));
+    assert_eq!(row(2)["required"], json!({"text": "Lin"}));
+    // the manager has no name: the expected value is unknown, not a violation
+    assert_eq!(row(3)["verdict"], json!("NOT_APPLICABLE"));
+    assert_eq!(row(3)["reason"], json!("required_unresolved"));
+    assert_eq!(row(3)["required"], json!(null));
+    assert_eq!(row(5)["verdict"], json!("ABSENT"));
+    assert_eq!(row(5)["required"], json!({"text": "Ivy"}));
+
+    // stored and watched: naming the manager re-judges exactly the subject that stopped there
+    let def = json!({"rule_def": {"name": "manager-name-current", "rule": literal_rule_body()}});
+    db.ingest_str(&def.to_string()).unwrap();
+    let w = db
+        .query(&json!({"op": "conformance_watch", "rule_name": "manager-name-current"}))
+        .unwrap();
+    let cursor = w["cursor"].as_u64().unwrap();
+    db.ingest_str(r#"{"fact":{"subject":53,"predicate":"name","object":{"text":"Ivy"}}}"#)
+        .unwrap();
+    let c = db
+        .query(&json!({"op": "conformance_changes", "rule_name": "manager-name-current", "cursor": cursor}))
+        .unwrap();
+    let changes = c["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0]["subject"], json!(3));
+    assert_eq!(changes[0]["old"]["reason"], json!("required_unresolved"));
+    assert_eq!(changes[0]["new"]["verdict"], json!("OK"));
+    assert_eq!(changes[0]["new"]["required"], json!({"text": "Ivy"}));
+    let w = db
+        .query(&json!({"op": "conformance_watch", "rule_name": "manager-name-current"}))
+        .unwrap();
+    assert_eq!(
+        verdict_map(&w),
+        verdict_map(
+            &db.query(&json!({"op": "conformance", "rule": literal_rule_body()}))
+                .unwrap()
+        )
+    );
+
+    // paths that can never resolve are refused when evaluated or watched, inline or stored
+    let mut through_literal = literal_rule_body();
+    through_literal["required"] = json!({"hops": [{"predicate": "reports-to"}, {"predicate": "name"}, {"predicate": "reports-to"}]});
+    let err = db
+        .query(&json!({"op": "conformance", "rule": through_literal}))
+        .unwrap_err();
+    assert!(
+        err.contains("required.hops[1] 'name' is literal-valued"),
+        "unexpected error: {err}"
+    );
+    let mut many = literal_rule_body();
+    many["required"] = json!({"hops": [{"predicate": "reports-to"}, {"predicate": "tags"}]});
+    let def = json!({"rule_def": {"name": "by-tags", "rule": many}});
+    // like name resolution, the check runs at evaluation: a rule may precede its predicates
+    db.ingest_str(&def.to_string()).unwrap();
+    for op in ["conformance", "conformance_watch"] {
+        let err = db
+            .query(&json!({"op": op, "rule_name": "by-tags"}))
+            .unwrap_err();
+        assert!(
+            err.contains("required.hops[1] 'tags' is many-cardinality"),
+            "{op}: unexpected error: {err}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }

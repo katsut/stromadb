@@ -536,6 +536,7 @@ impl Db {
                 missing.join(", ")
             ));
         }
+        check_rule_paths(&rule, &w.schema.cat)?;
         let head = w.eng.durable_head();
         if !w.live_rules.contains_key(name) {
             let snap = w.eng.snapshot_arc();
@@ -2326,6 +2327,7 @@ impl ReadState {
                 missing.join(", ")
             ));
         }
+        check_rule_paths(&rule, &self.schema.cat)?;
         let labels = req["allowed_labels"]
             .as_u64()
             .map(|m| m as u32)
@@ -2780,6 +2782,20 @@ fn value_key(v: &Value) -> DbResult<ObjKey> {
             "edge-property value must be a literal: a number/string/bool, or {int|float|text|bool}"
                 .into(),
         ),
+    }
+}
+
+/// Refuse a rule whose derived paths can never resolve against the declared predicates (a
+/// many-cardinality hop, or a literal-valued hop before the last; see [`conformance::path_errors`]).
+fn check_rule_paths(rule: &conformance::Rule, cat: &Catalog) -> DbResult<()> {
+    let errors = conformance::path_errors(rule, cat);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "conformance rule path cannot resolve: {}",
+            errors.join("; ")
+        ))
     }
 }
 
