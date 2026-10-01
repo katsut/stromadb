@@ -160,6 +160,12 @@ Read back a stored rule's declaration (§2, named rules).
 An unknown `rule_name` is an error. Rules are schema-level, so no label mask applies (as with
 `schema`).
 
+The returned declaration uses the conformance rule shape, so it reads as described under
+`conformance`. It may contain `required` and `distinct_from` hop paths, where a hop's `as_of`
+names the anchor predicate on the subject. A banded rule has ordered first-match `cases` instead of
+`required`. Conditions test `equals` or a numeric range (`gt`/`gte`/`lt`/`lte`, `between`) and may
+carry their own `as_of` anchor.
+
 ### `point`
 
 Read the value(s) of a `(subject, predicate)`.
