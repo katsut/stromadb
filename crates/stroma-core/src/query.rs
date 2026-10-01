@@ -519,7 +519,7 @@ fn expand_rel_at(
     // Reverse adjacency is only needed for the undirected (symmetric) and inverse cases; build each
     // once (a single restricted scan) and reuse it across every hop.
     let rev_p = props.symmetric.then(|| rev_of(predicate));
-    let rev_inv = props.inverse.map(&rev_of);
+    let rev_inv = props.inverse.map(rev_of);
     // One property-aware hop from `node`: forward P edges, plus (symmetric) reverse P edges, plus
     // (inverse) the reverse of the named predicate's edges.
     let step = |node: NodeId| -> BTreeSet<NodeId> {
