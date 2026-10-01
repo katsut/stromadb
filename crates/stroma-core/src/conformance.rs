@@ -277,6 +277,22 @@ pub struct Verdict {
     pub case: Option<usize>,
 }
 
+impl Verdict {
+    /// A `NOT_APPLICABLE` verdict for `subject` carrying no derived or observed values.
+    pub fn not_applicable(subject: NodeId) -> Self {
+        Verdict {
+            subject,
+            verdict: Outcome::NotApplicable,
+            mismatch_kind: None,
+            required: None,
+            distinct: None,
+            actual: None,
+            as_of: None,
+            case: None,
+        }
+    }
+}
+
 /// The names a rule references that the catalog does not know — the caller resolves this to a clear
 /// error before evaluating. Empty = every name resolves.
 pub fn unresolved_names(rule: &Rule, cat: &Catalog) -> Vec<String> {
@@ -340,31 +356,71 @@ pub fn evaluate(
         .collect()
 }
 
-/// [`evaluate`] restricted to the given `subjects`: one verdict per listed node that is a subject
-/// of the rule's type and visible to `principal_labels`, sorted by id and deduplicated. A listed
-/// node of another type, an unknown id, and a masked node are all simply absent from the result,
-/// so the answer does not reveal which of the three it was. Cost is O(listed), not O(subjects).
+/// Why a requested subject was answered `NOT_APPLICABLE` without being judged by the rule. Only
+/// [`evaluate_subjects`] produces these; a full evaluation and incremental maintenance never do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The id names a visible node whose type is not the rule's `subject_type`.
+    NotSubjectType,
+    /// The id names no typed node, or one hidden from the principal by its label. The two are
+    /// deliberately indistinguishable, so the answer does not reveal that a hidden node exists.
+    UnknownSubject,
+}
+
+impl SkipReason {
+    /// The stable wire name of this reason.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::NotSubjectType => "not_subject_type",
+            SkipReason::UnknownSubject => "unknown_subject",
+        }
+    }
+}
+
+/// One row of [`evaluate_subjects`]: the verdict for a requested id, with `reason` set when the
+/// id was not judged by the rule (the verdict is then `NOT_APPLICABLE` with no values).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestedVerdict {
+    pub row: Verdict,
+    pub reason: Option<SkipReason>,
+}
+
+/// [`evaluate`] restricted to the given `subjects`: exactly one row per distinct listed id, sorted
+/// by id. A visible subject of the rule's type is judged exactly as [`evaluate`] judges it (no
+/// `reason`). Any other id answers `NOT_APPLICABLE` with a [`SkipReason`]: `NotSubjectType` for a
+/// visible node of another type, `UnknownSubject` for an id with no typed node or a node hidden
+/// by `principal_labels` (a hidden node is reported as unknown whatever its type, so its existence
+/// is not revealed). Cost is O(listed), not O(subjects).
 pub fn evaluate_subjects(
     snap: &Snapshot,
     cat: &Catalog,
     rule: &Rule,
     principal_labels: u32,
     subjects: &[NodeId],
-) -> Vec<Verdict> {
-    let Some(subject_ty) = cat.field_id(&rule.subject_type) else {
-        return Vec::new();
-    };
-    let mut picked: Vec<NodeId> = subjects
-        .iter()
-        .copied()
-        .filter(|n| snap.node_types.get(n) == Some(&subject_ty))
-        .filter(|&n| visible(snap, n, principal_labels))
-        .collect();
+) -> Vec<RequestedVerdict> {
+    let subject_ty = cat.field_id(&rule.subject_type);
+    let mut picked: Vec<NodeId> = subjects.to_vec();
     picked.sort_unstable();
     picked.dedup();
     picked
         .into_iter()
-        .map(|s| judge(snap, cat, rule, s))
+        .map(|s| {
+            let skipped = |reason| RequestedVerdict {
+                row: Verdict::not_applicable(s),
+                reason: Some(reason),
+            };
+            match snap.node_types.get(&s) {
+                Some(_) if !visible(snap, s, principal_labels) => {
+                    skipped(SkipReason::UnknownSubject)
+                }
+                Some(&ty) if Some(ty) == subject_ty => RequestedVerdict {
+                    row: judge(snap, cat, rule, s),
+                    reason: None,
+                },
+                Some(_) => skipped(SkipReason::NotSubjectType),
+                None => skipped(SkipReason::UnknownSubject),
+            }
+        })
         .collect()
 }
 
@@ -453,16 +509,7 @@ pub(crate) fn judge_traced(
     s: NodeId,
     rec: &mut impl FnMut(NodeId, FieldId),
 ) -> Verdict {
-    let not_applicable = Verdict {
-        subject: s,
-        verdict: Outcome::NotApplicable,
-        mismatch_kind: None,
-        required: None,
-        distinct: None,
-        actual: None,
-        as_of: None,
-        case: None,
-    };
+    let not_applicable = Verdict::not_applicable(s);
     // scope: out-of-scope subjects are not judged.
     if let Some(scope) = &rule.scope
         && !cond_holds_traced(snap, cat, s, scope, rec)
@@ -860,19 +907,41 @@ mod tests {
         let full = evaluate(&f.snap, &f.cat, &rule(), u32::MAX);
         // unsorted, duplicated, a non-subject (person 10) and an unknown id (999)
         let some = evaluate_subjects(&f.snap, &f.cat, &rule(), u32::MAX, &[6, 3, 6, 10, 999]);
+        // one row per distinct id, sorted; judged rows equal the full evaluation's
+        assert_eq!(
+            some.iter().map(|r| r.row.subject).collect::<Vec<_>>(),
+            vec![3, 6, 10, 999]
+        );
+        let judged: Vec<Verdict> = some
+            .iter()
+            .filter(|r| r.reason.is_none())
+            .map(|r| r.row.clone())
+            .collect();
         let expect: Vec<Verdict> = full
             .iter()
             .filter(|v| v.subject == 3 || v.subject == 6)
             .cloned()
             .collect();
-        assert_eq!(some, expect);
-        // the label mask applies as in evaluate
+        assert_eq!(judged, expect);
+        // a node of another type and an unknown id answer NOT_APPLICABLE with their reason
+        assert_eq!(some[2].row, Verdict::not_applicable(10));
+        assert_eq!(some[2].reason, Some(SkipReason::NotSubjectType));
+        assert_eq!(some[3].row, Verdict::not_applicable(999));
+        assert_eq!(some[3].reason, Some(SkipReason::UnknownSubject));
+        // a hidden node reads as unknown, whether or not it is of the subject type
         std::sync::Arc::make_mut(&mut f.snap.node_labels).insert(3, 1);
-        let masked = evaluate_subjects(&f.snap, &f.cat, &rule(), 0b1, &[3, 6]);
+        std::sync::Arc::make_mut(&mut f.snap.node_labels).insert(10, 1);
+        let masked = evaluate_subjects(&f.snap, &f.cat, &rule(), 0b1, &[3, 6, 10]);
+        let reasons: Vec<_> = masked.iter().map(|r| (r.row.subject, r.reason)).collect();
         assert_eq!(
-            masked.iter().map(|v| v.subject).collect::<Vec<_>>(),
-            vec![6]
+            reasons,
+            vec![
+                (3, Some(SkipReason::UnknownSubject)),
+                (6, None),
+                (10, Some(SkipReason::UnknownSubject)),
+            ]
         );
+        assert_eq!(masked[0].row, Verdict::not_applicable(3));
     }
 
     #[test]

@@ -567,7 +567,7 @@ fn subjects_of(r: &serde_json::Value) -> Vec<u64> {
 }
 
 // Subject-scoped evaluation: only the listed subjects are judged, with exactly the verdicts a full
-// evaluation gives them; ids that are not subjects of the rule's type are simply absent.
+// evaluation gives them; every other requested id still gets one NOT_APPLICABLE row with a reason.
 #[test]
 fn conformance_for_given_subjects() {
     let (dir, db) = fixture_db("subjects");
@@ -594,25 +594,77 @@ fn conformance_for_given_subjects() {
         .unwrap();
     assert_eq!(&one["verdicts"][0], full_1005);
 
-    // a list: sorted + deduplicated; a Person (10) and an unknown id are absent; an out-of-scope
-    // subject still answers NOT_APPLICABLE when asked for explicitly
+    // a list: one row per distinct id, sorted; an out-of-scope subject answers NOT_APPLICABLE with
+    // no reason, a Person (10) answers `not_subject_type`, an unknown id `unknown_subject`
     let mut req = rule();
     req["subjects"] = json!([1006, 1004, 1004, 10, 999_999]);
     let some = db.query(&req).unwrap();
-    assert_eq!(subjects_of(&some), vec![1004, 1006], "{some}");
-    assert_eq!(some["verdicts"][1]["verdict"], json!("NOT_APPLICABLE"));
-    assert_eq!(some["counts"]["MISMATCH"], json!(1));
-    assert_eq!(some["counts"]["NOT_APPLICABLE"], json!(1));
-    assert_eq!(some["counts"]["OK"], json!(0));
+    assert_eq!(subjects_of(&some), vec![10, 1004, 1006, 999_999], "{some}");
+    let rows = some["verdicts"].as_array().unwrap();
+    assert_eq!(rows[0]["verdict"], json!("NOT_APPLICABLE"));
+    assert_eq!(rows[0]["reason"], json!("not_subject_type"));
+    assert_eq!(rows[0]["actual"], json!(null));
+    assert_eq!(rows[1]["verdict"], json!("MISMATCH"));
+    assert!(rows[1].get("reason").is_none(), "{some}");
+    assert_eq!(rows[2]["verdict"], json!("NOT_APPLICABLE"));
+    assert!(
+        rows[2].get("reason").is_none(),
+        "scope NA is judged: {some}"
+    );
+    assert_eq!(rows[3]["verdict"], json!("NOT_APPLICABLE"));
+    assert_eq!(rows[3]["reason"], json!("unknown_subject"));
+    assert_eq!(some["total"], json!(4));
+    assert_eq!(some["returned"], json!(4));
+    assert_eq!(
+        some["counts"],
+        json!({"OK": 0, "ABSENT": 0, "MISMATCH": 1, "NOT_APPLICABLE": 3})
+    );
+    // `only` filters reason rows like any NOT_APPLICABLE row
+    req["only"] = json!(["MISMATCH"]);
+    let mm = db.query(&req).unwrap();
+    assert_eq!(subjects_of(&mm), vec![1004], "{mm}");
+    assert_eq!(mm["counts"]["NOT_APPLICABLE"], json!(3));
 
-    // a masked subject is absent, like on every read
-    db.ingest_str("{\"node\":{\"id\":1004,\"type\":\"Issue\",\"label\":2}}\n")
-        .unwrap();
+    // a masked node reads as unknown, whatever its type: its existence is not revealed
+    db.ingest_str(concat!(
+        "{\"node\":{\"id\":1004,\"type\":\"Issue\",\"label\":2}}\n",
+        "{\"node\":{\"id\":10,\"type\":\"Person\",\"label\":2}}\n",
+    ))
+    .unwrap();
     let mut req = rule();
-    req["subjects"] = json!([1004, 1006]);
+    req["subjects"] = json!([1004, 1006, 10, 999_999]);
     req["allowed_labels"] = json!(1);
     let masked = db.query(&req).unwrap();
-    assert_eq!(subjects_of(&masked), vec![1006], "{masked}");
+    assert_eq!(
+        subjects_of(&masked),
+        vec![10, 1004, 1006, 999_999],
+        "{masked}"
+    );
+    let rows = masked["verdicts"].as_array().unwrap();
+    for i in [0, 1, 3] {
+        assert_eq!(rows[i]["verdict"], json!("NOT_APPLICABLE"), "{masked}");
+        assert_eq!(rows[i]["reason"], json!("unknown_subject"), "{masked}");
+    }
+    assert_eq!(
+        rows[0],
+        json!({
+            "subject": 10, "verdict": "NOT_APPLICABLE", "kind": null, "required": null,
+            "distinct": null, "actual": null, "as_of": null, "case": null,
+            "reason": "unknown_subject"
+        })
+    );
+    assert!(rows[2].get("reason").is_none(), "{masked}");
+
+    // a full evaluation never carries a reason
+    let full = db.query(&rule()).unwrap();
+    assert!(
+        full["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v.get("reason").is_none()),
+        "{full}"
+    );
 
     // bad shapes are clear errors
     for bad in [
@@ -694,6 +746,17 @@ fn conformance_mcp_defaults_are_bounded() {
         vec![1006],
         "subject-scoped keeps every row"
     );
+    // every requested id gets one row, with a reason when the rule does not judge it
+    let mixed = mcp_conformance(
+        &db,
+        json!({"rule": rule_body(), "subjects": [999_999, 1006, 10]}),
+    );
+    assert_eq!(subjects_of(&mixed), vec![10, 1006, 999_999], "{mixed}");
+    assert_eq!(mixed["verdicts"][0]["reason"], json!("not_subject_type"));
+    assert!(mixed["verdicts"][1].get("reason").is_none(), "{mixed}");
+    assert_eq!(mixed["verdicts"][2]["reason"], json!("unknown_subject"));
+    assert_eq!(mixed["total"], json!(3));
+    assert_eq!(mixed["counts"]["NOT_APPLICABLE"], json!(3));
 
     let page = mcp_conformance(&db, json!({"rule": rule_body(), "limit": 2}));
     assert_eq!(page["returned"], json!(2));
@@ -711,6 +774,13 @@ fn conformance_mcp_defaults_are_bounded() {
     let bounded = mcp_conformance(&db, json!({"rule": rule_body()}));
     assert_eq!(bounded["returned"], json!(mcp::MCP_CONFORMANCE_LIMIT));
     assert_eq!(bounded["truncated"], json!(true));
+    // the default limit does not cut a subject-scoped answer short
+    let ids: Vec<u64> = (0..(mcp::MCP_CONFORMANCE_LIMIT + 20))
+        .map(|i| 50_000 + i)
+        .collect();
+    let scoped = mcp_conformance(&db, json!({"rule": rule_body(), "subjects": ids}));
+    assert_eq!(scoped["returned"], json!(mcp::MCP_CONFORMANCE_LIMIT + 20));
+    assert_eq!(scoped["truncated"], json!(false));
     // the HTTP/query op itself is unchanged: every row
     let all = db.query(&rule()).unwrap();
     assert_eq!(all["returned"], all["total"]);
@@ -731,6 +801,10 @@ fn conformance_mcp_defaults_are_bounded() {
             tool["inputSchema"]["properties"].get(p).is_some(),
             "missing {p}"
         );
+    }
+    let conf_desc = tool["description"].as_str().unwrap();
+    for term in ["not_subject_type", "unknown_subject", "exactly one row"] {
+        assert!(conf_desc.contains(term), "conformance lacks {term}");
     }
     // the `rule` read-back tool explains every construct a declaration may contain
     let rule_tool = list["result"]["tools"]

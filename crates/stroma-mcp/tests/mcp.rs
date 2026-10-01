@@ -228,6 +228,36 @@ fn mcp_conformance() {
     assert_eq!(v1002["actual"], json!({ "node": 10 }));
     assert_eq!(v1002["as_of"], json!(6000));
 
+    // With `subjects`, every requested id gets exactly one row: a Person (10) is not a subject of
+    // the rule's type, 777 names no node.
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
+        "params":{"name":"conformance","arguments":{"rule":rule,"subjects":[777, 1002, 10]}}}));
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    let out: Value = serde_json::from_str(text).unwrap();
+    let rows = out["verdicts"].as_array().unwrap();
+    let shape: Vec<(u64, &str, Option<&str>)> = rows
+        .iter()
+        .map(|v| {
+            (
+                v["subject"].as_u64().unwrap(),
+                v["verdict"].as_str().unwrap(),
+                v.get("reason").and_then(Value::as_str),
+            )
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (10, "NOT_APPLICABLE", Some("not_subject_type")),
+            (777, "NOT_APPLICABLE", Some("unknown_subject")),
+            (1002, "MISMATCH", None),
+        ],
+        "subjects rows: {out}"
+    );
+    assert_eq!(out["total"], json!(3));
+    assert_eq!(out["counts"]["NOT_APPLICABLE"], json!(2));
+    assert_eq!(out["counts"]["MISMATCH"], json!(1));
+
     // Declare the same rule by name (a rule_def ingest), then evaluate via `rule_name` → same verdicts.
     let rule_def = json!({ "rule_def": { "name": "approval", "rule": rule } }).to_string();
     let r = mcp.call(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",

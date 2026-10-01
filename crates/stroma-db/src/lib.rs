@@ -2172,11 +2172,15 @@ impl ReadState {
     /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of, case }, .. ],
     /// "total", "returned", "truncated", "counts": {OK, ABSENT, MISMATCH, NOT_APPLICABLE} }`.
     ///
-    /// Optional narrowing, all additive: `subject` / `subjects` evaluate only those ids (a non-subject
-    /// or masked id is simply absent); `only: [verdict names]` keeps those outcomes; `offset` / `limit`
-    /// page the kept rows. `counts` covers every evaluated subject before `only` and paging, `total`
-    /// is the kept count, and `truncated` means rows remain after this page. With none of them the
-    /// op returns every verdict, as before; the MCP tool applies its own smaller defaults.
+    /// Optional narrowing, all additive: `subject` / `subjects` evaluate only those ids, one row per
+    /// distinct requested id (sorted by id). A requested id the rule does not judge answers
+    /// `NOT_APPLICABLE` with an extra `reason`: `"not_subject_type"` for a visible node of another
+    /// type, `"unknown_subject"` for an id with no typed node or a node hidden by `allowed_labels`
+    /// (hidden and nonexistent are indistinguishable). Judged rows carry no `reason`. `only: [verdict
+    /// names]` keeps those outcomes; `offset` / `limit` page the kept rows. `counts` covers every row
+    /// before `only` and paging (reason rows count as `NOT_APPLICABLE`), `total` is the kept count,
+    /// and `truncated` means rows remain after this page. With none of them the op returns every
+    /// verdict, as before; the MCP tool applies its own smaller defaults.
     fn conformance(&self, req: &Value) -> DbResult<Value> {
         let rule = if let Some(name) = req["rule_name"].as_str() {
             self.schema
@@ -2245,26 +2249,30 @@ impl ReadState {
         };
         let offset = req["offset"].as_u64().unwrap_or(0) as usize;
         let limit = req["limit"].as_u64().map(|l| l as usize);
-        let verdicts = match &subjects {
+        let rows: Vec<conformance::RequestedVerdict> = match &subjects {
             Some(s) => {
                 conformance::evaluate_subjects(&self.snap, &self.schema.cat, &rule, labels, s)
             }
-            None => conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels),
+            None => conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels)
+                .into_iter()
+                .map(|row| conformance::RequestedVerdict { row, reason: None })
+                .collect(),
         };
-        // Counts per verdict over every evaluated (visible) subject, before `only`/paging.
+        // Counts per verdict over every row (each visible subject, or each requested id), before
+        // `only`/paging. A requested id answered with a `reason` counts under NOT_APPLICABLE.
         let mut counts = serde_json::Map::new();
         for name in CONFORMANCE_OUTCOMES {
             counts.insert(name.to_string(), json!(0));
         }
-        for v in &verdicts {
-            let c = &mut counts[v.verdict.as_str()];
+        for r in &rows {
+            let c = &mut counts[r.row.verdict.as_str()];
             *c = json!(c.as_u64().unwrap_or(0) + 1);
         }
-        let selected: Vec<&conformance::Verdict> = verdicts
+        let selected: Vec<&conformance::RequestedVerdict> = rows
             .iter()
-            .filter(|v| {
+            .filter(|r| {
                 only.as_ref()
-                    .is_none_or(|o| o.contains(&v.verdict.as_str()))
+                    .is_none_or(|o| o.contains(&r.row.verdict.as_str()))
             })
             .collect();
         let total = selected.len();
@@ -2272,7 +2280,13 @@ impl ReadState {
             .into_iter()
             .skip(offset)
             .take(limit.unwrap_or(usize::MAX))
-            .map(verdict_json)
+            .map(|r| {
+                let mut v = verdict_json(&r.row);
+                if let Some(reason) = r.reason {
+                    v["reason"] = json!(reason.as_str());
+                }
+                v
+            })
             .collect();
         let returned = out.len();
         Ok(json!({
