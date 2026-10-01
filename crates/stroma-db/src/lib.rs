@@ -1631,6 +1631,10 @@ impl ReadState {
     /// `rule` is the JSON exactly as declared in its latest `rule_def` (an unknown name is an
     /// error). Without it, returns `{ "rules": [ { "name", "rule" }, .. ] }` for every stored rule,
     /// sorted by name. Rules are schema-level, so no label mask applies, as with `schema`.
+    /// The declaration has the shape [`Db::query`]'s `conformance` op accepts (see
+    /// `parse_conformance_rule`): hop paths with optional `as_of` anchors, or first-match `cases`
+    /// in place of `required`, and conditions testing `equals` or a numeric range, optionally
+    /// read as-of their own anchor.
     fn rule_definition(&self, req: &Value) -> DbResult<Value> {
         if let Some(name) = req.get("rule_name").filter(|v| !v.is_null()) {
             let name = name.as_str().ok_or("rule.rule_name must be a string")?;

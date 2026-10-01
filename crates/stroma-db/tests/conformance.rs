@@ -732,6 +732,25 @@ fn conformance_mcp_defaults_are_bounded() {
             "missing {p}"
         );
     }
+    // the `rule` read-back tool explains every construct a declaration may contain
+    let rule_tool = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "rule")
+        .unwrap()
+        .clone();
+    let desc = rule_tool["description"].as_str().unwrap();
+    for term in [
+        "`cases`",
+        "`when`",
+        "`gte`",
+        "`between",
+        "own `as_of`",
+        "unsatisfied",
+    ] {
+        assert!(desc.contains(term), "rule description lacks {term}: {desc}");
+    }
     let init = mcp::handle_message(
         &db,
         &json!({"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}),
