@@ -782,6 +782,85 @@ fn required_unresolved_is_not_a_mismatch() {
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
+// An as-of read with no value in effect at the anchor is `required_unresolved`, not `stale`:
+// dept 1's `manager-of` history starts at 1000, so an approval dated 500 has nothing to compare
+// against, even though its approver (Alice) is the manager from 1000 on. A backfilled interval
+// that covers the anchor turns the watched row into a judged verdict incrementally.
+#[test]
+fn no_value_at_as_of_is_unresolved_until_backfilled() {
+    let (dir, db) = fixture_db("coverage");
+    db.ingest_str(concat!(
+        "{\"node\":{\"id\":1011,\"type\":\"Issue\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1011,\"predicate\":\"assigned-to\",\"object\":{\"node\":101}}}\n",
+        "{\"fact\":{\"subject\":1011,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+        "{\"fact\":{\"subject\":1011,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":500}}\n",
+        "{\"fact\":{\"subject\":1011,\"predicate\":\"approved-at\",\"object\":{\"int\":500}}}\n",
+        "{\"fact\":{\"subject\":1011,\"predicate\":\"status\",\"object\":{\"text\":\"released\"},\"valid_from\":600}}\n",
+        "{\"node\":{\"id\":1012,\"type\":\"Issue\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"assigned-to\",\"object\":{\"node\":101}}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"approved-by\",\"object\":{\"node\":201},\"valid_from\":500}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"approved-at\",\"object\":{\"int\":500}}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"status\",\"object\":{\"text\":\"released\"},\"valid_from\":600}}\n",
+    ))
+    .unwrap();
+    let rule_def = json!({ "rule_def": { "name": "release-approval", "rule": rule_body() } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+
+    let mut req = rule();
+    req["subjects"] = json!([1005, 1011, 1012]);
+    let r = db.query(&req).unwrap();
+    let rows = r["verdicts"].as_array().unwrap();
+    // 1005: Carol is the manager at 6000 and Alice held the role earlier → stale, as before
+    assert_eq!(rows[0]["verdict"], json!("MISMATCH"), "{r}");
+    assert_eq!(rows[0]["kind"], json!("stale"));
+    // 1011 / 1012: no manager in effect at 500, whoever approved → unresolved, never stale or wrong
+    for row in &rows[1..] {
+        assert_eq!(row["verdict"], json!("NOT_APPLICABLE"), "{r}");
+        assert_eq!(row["reason"], json!("required_unresolved"), "{r}");
+        assert_eq!(row["kind"], json!(null), "{r}");
+        assert_eq!(row["required"], json!(null), "{r}");
+        assert_eq!(row["as_of"], json!(500), "{r}");
+    }
+    assert_eq!(rows[1]["actual"], json!({"node": 10}));
+    assert_eq!(rows[2]["actual"], json!({"node": 201}));
+
+    // watch, then a backfilled interval for Alice from 0 covers the anchor: 1011 is judged OK and
+    // 1012 (Frank, never a manager) wrong; nothing else moves
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    let cursor = w["cursor"].as_u64().unwrap();
+    db.ingest_str(
+        "{\"fact\":{\"subject\":1,\"predicate\":\"manager-of\",\"object\":{\"node\":10},\"valid_from\":0}}\n",
+    )
+    .unwrap();
+    let c = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}))
+        .unwrap();
+    let changes = c["changes"].as_array().unwrap();
+    let mut flipped: Vec<u64> = changes
+        .iter()
+        .map(|d| d["subject"].as_u64().unwrap())
+        .collect();
+    flipped.sort_unstable();
+    assert_eq!(flipped, vec![1011, 1012], "{c}");
+    for d in changes {
+        assert_eq!(d["old"]["reason"], json!("required_unresolved"));
+        assert!(d["new"].get("reason").is_none(), "{c}");
+        assert_eq!(d["new"]["required"], json!({"node": 10}));
+    }
+    let by = |s: u64| changes.iter().find(|d| d["subject"] == json!(s)).unwrap()["new"].clone();
+    assert_eq!(by(1011)["verdict"], json!("OK"));
+    assert_eq!(by(1012)["verdict"], json!("MISMATCH"));
+    assert_eq!(by(1012)["kind"], json!("wrong"));
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    assert_eq!(verdict_map(&w), verdict_map(&db.query(&rule()).unwrap()));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 fn mcp_conformance(db: &Db, args: serde_json::Value) -> serde_json::Value {
     let msg = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
                      "params":{"name":"conformance","arguments":args}});

@@ -2287,10 +2287,12 @@ impl ReadState {
     /// stored in the registry) — exactly one is required. Predicate/type names are resolved against the
     /// catalog (unknown names are a clear error), then [`conformance::evaluate`] composes the existing
     /// read primitives into `OK | ABSENT | MISMATCH | NOT_APPLICABLE` verdicts, authz-scoped by
-    /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`; a
+    /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` (the actual value
+    /// held the last as-of hop at another valid-time) or `"wrong"` (it never did); a
     /// `NOT_APPLICABLE` row, and only such a row, carries a `reason`: `"out_of_scope"`,
     /// `"no_matching_case"`, or `"required_unresolved"` (the actual is present but the required
-    /// path resolved to no value; the row keeps its values). `case` is the matched case index of a
+    /// path resolved to no value, including no value in effect at the as-of anchor; the row keeps
+    /// its values and is never `stale`). `case` is the matched case index of a
     /// banded rule (`cases`), else null. Returns
     /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of, case, reason? },
     /// .. ], "total", "returned", "truncated", "counts": {OK, ABSENT, MISMATCH, NOT_APPLICABLE},
