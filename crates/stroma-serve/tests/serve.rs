@@ -172,6 +172,13 @@ fn serve_health_query_ingest() {
         "lang select and theme toggle must be in the topbar, before the settings drawer"
     );
 
+    // fmtVal must coerce int/float to strings (#284): every caller chains .replace() onto its
+    // result, which throws on a bare number. Pin the fix rather than the whole function body.
+    assert!(
+        body.contains("String(o.int)") && body.contains("String(o.float)"),
+        "fmtVal must coerce int/float values to strings before callers call .replace() on them"
+    );
+
     // a console session is unrestricted and reports itself as such (no token identity)
     let (st, _, body) = http(&addr, "GET", "/me", "", Some(&tok));
     assert_eq!(st, 200, "me: {body}");
