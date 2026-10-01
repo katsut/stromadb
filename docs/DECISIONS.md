@@ -380,13 +380,19 @@
 - **Decision:** the op accepts `subject` or `subjects` and judges only those ids, in O(listed). It
   also accepts `only` (verdict names), `limit` and `offset`. The response adds `total` (rows kept by
   `only`), `returned`, `truncated` (rows remain after this page) and `counts` per verdict over every
-  evaluated subject. A listed id that is not a subject of the rule's type, is unknown, or is masked
-  is absent from the answer, so the three cases look the same.
+  row before `only` and paging. Every distinct listed id gets exactly one row. An id the rule does not judge
+  answers `NOT_APPLICABLE` with a `reason`: `not_subject_type` for a visible node of another type,
+  `unknown_subject` for an id with no typed node or a masked node, so a masked node is not told
+  apart from a missing one. These rows count as `NOT_APPLICABLE`.
+- **Revision:** the first version dropped such ids from the answer. A client then saw
+  `verdicts: []` and `total: 0` for an id of the wrong type, which looks the same as "not
+  evaluated". An explicit row per requested id removes that ambiguity without revealing masked
+  nodes.
 - **Two defaults:** the HTTP op keeps its old behaviour, every verdict with no filter, because
   existing callers (the console's conformance panel, scripts) read the full list. The fields above
-  are additive. The MCP tool defaults to `limit: 50` and, for a full evaluation, drops
-  `NOT_APPLICABLE` rows while still counting them. A subject-scoped MCP call returns every requested
-  row, so asking for one subject always yields its verdict.
+  are additive. For a full evaluation the MCP tool defaults to `limit: 50` and drops
+  `NOT_APPLICABLE` rows while still counting them. A subject-scoped MCP call applies neither
+  default and returns every requested row, so asking for one subject always yields its verdict.
 - **Why not a scope-only fix:** a narrowing inline `scope` still reports the rest as
   `NOT_APPLICABLE`, and it makes the caller encode a key lookup as a rule. `lookup` (D28) plus
   `subjects` keeps rules declarative and the call order simple: key → id → verdict.

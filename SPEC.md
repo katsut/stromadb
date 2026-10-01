@@ -313,6 +313,32 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
   - `ABSENT` — `actual` is missing where `absent_when` says it should exist.
   - `NOT_APPLICABLE` — the subject falls outside `scope` (or matches no `cases` entry).
 
+`subject: N` or `subjects: [N, …]` evaluates only those ids, in O(listed). The answer holds exactly
+one row per distinct requested id, sorted by id. A visible subject of the rule's type is judged as
+above. Any other id is still answered, as `NOT_APPLICABLE` with no values and an extra `reason`:
+
+- `not_subject_type` — the id names a visible node whose type is not the rule's `subject_type`.
+- `unknown_subject` — the id names no typed node, or a node hidden from the caller by
+  `allowed_labels`. A hidden node reads as unknown whatever its type, so the answer does not
+  reveal that it exists.
+
+Judged rows carry no `reason`, and a full evaluation never produces one. `only: [verdict, …]`
+keeps those outcomes, and `offset` / `limit` page the kept rows. The response adds `total` (rows
+kept by `only`), `returned`, `truncated` (rows remain after this page) and `counts` per verdict over
+every row before `only` and paging; a row with a `reason` counts as `NOT_APPLICABLE`. These rows
+exist only in the explicit-subjects answer: `conformance_watch` / `conformance_changes` maintain
+verdicts for subjects of the rule's type only.
+
+```jsonc
+{"op": "conformance", "rule_name": "release-approval", "subjects": [1005, 10, 999999]}
+// → {"verdicts": [
+//      {"subject": 10,     "verdict": "NOT_APPLICABLE", "reason": "not_subject_type", …},
+//      {"subject": 1005,   "verdict": "MISMATCH",       "kind": "wrong", …},
+//      {"subject": 999999, "verdict": "NOT_APPLICABLE", "reason": "unknown_subject", …}],
+//    "total": 3, "returned": 3, "truncated": false,
+//    "counts": {"OK": 0, "ABSENT": 0, "MISMATCH": 1, "NOT_APPLICABLE": 2}}
+```
+
 Conditions (`scope`, `absent_when`, and a case's `when`) test one `one`-predicate value of the
 subject. Each has exactly one test:
 
