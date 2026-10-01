@@ -28,19 +28,168 @@
 //! }
 //! ```
 //!
+//! ## Numeric conditions and banded rules
+//!
+//! A condition ([`Cond`]) tests the subject's value of a one-cardinality predicate either for
+//! equality or against a numeric range ([`NumRange`]): any of `gt` / `gte` / `lt` / `lte`, or
+//! `between: [lo, hi]` (both ends inclusive). Combining one lower and one upper bound gives a
+//! half-open band such as `{"predicate":"amount","gt":500000,"lte":2000000}`. Int and float values
+//! compare numerically (two ints compare exactly; otherwise both sides compare as `f64`). A
+//! condition may carry its own `as_of` anchor, in which case the value is read at the valid-time
+//! instant held by that anchor predicate on the subject, exactly like an as-of hop.
+//!
+//! A missing value, a non-numeric value under a range test, or an unresolvable as-of anchor make
+//! the condition **not satisfied** — the same treatment as an equality condition whose value is
+//! missing. So a range `scope` that cannot be read yields `NOT_APPLICABLE`, and a range
+//! `absent_when` that cannot be read does not turn a missing actual into `ABSENT`.
+//!
+//! A rule may replace `required` with ordered `cases` ([`Case`]), evaluated first-match: the first
+//! case whose `when` holds (a case without `when` always holds) supplies the required path, and
+//! the verdict reports the index of the matched case. When no case matches, the subject is
+//! `NOT_APPLICABLE`. One stored rule thus covers a whole amount-banded table:
+//!
+//! ```json
+//! {
+//!   "subject_type": "Request",
+//!   "cases": [
+//!     { "when": {"predicate":"amount","lte":500000,"as_of":"approved-at"},
+//!       "required": {"hops":[{"predicate":"requester"},{"predicate":"member-of"},{"predicate":"manager-of"}]} },
+//!     { "when": {"predicate":"amount","gt":500000,"lte":2000000,"as_of":"approved-at"},
+//!       "required": {"hops":[{"predicate":"requester"},{"predicate":"member-of"},{"predicate":"parent"},{"predicate":"manager-of"}]} },
+//!     { "required": {"hops":[{"predicate":"requester"},{"predicate":"member-of"},{"predicate":"parent"},
+//!                            {"predicate":"parent"},{"predicate":"manager-of"}]} }
+//!   ],
+//!   "actual": "approved-by"
+//! }
+//! ```
+//!
+//! Every read a condition or case selection performs is part of the verdict's support set, so a
+//! revision of the amount fact re-judges exactly the subjects that read it under incremental
+//! maintenance ([`crate::incremental::MaintainedConformance`]).
+//!
 //! (The JSON is parsed at the DB boundary, where names are resolved against the catalog; this module
 //! holds the name-based rule types and the evaluator, and resolves names via the [`Catalog`].)
+
+use std::cmp::Ordering;
 
 use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
 use crate::fold::{ObjKey, Snapshot};
 use crate::query::{point_one, point_one_asof};
 
-/// A value-equality condition on a subject: `point_one(subject, predicate) == equals`.
+/// A condition on a subject's one-cardinality value of `predicate`. With `as_of`, the value is read
+/// at the valid-time instant held by the integer predicate `as_of` on the subject
+/// (`point_one_asof`); otherwise the current value is read (`point_one`). A missing value never
+/// satisfies the condition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cond {
     pub predicate: String,
-    pub equals: ObjKey,
+    pub test: Test,
+    pub as_of: Option<String>,
+}
+
+impl Cond {
+    /// An equality condition on the current value: `point_one(subject, predicate) == value`.
+    pub fn equals(predicate: impl Into<String>, value: ObjKey) -> Self {
+        Cond {
+            predicate: predicate.into(),
+            test: Test::Equals(value),
+            as_of: None,
+        }
+    }
+
+    /// A numeric range condition on the current value.
+    pub fn range(predicate: impl Into<String>, range: NumRange) -> Self {
+        Cond {
+            predicate: predicate.into(),
+            test: Test::Range(range),
+            as_of: None,
+        }
+    }
+
+    /// This condition, read as-of the instant held by the `anchor` predicate on the subject.
+    pub fn as_of(mut self, anchor: impl Into<String>) -> Self {
+        self.as_of = Some(anchor.into());
+        self
+    }
+}
+
+/// What a [`Cond`] checks the read value against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Test {
+    /// The value equals this key exactly.
+    Equals(ObjKey),
+    /// The value is numeric and lies within the range.
+    Range(NumRange),
+}
+
+impl Test {
+    fn matches(&self, v: &ObjKey) -> bool {
+        match self {
+            Test::Equals(e) => v == e,
+            Test::Range(r) => r.contains(v),
+        }
+    }
+}
+
+/// A numeric range: an optional lower and an optional upper [`Bound`] (at least one is set by the
+/// parser). Bound values are [`ObjKey::Int`] or [`ObjKey::Float`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NumRange {
+    pub lower: Option<Bound>,
+    pub upper: Option<Bound>,
+}
+
+/// One end of a [`NumRange`]; `inclusive` = the end value itself is in the range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bound {
+    pub value: ObjKey,
+    pub inclusive: bool,
+}
+
+impl NumRange {
+    /// Whether `v` is numeric and within both bounds. A non-numeric value (text, bool, node) or an
+    /// incomparable float (NaN) is outside every range.
+    pub fn contains(&self, v: &ObjKey) -> bool {
+        let lower_ok = self.lower.as_ref().is_none_or(|b| {
+            matches!(
+                (num_cmp(v, &b.value), b.inclusive),
+                (Some(Ordering::Greater), _) | (Some(Ordering::Equal), true)
+            )
+        });
+        let upper_ok = self.upper.as_ref().is_none_or(|b| {
+            matches!(
+                (num_cmp(v, &b.value), b.inclusive),
+                (Some(Ordering::Less), _) | (Some(Ordering::Equal), true)
+            )
+        });
+        lower_ok && upper_ok && num_of(v).is_some()
+    }
+}
+
+/// Numeric comparison of two literal keys: two ints compare exactly, any other int/float pair
+/// compares as `f64`. `None` if either side is non-numeric or the floats are incomparable.
+fn num_cmp(a: &ObjKey, b: &ObjKey) -> Option<Ordering> {
+    match (a, b) {
+        (ObjKey::Int(x), ObjKey::Int(y)) => Some(x.cmp(y)),
+        _ => num_of(a)?.partial_cmp(&num_of(b)?),
+    }
+}
+
+fn num_of(o: &ObjKey) -> Option<f64> {
+    match o {
+        ObjKey::Int(i) => Some(*i as f64),
+        ObjKey::Float(bits) => Some(f64::from_bits(*bits)),
+        _ => None,
+    }
+}
+
+/// One case of a banded rule: when `when` holds (or is absent), `required` is the derived path the
+/// actual must equal. An empty `required` declares no equality expectation for that case.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Case {
+    pub when: Option<Cond>,
+    pub required: Vec<Hop>,
 }
 
 /// One hop of a required derived path. A plain hop reads the current one-cardinality value
@@ -56,12 +205,15 @@ pub struct Hop {
 /// [`Catalog`] at evaluation time. `required` derives the value the actual must equal;
 /// `distinct_from` derives the value it must NOT equal (a self-approval ban is
 /// `distinct_from: [assigned-to]`). Either may be empty, not both — an empty path declares no
-/// expectation on its side.
+/// expectation on its side. A non-empty `cases` list replaces `required` (the parser rejects a rule
+/// declaring both): the first matching [`Case`] supplies the required path, and no match means
+/// `NOT_APPLICABLE`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     pub subject_type: String,
     pub scope: Option<Cond>,
     pub required: Vec<Hop>,
+    pub cases: Vec<Case>,
     pub distinct_from: Vec<Hop>,
     pub actual: String,
     pub absent_when: Option<Cond>,
@@ -111,7 +263,8 @@ impl MismatchKind {
 /// A per-subject verdict. `required`/`distinct`/`actual` are the derived and observed values
 /// (node-valued in the first cut); `as_of` is the valid-time instant an as-of hop was read at, if a
 /// path used one (the required path's anchor wins when both do).
-/// `mismatch_kind` is `Some` only when `verdict == Mismatch`.
+/// `mismatch_kind` is `Some` only when `verdict == Mismatch`. `case` is the index of the matched
+/// [`Case`] for a banded rule (`None` for a rule without cases, or when no case matched).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub subject: NodeId,
@@ -121,19 +274,31 @@ pub struct Verdict {
     pub distinct: Option<ObjKey>,
     pub actual: Option<ObjKey>,
     pub as_of: Option<i64>,
+    pub case: Option<usize>,
 }
 
 /// The names a rule references that the catalog does not know — the caller resolves this to a clear
 /// error before evaluating. Empty = every name resolves.
 pub fn unresolved_names(rule: &Rule, cat: &Catalog) -> Vec<String> {
     let mut names: Vec<&str> = vec![rule.subject_type.as_str(), rule.actual.as_str()];
-    if let Some(s) = &rule.scope {
-        names.push(&s.predicate);
+    let conds = rule
+        .scope
+        .iter()
+        .chain(rule.cases.iter().filter_map(|c| c.when.as_ref()))
+        .chain(&rule.absent_when);
+    for c in conds {
+        names.push(&c.predicate);
+        if let Some(anchor) = &c.as_of {
+            names.push(anchor);
+        }
     }
-    if let Some(a) = &rule.absent_when {
-        names.push(&a.predicate);
-    }
-    for h in rule.required.iter().chain(&rule.distinct_from) {
+    let case_hops = rule.cases.iter().flat_map(|c| &c.required);
+    for h in rule
+        .required
+        .iter()
+        .chain(case_hops)
+        .chain(&rule.distinct_from)
+    {
         names.push(&h.predicate);
         if let Some(anchor) = &h.as_of {
             names.push(anchor);
@@ -288,25 +453,48 @@ pub(crate) fn judge_traced(
     s: NodeId,
     rec: &mut impl FnMut(NodeId, FieldId),
 ) -> Verdict {
+    let not_applicable = Verdict {
+        subject: s,
+        verdict: Outcome::NotApplicable,
+        mismatch_kind: None,
+        required: None,
+        distinct: None,
+        actual: None,
+        as_of: None,
+        case: None,
+    };
     // scope: out-of-scope subjects are not judged.
     if let Some(scope) = &rule.scope
         && !cond_holds_traced(snap, cat, s, scope, rec)
     {
-        return Verdict {
-            subject: s,
-            verdict: Outcome::NotApplicable,
-            mismatch_kind: None,
-            required: None,
-            distinct: None,
-            actual: None,
-            as_of: None,
-        };
+        return not_applicable;
     }
+
+    // A banded rule selects its required path by the first matching case; only the conditions
+    // actually consulted (up to and including the match) are read, and so recorded.
+    let (required_hops, case): (&[Hop], Option<usize>) = if rule.cases.is_empty() {
+        (&rule.required, None)
+    } else {
+        let mut matched = None;
+        for (i, c) in rule.cases.iter().enumerate() {
+            if c.when
+                .as_ref()
+                .is_none_or(|w| cond_holds_traced(snap, cat, s, w, rec))
+            {
+                matched = Some(i);
+                break;
+            }
+        }
+        match matched {
+            Some(i) => (&rule.cases[i].required, Some(i)),
+            None => return not_applicable,
+        }
+    };
 
     // The two derived paths: `required` = the value the actual must equal, `distinct_from` = the
     // value it must NOT equal. When both carry an as-of anchor, the required path's instant is the
     // one reported.
-    let req = walk(snap, cat, s, &rule.required, rec);
+    let req = walk(snap, cat, s, required_hops, rec);
     let dis = walk(snap, cat, s, &rule.distinct_from, rec);
     let required = req.end.map(ObjKey::Node);
     let distinct = dis.end.map(ObjKey::Node);
@@ -335,7 +523,7 @@ pub(crate) fn judge_traced(
         // present: an equality expectation must match (a broken/underived path never matches), and
         // a must-differ expectation must not collide (an underived path can never collide).
         Some(a) => {
-            if !rule.required.is_empty() && required.as_ref() != Some(a) {
+            if !required_hops.is_empty() && required.as_ref() != Some(a) {
                 // classify: stale if the actual value once satisfied the final as-of hop at an
                 // earlier valid-time, otherwise wrong.
                 let kind = match (req.final_asof_hop, a) {
@@ -362,6 +550,7 @@ pub(crate) fn judge_traced(
         distinct,
         actual,
         as_of,
+        case,
     }
 }
 
@@ -376,6 +565,10 @@ fn ever_held(snap: &Snapshot, node: NodeId, predicate: FieldId, value: NodeId) -
         })
 }
 
+/// Whether `cond` holds on subject `s`, reporting its reads to `rec`. An as-of condition reads the
+/// anchor on `s` first, then the predicate's value in effect at that instant; the predicate key is
+/// recorded even when the anchor is missing, so the write that supplies the anchor and any later
+/// revision of the value both re-judge the subject.
 fn cond_holds_traced(
     snap: &Snapshot,
     cat: &Catalog,
@@ -383,12 +576,24 @@ fn cond_holds_traced(
     cond: &Cond,
     rec: &mut impl FnMut(NodeId, FieldId),
 ) -> bool {
-    cat.field_id(&cond.predicate)
-        .and_then(|p| {
+    let Some(p) = cat.field_id(&cond.predicate) else {
+        return false;
+    };
+    let value = match &cond.as_of {
+        None => {
             rec(s, p);
             point_one(snap, s, p)
-        })
-        .is_some_and(|v| v == cond.equals)
+        }
+        Some(anchor) => {
+            let t = cat.field_id(anchor).and_then(|ap| {
+                rec(s, ap);
+                int_of(point_one(snap, s, ap))
+            });
+            rec(s, p);
+            t.and_then(|at| point_one_asof(snap, s, p, at))
+        }
+    };
+    value.is_some_and(|v| cond.test.matches(&v))
 }
 
 fn node_of(o: Option<ObjKey>) -> Option<NodeId> {
@@ -456,10 +661,8 @@ mod tests {
     fn rule() -> Rule {
         Rule {
             subject_type: "Issue".into(),
-            scope: Some(Cond {
-                predicate: "issue-type".into(),
-                equals: text("release"),
-            }),
+            scope: Some(Cond::equals("issue-type", text("release"))),
+            cases: Vec::new(),
             required: vec![
                 Hop {
                     predicate: "assigned-to".into(),
@@ -476,10 +679,7 @@ mod tests {
             ],
             distinct_from: Vec::new(),
             actual: "approved-by".into(),
-            absent_when: Some(Cond {
-                predicate: "status".into(),
-                equals: text("released"),
-            }),
+            absent_when: Some(Cond::equals("status", text("released"))),
         }
     }
 
@@ -771,15 +971,13 @@ mod tests {
             subject_type: "Issue".into(),
             scope: None,
             required: Vec::new(),
+            cases: Vec::new(),
             distinct_from: vec![Hop {
                 predicate: "assigned-to".into(),
                 as_of: None,
             }],
             actual: "approved-by".into(),
-            absent_when: Some(Cond {
-                predicate: "status".into(),
-                equals: text("done"),
-            }),
+            absent_when: Some(Cond::equals("status", text("done"))),
         };
         let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
         let by = verdicts_by_subject(&vs);
@@ -805,6 +1003,7 @@ mod tests {
                 predicate: "assigned-to".into(),
                 as_of: None,
             }],
+            cases: Vec::new(),
             distinct_from: vec![Hop {
                 predicate: "assigned-to".into(),
                 as_of: None,
@@ -829,14 +1028,324 @@ mod tests {
         let f = fixture();
         // scope on a node-valued predicate: only issues assigned to 201 are judged.
         let mut r = rule();
-        r.scope = Some(Cond {
-            predicate: "assigned-to".into(),
-            equals: ObjKey::Node(201),
-        });
+        r.scope = Some(Cond::equals("assigned-to", ObjKey::Node(201)));
         let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
         let by = verdicts_by_subject(&vs);
         assert_eq!(by[&1].verdict, Outcome::Ok);
         assert_eq!(by[&5].verdict, Outcome::NotApplicable);
         assert_eq!(by[&6].verdict, Outcome::NotApplicable);
+    }
+
+    fn bound(value: ObjKey, inclusive: bool) -> Option<Bound> {
+        Some(Bound { value, inclusive })
+    }
+
+    fn float(f: f64) -> ObjKey {
+        ObjKey::Float(f.to_bits())
+    }
+
+    #[test]
+    fn numeric_ranges_compare_ints_and_floats() {
+        // (500000, 2000000]
+        let band = NumRange {
+            lower: bound(ObjKey::Int(500_000), false),
+            upper: bound(ObjKey::Int(2_000_000), true),
+        };
+        assert!(!band.contains(&ObjKey::Int(500_000)));
+        assert!(band.contains(&ObjKey::Int(500_001)));
+        assert!(band.contains(&ObjKey::Int(2_000_000)));
+        assert!(!band.contains(&ObjKey::Int(2_000_001)));
+        // floats compare against int bounds numerically, and vice versa
+        assert!(band.contains(&float(500_000.5)));
+        assert!(!band.contains(&float(500_000.0)));
+        let half_open = NumRange {
+            lower: bound(float(0.5), true),
+            upper: None,
+        };
+        assert!(half_open.contains(&ObjKey::Int(1)));
+        assert!(half_open.contains(&float(0.5)));
+        assert!(!half_open.contains(&ObjKey::Int(0)));
+        // two ints compare exactly, beyond f64 integer precision
+        let big = NumRange {
+            lower: bound(ObjKey::Int(i64::MAX - 1), false),
+            upper: None,
+        };
+        assert!(big.contains(&ObjKey::Int(i64::MAX)));
+        assert!(!big.contains(&ObjKey::Int(i64::MAX - 1)));
+        // non-numeric and incomparable values are outside every range
+        assert!(!half_open.contains(&text("1")));
+        assert!(!half_open.contains(&ObjKey::Bool(true)));
+        assert!(!half_open.contains(&ObjKey::Node(7)));
+        assert!(!half_open.contains(&float(f64::NAN)));
+        let unbounded = NumRange {
+            lower: None,
+            upper: None,
+        };
+        assert!(unbounded.contains(&ObjKey::Int(3)));
+        assert!(!unbounded.contains(&text("3")));
+    }
+
+    fn hops(names: &[&str]) -> Vec<Hop> {
+        names
+            .iter()
+            .map(|n| Hop {
+                predicate: (*n).into(),
+                as_of: None,
+            })
+            .collect()
+    }
+
+    // An amount-banded approval table. Team 100 (manager 10) sits in division 101 (manager 11),
+    // which sits in company 102 (manager 12); requester 20 is a member of team 100. Up to 500,000
+    // the team manager approves, up to 2,000,000 the division manager, above that the company's.
+    fn banded_fixture() -> Fixture {
+        let mut cat = Catalog::new();
+        let request = cat.register_type("Request");
+        let person = cat.register_type("Person");
+        let dept = cat.register_type("Department");
+        let d = RelProps::default();
+        let requester = cat.register_predicate(
+            "requester",
+            Cardinality::One,
+            d,
+            request,
+            Range::Type(person),
+        );
+        let member_of =
+            cat.register_predicate("member-of", Cardinality::One, d, person, Range::Type(dept));
+        let parent = cat.register_predicate("parent", Cardinality::One, d, dept, Range::Type(dept));
+        let manager_of =
+            cat.register_predicate("manager-of", Cardinality::One, d, dept, Range::Type(person));
+        let approved_by = cat.register_predicate(
+            "approved-by",
+            Cardinality::One,
+            d,
+            request,
+            Range::Type(person),
+        );
+        let approved_at = cat.register_predicate(
+            "approved-at",
+            Cardinality::One,
+            d,
+            request,
+            Range::Value(ValueType::Int),
+        );
+        let amount = cat.register_predicate(
+            "amount",
+            Cardinality::One,
+            d,
+            request,
+            Range::Value(ValueType::Int),
+        );
+        let mut ops: Vec<Op> = Vec::new();
+        let mut seq = 0u64;
+        for id in [100, 101, 102] {
+            set_type(&mut ops, &mut seq, id, dept);
+        }
+        for id in [10, 11, 12, 20] {
+            set_type(&mut ops, &mut seq, id, person);
+        }
+        for id in 1..=7u64 {
+            set_type(&mut ops, &mut seq, id, request);
+        }
+        set_one(&mut ops, &mut seq, 100, parent, ObjKey::Node(101), 0);
+        set_one(&mut ops, &mut seq, 101, parent, ObjKey::Node(102), 0);
+        set_one(&mut ops, &mut seq, 100, manager_of, ObjKey::Node(10), 0);
+        set_one(&mut ops, &mut seq, 101, manager_of, ObjKey::Node(11), 0);
+        set_one(&mut ops, &mut seq, 102, manager_of, ObjKey::Node(12), 0);
+        set_one(&mut ops, &mut seq, 20, member_of, ObjKey::Node(100), 0);
+        // (request, amount, approver); every request approved at valid-time 1200
+        let rows: [(NodeId, Option<i64>, NodeId); 7] = [
+            (1, Some(300_000), 10),   // band 0, team manager → OK
+            (2, Some(1_500_000), 10), // band 1, team manager → MISMATCH
+            (3, Some(1_500_000), 11), // band 1, division manager → OK
+            (4, Some(5_000_000), 12), // band 2, company manager → OK
+            (5, Some(5_000_000), 11), // band 2, division manager → MISMATCH
+            (6, Some(400_000), 10),   // band 0 at approval; revised into band 1 below
+            (7, None, 10),            // no amount at all
+        ];
+        for (r, amt, approver) in rows {
+            set_one(&mut ops, &mut seq, r, requester, ObjKey::Node(20), 0);
+            set_one(&mut ops, &mut seq, r, approved_at, ObjKey::Int(1200), 0);
+            set_one(
+                &mut ops,
+                &mut seq,
+                r,
+                approved_by,
+                ObjKey::Node(approver),
+                0,
+            );
+            if let Some(a) = amt {
+                set_one(&mut ops, &mut seq, r, amount, ObjKey::Int(a), 0);
+            }
+        }
+        // request 6's amount is raised above the first band AFTER the approval instant
+        set_one(&mut ops, &mut seq, 6, amount, ObjKey::Int(1_500_000), 2000);
+        Fixture {
+            snap: fold(&ops).observe(),
+            cat,
+        }
+    }
+
+    /// The three-band table; `anchor` = read the amount as-of that predicate's instant.
+    fn banded_rule(anchor: Option<&str>, catch_all: bool) -> Rule {
+        let at = |c: Cond| match anchor {
+            Some(a) => c.as_of(a),
+            None => c,
+        };
+        let mut cases = vec![
+            Case {
+                when: Some(at(Cond::range(
+                    "amount",
+                    NumRange {
+                        lower: None,
+                        upper: bound(ObjKey::Int(500_000), true),
+                    },
+                ))),
+                required: hops(&["requester", "member-of", "manager-of"]),
+            },
+            Case {
+                when: Some(at(Cond::range(
+                    "amount",
+                    NumRange {
+                        lower: bound(ObjKey::Int(500_000), false),
+                        upper: bound(ObjKey::Int(2_000_000), true),
+                    },
+                ))),
+                required: hops(&["requester", "member-of", "parent", "manager-of"]),
+            },
+        ];
+        let top = hops(&["requester", "member-of", "parent", "parent", "manager-of"]);
+        cases.push(Case {
+            when: if catch_all {
+                None
+            } else {
+                Some(at(Cond::range(
+                    "amount",
+                    NumRange {
+                        lower: bound(ObjKey::Int(2_000_000), false),
+                        upper: None,
+                    },
+                )))
+            },
+            required: top,
+        });
+        Rule {
+            subject_type: "Request".into(),
+            scope: None,
+            required: Vec::new(),
+            cases,
+            distinct_from: Vec::new(),
+            actual: "approved-by".into(),
+            absent_when: None,
+        }
+    }
+
+    #[test]
+    fn banded_rule_selects_the_required_path_per_amount() {
+        let f = banded_fixture();
+        let vs = evaluate(
+            &f.snap,
+            &f.cat,
+            &banded_rule(Some("approved-at"), false),
+            u32::MAX,
+        );
+        let by = verdicts_by_subject(&vs);
+        let got = |s: NodeId| (by[&s].verdict, by[&s].case, by[&s].required.clone());
+        assert_eq!(got(1), (Outcome::Ok, Some(0), Some(ObjKey::Node(10))));
+        assert_eq!(got(2), (Outcome::Mismatch, Some(1), Some(ObjKey::Node(11))));
+        assert_eq!(got(3), (Outcome::Ok, Some(1), Some(ObjKey::Node(11))));
+        assert_eq!(got(4), (Outcome::Ok, Some(2), Some(ObjKey::Node(12))));
+        assert_eq!(got(5), (Outcome::Mismatch, Some(2), Some(ObjKey::Node(12))));
+        // the amount in effect at the approval instant (1200) is 400,000: band 0, approved correctly
+        assert_eq!(got(6), (Outcome::Ok, Some(0), Some(ObjKey::Node(10))));
+        // no amount: no band holds, so the subject is out of every case
+        assert_eq!(got(7), (Outcome::NotApplicable, None, None));
+        assert_eq!(by[&7].actual, None);
+    }
+
+    #[test]
+    fn banded_rule_reads_the_current_amount_without_an_anchor() {
+        let f = banded_fixture();
+        let vs = evaluate(&f.snap, &f.cat, &banded_rule(None, false), u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        // request 6's current amount (1,500,000) is band 1, so the team manager's approval is short
+        assert_eq!(by[&6].verdict, Outcome::Mismatch);
+        assert_eq!(by[&6].case, Some(1));
+        assert_eq!(by[&6].required, Some(ObjKey::Node(11)));
+    }
+
+    #[test]
+    fn a_case_without_when_catches_the_rest() {
+        let f = banded_fixture();
+        let vs = evaluate(
+            &f.snap,
+            &f.cat,
+            &banded_rule(Some("approved-at"), true),
+            u32::MAX,
+        );
+        let by = verdicts_by_subject(&vs);
+        // the missing amount satisfies neither band, so the catch-all applies
+        assert_eq!(by[&7].verdict, Outcome::Mismatch);
+        assert_eq!(by[&7].case, Some(2));
+        assert_eq!(by[&4].case, Some(2));
+        assert_eq!(by[&1].case, Some(0));
+    }
+
+    #[test]
+    fn range_conditions_in_scope_and_absent_when() {
+        let f = banded_fixture();
+        // scope: only requests above 1,000,000 (current value) are judged
+        let mut r = banded_rule(None, true);
+        r.cases.clear();
+        r.required = hops(&["requester", "member-of", "manager-of"]);
+        r.scope = Some(Cond::range(
+            "amount",
+            NumRange {
+                lower: bound(ObjKey::Int(1_000_000), false),
+                upper: None,
+            },
+        ));
+        let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        assert_eq!(by[&1].verdict, Outcome::NotApplicable);
+        assert_eq!(by[&2].verdict, Outcome::Ok);
+        assert_eq!(by[&6].verdict, Outcome::Ok); // current amount 1,500,000 is in scope
+        assert_eq!(by[&7].verdict, Outcome::NotApplicable); // missing value: not satisfied
+        // the same scope read as-of the approval instant drops request 6 (400,000 then)
+        r.scope = r.scope.map(|c| c.as_of("approved-at"));
+        let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
+        assert_eq!(verdicts_by_subject(&vs)[&6].verdict, Outcome::NotApplicable);
+
+        // absent_when on a range: judged against an actual no request carries (`parent`), a
+        // missing value is a gap only for amounts of at least 1,000,000
+        r.scope = None;
+        r.actual = "parent".into();
+        r.absent_when = Some(Cond::range(
+            "amount",
+            NumRange {
+                lower: bound(ObjKey::Int(1_000_000), true),
+                upper: None,
+            },
+        ));
+        let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        assert_eq!(by[&1].verdict, Outcome::Ok);
+        assert_eq!(by[&2].verdict, Outcome::Absent);
+        assert_eq!(by[&7].verdict, Outcome::Ok); // a missing amount never triggers absence
+    }
+
+    #[test]
+    fn range_condition_names_are_resolved() {
+        let f = banded_fixture();
+        let mut r = banded_rule(Some("no-such-anchor"), false);
+        r.cases[1].required.push(Hop {
+            predicate: "no-such-hop".into(),
+            as_of: None,
+        });
+        let missing = unresolved_names(&r, &f.cat);
+        assert!(missing.contains(&"no-such-anchor".to_string()));
+        assert!(missing.contains(&"no-such-hop".to_string()));
+        assert!(unresolved_names(&banded_rule(Some("approved-at"), false), &f.cat).is_empty());
     }
 }

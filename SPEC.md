@@ -286,7 +286,41 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
     sub-classifies an equality mismatch via valid-time history as `stale` (was once correct) or
     `wrong` (never correct) — a must-differ collision holds *now*, so it is always `wrong`.
   - `ABSENT` — `actual` is missing where `absent_when` says it should exist.
-  - `NOT_APPLICABLE` — the subject falls outside `scope`.
+  - `NOT_APPLICABLE` — the subject falls outside `scope` (or matches no `cases` entry).
+
+Conditions (`scope`, `absent_when`, and a case's `when`) test one `one`-predicate value of the
+subject. Each has exactly one test:
+
+- `equals` — the value equals the given object (`{"node": N}`, `{"int": …}`, or a bare scalar).
+- a numeric range — `gt` or `gte` for the lower end, `lt` or `lte` for the upper end (either or
+  both, so `{"predicate": "amount", "gt": 500000, "lte": 2000000}` is the band (500000, 2000000]),
+  or `between: [lo, hi]` with both ends inclusive. Int and float values compare numerically.
+
+A condition may name its own `as_of` anchor (an integer predicate on the subject); the value is then
+read as-of that valid-time instant, like an as-of hop. A missing value, a non-numeric value under a
+range, or a missing anchor leaves the condition **unsatisfied** — the same as an equality condition
+over a missing value. An unreadable `scope` therefore yields `NOT_APPLICABLE`, and an unreadable
+`absent_when` does not turn a missing `actual` into `ABSENT`.
+
+A banded rule replaces `required` with ordered `cases`, evaluated first-match. The first case whose
+`when` holds supplies the required path; a case without `when` always holds, so it serves as the
+default. No match is `NOT_APPLICABLE`. Each verdict reports the matched `case` index (null for a
+rule without cases):
+
+```jsonc
+{"subject_type": "Request",
+ "cases": [
+   {"when": {"predicate": "amount", "lte": 500000, "as_of": "approved-at"},
+    "required": {"hops": [{"predicate": "requester"}, {"predicate": "member-of"}, {"predicate": "manager-of"}]}},
+   {"when": {"predicate": "amount", "gt": 500000, "lte": 2000000, "as_of": "approved-at"},
+    "required": {"hops": [{"predicate": "requester"}, {"predicate": "member-of"}, {"predicate": "parent"}, {"predicate": "manager-of"}]}},
+   {"required": {"hops": [{"predicate": "requester"}, {"predicate": "member-of"}, {"predicate": "parent"}, {"predicate": "parent"}, {"predicate": "manager-of"}]}}
+ ],
+ "actual": "approved-by"}
+```
+
+Here a request whose amount was raised past a band after its approval is still judged by the band
+in effect at `approved-at`; without the `as_of` anchors it is judged by its current amount.
 
 This composes a multi-hop, as-of check the caller would otherwise assemble by hand — deterministically,
 post-authz, with no reasoner.

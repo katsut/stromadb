@@ -2131,8 +2131,9 @@ impl ReadState {
     /// stored in the registry) — exactly one is required. Predicate/type names are resolved against the
     /// catalog (unknown names are a clear error), then [`conformance::evaluate`] composes the existing
     /// read primitives into `OK | ABSENT | MISMATCH | NOT_APPLICABLE` verdicts, authz-scoped by
-    /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`. Returns
-    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of }, .. ],
+    /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`; `case`
+    /// is the matched case index of a banded rule (`cases`), else null. Returns
+    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of, case }, .. ],
     /// "total", "returned", "truncated", "counts": {OK, ABSENT, MISMATCH, NOT_APPLICABLE} }`.
     ///
     /// Optional narrowing, all additive: `subject` / `subjects` evaluate only those ids (a non-subject
@@ -2605,7 +2606,9 @@ fn value_key(v: &Value) -> DbResult<ObjKey> {
 
 /// Parse a conformance rule from its JSON declaration into the name-based [`conformance::Rule`]
 /// (names are resolved to field ids later, at evaluation, via the catalog). `required` and
-/// `distinct_from` are each optional derived paths; a rule must declare at least one of them.
+/// `distinct_from` are each optional derived paths; `cases` (an ordered first-match list of
+/// `{when?, required?}`) replaces `required` for a banded rule. A rule must declare `required`,
+/// `cases`, or `distinct_from`, and may not declare both `required` and `cases`.
 fn parse_conformance_rule(v: &Value) -> DbResult<conformance::Rule> {
     let subject_type = v["subject_type"]
         .as_str()
@@ -2617,17 +2620,50 @@ fn parse_conformance_rule(v: &Value) -> DbResult<conformance::Rule> {
         .to_string();
     let required = parse_conformance_hops(&v["required"], "required")?;
     let distinct_from = parse_conformance_hops(&v["distinct_from"], "distinct_from")?;
-    if required.is_empty() && distinct_from.is_empty() {
-        return Err("rule must declare required.hops and/or distinct_from.hops".into());
+    let cases = parse_conformance_cases(&v["cases"])?;
+    if !required.is_empty() && !cases.is_empty() {
+        return Err("rule declares both required and cases; put the default path in a final case without 'when'".into());
+    }
+    if required.is_empty() && cases.is_empty() && distinct_from.is_empty() {
+        return Err("rule must declare required.hops, cases, and/or distinct_from.hops".into());
     }
     Ok(conformance::Rule {
         subject_type,
-        scope: parse_conformance_cond(&v["scope"])?,
+        scope: parse_conformance_cond(&v["scope"], "scope")?,
         required,
+        cases,
         distinct_from,
         actual,
-        absent_when: parse_conformance_cond(&v["absent_when"])?,
+        absent_when: parse_conformance_cond(&v["absent_when"], "absent_when")?,
     })
+}
+
+/// Parse an optional `cases: [ { "when"?: condition, "required"?: {"hops": [..]} }, .. ]` list
+/// (absent/null → empty). An empty array is rejected: it would make every subject inapplicable.
+fn parse_conformance_cases(v: &Value) -> DbResult<Vec<conformance::Case>> {
+    if v.is_null() {
+        return Ok(Vec::new());
+    }
+    let arr = v
+        .as_array()
+        .ok_or("rule.cases must be an array of {when?, required?}")?;
+    if arr.is_empty() {
+        return Err("rule.cases must not be empty".into());
+    }
+    arr.iter()
+        .enumerate()
+        .map(|(i, c)| {
+            if !c.is_object() {
+                return Err(format!(
+                    "rule.cases[{i}] must be an object {{when?, required?}}"
+                ));
+            }
+            Ok(conformance::Case {
+                when: parse_conformance_cond(&c["when"], &format!("cases[{i}].when"))?,
+                required: parse_conformance_hops(&c["required"], &format!("cases[{i}].required"))?,
+            })
+        })
+        .collect()
 }
 
 /// Parse an optional derived path `{ "hops": [ { "predicate": name, "as_of"?: anchor }, .. ] }`
@@ -2651,23 +2687,102 @@ fn parse_conformance_hops(v: &Value, what: &str) -> DbResult<Vec<conformance::Ho
     Ok(hops)
 }
 
-/// Parse an optional `{ "predicate": name, "equals": value }` condition (absent/null → `None`).
-/// `equals` takes either the ingest object form (`{"node": N}` / `{"int": …}` / `{"text": …}` /
-/// `{"bool": …}` — the documented shape, required for node-valued conditions) or a bare scalar.
-fn parse_conformance_cond(v: &Value) -> DbResult<Option<conformance::Cond>> {
+/// Parse an optional condition (absent/null → `None`): `{ "predicate": name, "as_of"?: anchor, .. }`
+/// with exactly one test — `"equals": value`, or a numeric range given by `gt`/`gte` (lower) and/or
+/// `lt`/`lte` (upper), or `"between": [lo, hi]` (both inclusive). `equals` takes either the ingest
+/// object form (`{"node": N}` / `{"int": …}` / `{"text": …}` / `{"bool": …}` — the documented shape,
+/// required for node-valued conditions) or a bare scalar; range bounds must be numbers (bare or
+/// `{"int"|"float": …}`). `as_of` names an integer predicate on the subject whose value is the
+/// valid-time instant the condition's predicate is read at.
+fn parse_conformance_cond(v: &Value, what: &str) -> DbResult<Option<conformance::Cond>> {
     if v.is_null() {
         return Ok(None);
     }
     let predicate = v["predicate"]
         .as_str()
-        .ok_or("conformance condition predicate missing")?
+        .ok_or(format!("rule.{what}.predicate missing"))?
         .to_string();
-    let equals = if v["equals"].is_object() {
-        obj_key(&v["equals"])?
-    } else {
-        value_key(&v["equals"])?
+    let as_of = match v.get("as_of") {
+        None | Some(Value::Null) => None,
+        Some(a) => Some(
+            a.as_str()
+                .ok_or(format!("rule.{what}.as_of must be a predicate name"))?
+                .to_string(),
+        ),
     };
-    Ok(Some(conformance::Cond { predicate, equals }))
+    let bound = |key: &str| -> DbResult<Option<ObjKey>> {
+        match v.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(b) => numeric_bound(b)
+                .map(Some)
+                .map_err(|e| format!("rule.{what}.{key}: {e}")),
+        }
+    };
+    let (gt, gte, lt, lte) = (bound("gt")?, bound("gte")?, bound("lt")?, bound("lte")?);
+    let between = match v.get("between") {
+        None | Some(Value::Null) => None,
+        Some(b) => {
+            let pair = b
+                .as_array()
+                .filter(|a| a.len() == 2)
+                .ok_or(format!("rule.{what}.between must be [lo, hi]"))?;
+            let lo = numeric_bound(&pair[0]).map_err(|e| format!("rule.{what}.between: {e}"))?;
+            let hi = numeric_bound(&pair[1]).map_err(|e| format!("rule.{what}.between: {e}"))?;
+            Some((lo, hi))
+        }
+    };
+    let has_equals = v.get("equals").is_some_and(|e| !e.is_null());
+    let has_range = gt.is_some() || gte.is_some() || lt.is_some() || lte.is_some();
+    let tests = usize::from(has_equals) + usize::from(has_range) + usize::from(between.is_some());
+    if tests != 1 {
+        return Err(format!(
+            "rule.{what} needs exactly one test: equals, a range (gt/gte/lt/lte), or between"
+        ));
+    }
+    if gt.is_some() && gte.is_some() {
+        return Err(format!("rule.{what} declares both gt and gte"));
+    }
+    if lt.is_some() && lte.is_some() {
+        return Err(format!("rule.{what} declares both lt and lte"));
+    }
+    let mk = |value: ObjKey, inclusive: bool| conformance::Bound { value, inclusive };
+    let test = if has_equals {
+        conformance::Test::Equals(if v["equals"].is_object() {
+            obj_key(&v["equals"])?
+        } else {
+            value_key(&v["equals"])?
+        })
+    } else if let Some((lo, hi)) = between {
+        conformance::Test::Range(conformance::NumRange {
+            lower: Some(mk(lo, true)),
+            upper: Some(mk(hi, true)),
+        })
+    } else {
+        conformance::Test::Range(conformance::NumRange {
+            lower: gt.map(|b| mk(b, false)).or(gte.map(|b| mk(b, true))),
+            upper: lt.map(|b| mk(b, false)).or(lte.map(|b| mk(b, true))),
+        })
+    };
+    Ok(Some(conformance::Cond {
+        predicate,
+        test,
+        as_of,
+    }))
+}
+
+/// A numeric range bound: a bare JSON number or `{"int": …}` / `{"float": …}`, keyed exactly as the
+/// ingest path keys a stored value of that form (so a bound and a stored value compare alike).
+fn numeric_bound(v: &Value) -> DbResult<ObjKey> {
+    let key = if v.is_object() {
+        obj_key(v)?
+    } else {
+        value_key(v)?
+    };
+    match key {
+        ObjKey::Int(_) => Ok(key),
+        ObjKey::Float(bits) if f64::from_bits(bits).is_finite() => Ok(key),
+        _ => Err("a range bound must be a finite number".into()),
+    }
 }
 
 /// The wire names of every conformance outcome, in `counts` order.
@@ -2684,6 +2799,7 @@ fn verdict_json(v: &conformance::Verdict) -> Value {
         "distinct": v.distinct.clone().map(fmt_obj),
         "actual": v.actual.clone().map(fmt_obj),
         "as_of": v.as_of,
+        "case": v.case,
     })
 }
 

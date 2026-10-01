@@ -389,10 +389,8 @@ mod tests {
         let text = |s: &str| ObjKey::Text(s.to_string());
         let rule = Rule {
             subject_type: "Issue".into(),
-            scope: Some(conformance::Cond {
-                predicate: "issue-type".into(),
-                equals: text("release"),
-            }),
+            scope: Some(conformance::Cond::equals("issue-type", text("release"))),
+            cases: Vec::new(),
             required: vec![
                 conformance::Hop {
                     predicate: "assigned-to".into(),
@@ -412,10 +410,7 @@ mod tests {
                 as_of: None,
             }],
             actual: "approved-by".into(),
-            absent_when: Some(conformance::Cond {
-                predicate: "status".into(),
-                equals: text("released"),
-            }),
+            absent_when: Some(conformance::Cond::equals("status", text("released"))),
         };
 
         let persons: Vec<NodeId> = (1..=6).collect();
@@ -524,6 +519,303 @@ mod tests {
                 &full(&snap),
                 "diverged at step {step} (diffs that round: {diffs:?})"
             );
+        }
+    }
+
+    /// An amount-banded approval graph: team 100 (manager 10) → division 101 (manager 11) →
+    /// company 102 (manager 12); requester 20 in team 100; requests `requests` typed up front.
+    struct Banded {
+        cat: Catalog,
+        eng: Engine,
+        amount: FieldId,
+        approved_by: FieldId,
+        approved_at: FieldId,
+        manager_of: FieldId,
+        parent: FieldId,
+        member_of: FieldId,
+        requester: FieldId,
+    }
+
+    fn banded(requests: &[NodeId]) -> Banded {
+        use crate::catalog::{Cardinality, Range, RelProps, ValueType};
+        let mut cat = Catalog::new();
+        let request = cat.register_type("Request");
+        let person = cat.register_type("Person");
+        let dept = cat.register_type("Department");
+        let d = RelProps::default();
+        let one = Cardinality::One;
+        let requester = cat.register_predicate("requester", one, d, request, Range::Type(person));
+        let member_of = cat.register_predicate("member-of", one, d, person, Range::Type(dept));
+        let parent = cat.register_predicate("parent", one, d, dept, Range::Type(dept));
+        let manager_of = cat.register_predicate("manager-of", one, d, dept, Range::Type(person));
+        let approved_by =
+            cat.register_predicate("approved-by", one, d, request, Range::Type(person));
+        let int = Range::Value(ValueType::Int);
+        let approved_at = cat.register_predicate("approved-at", one, d, request, int);
+        let amount = cat.register_predicate("amount", one, d, request, int);
+        let mut eng = Engine::new(1 << 20);
+        let set = |eng: &mut Engine, s: NodeId, p: FieldId, o: ObjKey| {
+            eng.write(
+                0,
+                WriteKind::SetOne {
+                    subject: s,
+                    predicate: p,
+                    object: o,
+                    valid_from: 0,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        };
+        let typed = |eng: &mut Engine, node: NodeId, type_id: FieldId| {
+            eng.write(0, WriteKind::SetNodeType { node, type_id })
+                .unwrap();
+        };
+        for n in [100, 101, 102] {
+            typed(&mut eng, n, dept);
+        }
+        for n in [10, 11, 12, 20] {
+            typed(&mut eng, n, person);
+        }
+        set(&mut eng, 100, parent, ObjKey::Node(101));
+        set(&mut eng, 101, parent, ObjKey::Node(102));
+        set(&mut eng, 100, manager_of, ObjKey::Node(10));
+        set(&mut eng, 101, manager_of, ObjKey::Node(11));
+        set(&mut eng, 102, manager_of, ObjKey::Node(12));
+        set(&mut eng, 20, member_of, ObjKey::Node(100));
+        for &r in requests {
+            typed(&mut eng, r, request);
+            set(&mut eng, r, requester, ObjKey::Node(20));
+            set(&mut eng, r, approved_at, ObjKey::Int(1200));
+            set(&mut eng, r, approved_by, ObjKey::Node(10));
+            set(&mut eng, r, amount, ObjKey::Int(300_000));
+        }
+        eng.materialize();
+        Banded {
+            cat,
+            eng,
+            amount,
+            approved_by,
+            approved_at,
+            manager_of,
+            parent,
+            member_of,
+            requester,
+        }
+    }
+
+    /// The three-band table: ≤ 500,000 team manager; (500,000, 2,000,000] division manager; above,
+    /// the company manager. `anchor` = read the amount as-of that predicate's instant.
+    fn banded_rule(anchor: Option<&str>) -> Rule {
+        use conformance::{Bound, Case, Cond, Hop, NumRange};
+        let hops = |names: &[&str]| -> Vec<Hop> {
+            names
+                .iter()
+                .map(|n| Hop {
+                    predicate: (*n).into(),
+                    as_of: None,
+                })
+                .collect()
+        };
+        let b = |v: i64, inclusive: bool| {
+            Some(Bound {
+                value: ObjKey::Int(v),
+                inclusive,
+            })
+        };
+        let when = |lower, upper| {
+            let c = Cond::range("amount", NumRange { lower, upper });
+            Some(match anchor {
+                Some(a) => c.as_of(a),
+                None => c,
+            })
+        };
+        Rule {
+            subject_type: "Request".into(),
+            scope: None,
+            required: Vec::new(),
+            cases: vec![
+                Case {
+                    when: when(None, b(500_000, true)),
+                    required: hops(&["requester", "member-of", "manager-of"]),
+                },
+                Case {
+                    when: when(b(500_000, false), b(2_000_000, true)),
+                    required: hops(&["requester", "member-of", "parent", "manager-of"]),
+                },
+                Case {
+                    when: when(b(2_000_000, false), None),
+                    required: hops(&["requester", "member-of", "parent", "parent", "manager-of"]),
+                },
+            ],
+            distinct_from: Vec::new(),
+            actual: "approved-by".into(),
+            absent_when: None,
+        }
+    }
+
+    fn full_eval(snap: &Snapshot, cat: &Catalog, rule: &Rule) -> BTreeMap<NodeId, Verdict> {
+        conformance::evaluate(snap, cat, rule, u32::MAX)
+            .into_iter()
+            .map(|v| (v.subject, v))
+            .collect()
+    }
+
+    #[test]
+    fn amount_revision_moves_a_subject_across_a_band_incrementally() {
+        let requests: Vec<NodeId> = (1000..1200).collect();
+        let mut g = banded(&requests);
+        let rule = banded_rule(None);
+        let mut m = MaintainedConformance::new(rule.clone(), &g.eng.snapshot(), &g.cat);
+        assert!(
+            m.verdicts()
+                .values()
+                .all(|v| v.verdict == conformance::Outcome::Ok && v.case == Some(0))
+        );
+        // the amount key is in exactly one subject's support set: its own
+        assert_eq!(
+            m.dependents.get(&(1005, g.amount)),
+            Some(&BTreeSet::from([1005]))
+        );
+
+        // revise request 1005's amount into the second band
+        g.eng
+            .write(
+                0,
+                WriteKind::SetOne {
+                    subject: 1005,
+                    predicate: g.amount,
+                    object: ObjKey::Int(1_500_000),
+                    valid_from: 0,
+                    valid_to: None,
+                },
+            )
+            .unwrap();
+        let (keys, nodes) = g.eng.materialize_tracked_with_nodes();
+        // the touched keys reach only that subject — no other request is re-judged
+        let candidates: BTreeSet<NodeId> = keys
+            .iter()
+            .filter_map(|k| m.dependents.get(k))
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(candidates, BTreeSet::from([1005]));
+        let snap = g.eng.snapshot();
+        let diffs = m.apply(&snap, &g.cat, &keys, &nodes);
+        assert_eq!(diffs.len(), 1);
+        let d = &diffs[0];
+        assert_eq!(d.subject, 1005);
+        let old = d.old.as_ref().unwrap();
+        let new = d.new.as_ref().unwrap();
+        assert_eq!((old.verdict, old.case), (conformance::Outcome::Ok, Some(0)));
+        assert_eq!(
+            (new.verdict, new.case, new.required.clone()),
+            (
+                conformance::Outcome::Mismatch,
+                Some(1),
+                Some(ObjKey::Node(11))
+            )
+        );
+        assert_eq!(m.verdicts(), &full_eval(&snap, &g.cat, &rule));
+    }
+
+    #[test]
+    fn as_of_band_follows_the_amount_in_effect_at_the_anchor() {
+        let requests: Vec<NodeId> = (1000..1050).collect();
+        let mut g = banded(&requests);
+        let rule = banded_rule(Some("approved-at"));
+        let mut m = MaintainedConformance::new(rule.clone(), &g.eng.snapshot(), &g.cat);
+        let revise = |g: &mut Banded, m: &mut MaintainedConformance, amount: i64, vf: i64| {
+            g.eng
+                .write(
+                    0,
+                    WriteKind::SetOne {
+                        subject: 1007,
+                        predicate: g.amount,
+                        object: ObjKey::Int(amount),
+                        valid_from: vf,
+                        valid_to: None,
+                    },
+                )
+                .unwrap();
+            let (keys, nodes) = g.eng.materialize_tracked_with_nodes();
+            let snap = g.eng.snapshot();
+            let diffs = m.apply(&snap, &g.cat, &keys, &nodes);
+            assert_eq!(m.verdicts(), &full_eval(&snap, &g.cat, &rule));
+            diffs
+        };
+        // raised above the band AFTER the approval instant (1200): the band in effect at approval
+        // is unchanged, so the verdict does not move
+        assert!(revise(&mut g, &mut m, 1_500_000, 2000).is_empty());
+        assert_eq!(m.verdicts()[&1007].case, Some(0));
+        // a retroactive correction effective before the approval moves it into the second band
+        let diffs = revise(&mut g, &mut m, 1_500_000, 1000);
+        assert_eq!(diffs.len(), 1);
+        let new = diffs[0].new.as_ref().unwrap();
+        assert_eq!(
+            (new.verdict, new.case),
+            (conformance::Outcome::Mismatch, Some(1))
+        );
+        // and an amount above the top band at approval needs the company manager
+        let diffs = revise(&mut g, &mut m, 3_000_000, 1100);
+        assert_eq!(diffs[0].new.as_ref().unwrap().case, Some(2));
+    }
+
+    #[test]
+    fn banded_maintenance_equals_full_eval_over_random_stream() {
+        let requests: Vec<NodeId> = (1000..1012).collect();
+        let mut g = banded(&requests);
+        let rules = [banded_rule(None), banded_rule(Some("approved-at"))];
+        let snap = g.eng.snapshot();
+        let mut ms: Vec<MaintainedConformance> = rules
+            .iter()
+            .map(|r| MaintainedConformance::new(r.clone(), &snap, &g.cat))
+            .collect();
+        let persons = [10u64, 11, 12, 20];
+        let depts = [100u64, 101, 102];
+        let mut rng = 0x0bad_cafe_1234_5678u64;
+        for step in 0..2000u64 {
+            let r = requests[(splitmix(&mut rng) % requests.len() as u64) as usize];
+            let p = persons[(splitmix(&mut rng) % 4) as usize];
+            let dp = depts[(splitmix(&mut rng) % 3) as usize];
+            let vf = (splitmix(&mut rng) % 3000) as i64;
+            let set = |s, predicate, object, valid_from| WriteKind::SetOne {
+                subject: s,
+                predicate,
+                object,
+                valid_from,
+                valid_to: None,
+            };
+            let kind = match splitmix(&mut rng) % 8 {
+                0..=2 => {
+                    let amt = (splitmix(&mut rng) % 4_000_000) as i64;
+                    set(r, g.amount, ObjKey::Int(amt), vf)
+                }
+                3 => set(r, g.approved_at, ObjKey::Int(vf), 0),
+                4 => set(r, g.approved_by, ObjKey::Node(p), 0),
+                5 => set(dp, g.manager_of, ObjKey::Node(p), 0),
+                6 => WriteKind::CloseOne {
+                    subject: r,
+                    predicate: g.amount,
+                    valid_from: vf,
+                },
+                _ => match splitmix(&mut rng) % 3 {
+                    0 => set(100, g.parent, ObjKey::Node(dp), 0),
+                    1 => set(20, g.member_of, ObjKey::Node(dp), 0),
+                    _ => set(r, g.requester, ObjKey::Node(p), 0),
+                },
+            };
+            g.eng.write(0, kind).unwrap();
+            let (keys, nodes) = g.eng.materialize_tracked_with_nodes();
+            let snap = g.eng.snapshot();
+            for (m, rule) in ms.iter_mut().zip(&rules) {
+                m.apply(&snap, &g.cat, &keys, &nodes);
+                assert_eq!(
+                    m.verdicts(),
+                    &full_eval(&snap, &g.cat, rule),
+                    "diverged at step {step}"
+                );
+            }
         }
     }
 }

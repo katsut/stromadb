@@ -391,6 +391,32 @@
   `NOT_APPLICABLE`, and it makes the caller encode a key lookup as a rule. `lookup` (D28) plus
   `subjects` keeps rules declarative and the call order simple: key → id → verdict.
 
+### D30. Conformance conditions take numeric ranges, and rules can be banded by first-match cases
+- **Context:** approval-authority tables are usually banded by amount: up to one limit the direct
+  manager approves, up to a higher one the next level, above that a fixed approver. Conditions
+  could only test equality, so the amount-dependent part of such a table was not expressible, and a
+  request raised past a band after approval could not be flagged.
+- **Decision:** a condition is `{predicate, as_of?, test}` where the test is `equals` or a numeric
+  range (`gt`/`gte` and/or `lt`/`lte`, or inclusive `between`). Two ints compare exactly; any other
+  int/float pair compares as `f64`. A condition's `as_of` reads its value at the instant held by an
+  anchor predicate on the subject, the same rule an as-of hop follows. A rule may replace `required`
+  with ordered `cases: [{when?, required?}]`, evaluated first-match, so one stored rule encodes the
+  whole table; verdicts carry the matched `case` index.
+- **Unreadable values:** a missing value, a non-numeric value under a range, or a missing anchor
+  leaves the condition unsatisfied, exactly as an equality test over a missing value already did.
+  So an unreadable scope is `NOT_APPLICABLE`, an unreadable `absent_when` does not raise `ABSENT`,
+  and an unreadable band falls through to the next case. Treating it as a violation instead would
+  report a gap the rule never declared; a rule that wants one can say so with a final catch-all
+  case.
+- **Incremental maintenance:** condition reads, including the anchor and the as-of value, go
+  through the same traced read path as hops, so they join the verdict's support set (D26). Case
+  selection records only the conditions it consulted, up to the match. A revision of the amount
+  re-judges exactly the subjects that read it. Property test: random amount revisions, closes,
+  retroactive corrections and org changes against both a current-value and an as-of banded rule,
+  with a full-evaluate oracle after every event.
+- **Not done:** no arithmetic or cross-predicate comparisons (amount vs. another subject's limit).
+  Bands are literals in the rule.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |
