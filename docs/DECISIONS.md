@@ -423,6 +423,36 @@
 - **Not done:** no arithmetic or cross-predicate comparisons (amount vs. another subject's limit).
   Bands are literals in the rule.
 
+### D31. An unresolved required path is NOT_APPLICABLE with a reason, not a wrong MISMATCH
+- **Context:** when the required path resolved to no value, such as a missing intermediate edge or
+  a missing as-of anchor, a present actual was reported `MISMATCH` with `kind: wrong` and
+  `required: null`. A correct approval then looked the same as a wrong one, and a stale one lost its
+  `stale` kind. Separately, out-of-scope subjects came back `NOT_APPLICABLE` with no reason while
+  requested non-subjects had one.
+- **Decision:** every `NOT_APPLICABLE` row carries exactly one `reason`, and no other row does:
+  `out_of_scope`, `no_matching_case`, `required_unresolved`, plus the two from D29. A present actual
+  whose required path does not resolve is `NOT_APPLICABLE` with `required_unresolved`. The row keeps
+  its `actual`, `distinct`, `as_of` and `case` values for diagnosis. Responses add `reasons`, a
+  count per reason over every row before `only` and paging.
+- **Precedence:** a missing actual is judged exactly as before, `ABSENT` when `absent_when` holds and
+  `OK` otherwise, whether or not the required path resolves. Absence does not depend on the expected
+  value, and the gap is real either way. With a present actual, a resolved `distinct_from` collision
+  stays `MISMATCH` (`wrong`), since it is decidable without the expected value. Only what remains
+  becomes `required_unresolved`.
+- **Why not a fifth verdict:** an `UNRESOLVED` verdict would be equally precise, but existing
+  callers rely on the four-value space. The console summary renders the four `counts` keys, scripts
+  sum them, and `only` filters and MCP defaults are written against them. Under the chosen mapping
+  a caller that acts on `MISMATCH` stops seeing false violations without any change, a caller that
+  ignores `NOT_APPLICABLE` keeps working, and one that wants the data gaps reads `reason` or
+  `reasons`. The MCP default still omits `NOT_APPLICABLE` rows from a full evaluation, so
+  `reasons.required_unresolved` keeps their number visible.
+- **Incremental maintenance:** unchanged in mechanism. A walk records the read that came up empty,
+  `(last reached node, hop predicate)` or the anchor key, so the write that supplies the missing
+  fact re-judges exactly the subjects stopped there (D26). Tests: a late edge moves a subject from
+  `required_unresolved` to `OK` and another to `MISMATCH`, with no other subject re-judged. The
+  banded random stream now adds and closes org edges and asserts that it crosses the unresolved
+  boundary in both directions, with the full-evaluate oracle after every event.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |

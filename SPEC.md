@@ -295,7 +295,7 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
   {"subject": 1, "verdict": "OK",             "kind": null,    "required": "Grace", "actual": "Grace", "as_of": 1704067200},
   {"subject": 2, "verdict": "MISMATCH",       "kind": "stale", "required": "Lin",   "actual": "Ada",   "as_of": 1701388800},
   {"subject": 5, "verdict": "ABSENT",         "kind": null,    "required": "Ivy",   "actual": null,    "as_of": null},
-  {"subject": 9, "verdict": "NOT_APPLICABLE", "kind": null,    "required": null,    "actual": null,    "as_of": null}
+  {"subject": 9, "verdict": "NOT_APPLICABLE", "kind": null,    "required": null,    "actual": null,    "as_of": null, "reason": "out_of_scope"}
 ]}
 ```
 
@@ -311,23 +311,38 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
     sub-classifies an equality mismatch via valid-time history as `stale` (was once correct) or
     `wrong` (never correct) — a must-differ collision holds *now*, so it is always `wrong`.
   - `ABSENT` — `actual` is missing where `absent_when` says it should exist.
-  - `NOT_APPLICABLE` — the subject falls outside `scope` (or matches no `cases` entry).
+  - `NOT_APPLICABLE` — the rule does not judge the subject. Every `NOT_APPLICABLE` row, and only
+    such a row, carries a `reason`:
+    - `out_of_scope` — the subject falls outside `scope`.
+    - `no_matching_case` — a banded rule matched no `cases` entry.
+    - `required_unresolved` — `actual` is present but the required path resolves to no value (a
+      hop along it has no value, or its as-of anchor is missing), so equality cannot be judged.
+      The row keeps its `actual`, `distinct`, `as_of` and `case` values. Missing data on the
+      required path is never reported as a violation.
+
+Precedence when the required path is unresolved: a missing `actual` is still `ABSENT` (when
+`absent_when` holds) or `OK`, since absence does not depend on the expected value. A present
+`actual` that collides with a resolved `distinct_from` value is still `MISMATCH` (`wrong`).
+Otherwise it is `NOT_APPLICABLE` with `required_unresolved`. When the missing fact arrives, a
+watched rule re-judges the subject incrementally, because the read that came up empty is part of
+its support set.
 
 `subject: N` or `subjects: [N, …]` evaluates only those ids, in O(listed). The answer holds exactly
 one row per distinct requested id, sorted by id. A visible subject of the rule's type is judged as
-above. Any other id is still answered, as `NOT_APPLICABLE` with no values and an extra `reason`:
+above. Any other id is still answered, as `NOT_APPLICABLE` with no values and one of two further
+reasons:
 
 - `not_subject_type` — the id names a visible node whose type is not the rule's `subject_type`.
 - `unknown_subject` — the id names no typed node, or a node hidden from the caller by
   `allowed_labels`. A hidden node reads as unknown whatever its type, so the answer does not
   reveal that it exists.
 
-Judged rows carry no `reason`, and a full evaluation never produces one. `only: [verdict, …]`
-keeps those outcomes, and `offset` / `limit` page the kept rows. The response adds `total` (rows
-kept by `only`), `returned`, `truncated` (rows remain after this page) and `counts` per verdict over
-every row before `only` and paging; a row with a `reason` counts as `NOT_APPLICABLE`. These rows
-exist only in the explicit-subjects answer: `conformance_watch` / `conformance_changes` maintain
-verdicts for subjects of the rule's type only.
+`only: [verdict, …]` keeps those outcomes, and `offset` / `limit` page the kept rows. The response
+adds `total` (rows kept by `only`), `returned`, `truncated` (rows remain after this page), `counts`
+per verdict, and `reasons` per `NOT_APPLICABLE` reason, both over every row before `only` and
+paging. `not_subject_type` and `unknown_subject` rows exist only in the explicit-subjects answer:
+`conformance_watch` / `conformance_changes` maintain verdicts for subjects of the rule's type only,
+and their rows carry the other reasons.
 
 ```jsonc
 {"op": "conformance", "rule_name": "release-approval", "subjects": [1005, 10, 999999]}
@@ -336,7 +351,9 @@ verdicts for subjects of the rule's type only.
 //      {"subject": 1005,   "verdict": "MISMATCH",       "kind": "wrong", …},
 //      {"subject": 999999, "verdict": "NOT_APPLICABLE", "reason": "unknown_subject", …}],
 //    "total": 3, "returned": 3, "truncated": false,
-//    "counts": {"OK": 0, "ABSENT": 0, "MISMATCH": 1, "NOT_APPLICABLE": 2}}
+//    "counts": {"OK": 0, "ABSENT": 0, "MISMATCH": 1, "NOT_APPLICABLE": 2},
+//    "reasons": {"out_of_scope": 0, "no_matching_case": 0, "required_unresolved": 0,
+//                "not_subject_type": 1, "unknown_subject": 1}}
 ```
 
 Conditions (`scope`, `absent_when`, and a case's `when`) test one `one`-predicate value of the
@@ -355,7 +372,7 @@ over a missing value. An unreadable `scope` therefore yields `NOT_APPLICABLE`, a
 
 A banded rule replaces `required` with ordered `cases`, evaluated first-match. The first case whose
 `when` holds supplies the required path; a case without `when` always holds, so it serves as the
-default. No match is `NOT_APPLICABLE`. Each verdict reports the matched `case` index (null for a
+default. No match is `NOT_APPLICABLE` with `reason` `no_matching_case`. Each verdict reports the matched `case` index (null for a
 rule without cases):
 
 ```jsonc

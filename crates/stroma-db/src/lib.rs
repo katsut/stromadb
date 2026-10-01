@@ -2167,20 +2167,25 @@ impl ReadState {
     /// stored in the registry) — exactly one is required. Predicate/type names are resolved against the
     /// catalog (unknown names are a clear error), then [`conformance::evaluate`] composes the existing
     /// read primitives into `OK | ABSENT | MISMATCH | NOT_APPLICABLE` verdicts, authz-scoped by
-    /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`; `case`
-    /// is the matched case index of a banded rule (`cases`), else null. Returns
-    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of, case }, .. ],
-    /// "total", "returned", "truncated", "counts": {OK, ABSENT, MISMATCH, NOT_APPLICABLE} }`.
+    /// `allowed_labels` (default all). A `MISMATCH` carries a `kind` of `"stale"` or `"wrong"`; a
+    /// `NOT_APPLICABLE` row, and only such a row, carries a `reason`: `"out_of_scope"`,
+    /// `"no_matching_case"`, or `"required_unresolved"` (the actual is present but the required
+    /// path resolved to no value; the row keeps its values). `case` is the matched case index of a
+    /// banded rule (`cases`), else null. Returns
+    /// `{ "verdicts": [ { subject, verdict, kind, required, distinct, actual, as_of, case, reason? },
+    /// .. ], "total", "returned", "truncated", "counts": {OK, ABSENT, MISMATCH, NOT_APPLICABLE},
+    /// "reasons": {out_of_scope, no_matching_case, required_unresolved, not_subject_type,
+    /// unknown_subject} }`.
     ///
     /// Optional narrowing, all additive: `subject` / `subjects` evaluate only those ids, one row per
     /// distinct requested id (sorted by id). A requested id the rule does not judge answers
-    /// `NOT_APPLICABLE` with an extra `reason`: `"not_subject_type"` for a visible node of another
-    /// type, `"unknown_subject"` for an id with no typed node or a node hidden by `allowed_labels`
-    /// (hidden and nonexistent are indistinguishable). Judged rows carry no `reason`. `only: [verdict
-    /// names]` keeps those outcomes; `offset` / `limit` page the kept rows. `counts` covers every row
-    /// before `only` and paging (reason rows count as `NOT_APPLICABLE`), `total` is the kept count,
-    /// and `truncated` means rows remain after this page. With none of them the op returns every
-    /// verdict, as before; the MCP tool applies its own smaller defaults.
+    /// `NOT_APPLICABLE` with no values and the `reason` `"not_subject_type"` for a visible node of
+    /// another type, `"unknown_subject"` for an id with no typed node or a node hidden by
+    /// `allowed_labels` (hidden and nonexistent are indistinguishable). `only: [verdict names]`
+    /// keeps those outcomes; `offset` / `limit` page the kept rows. `counts` (per verdict) and
+    /// `reasons` (per reason of the `NOT_APPLICABLE` rows) cover every row before `only` and paging,
+    /// `total` is the kept count, and `truncated` means rows remain after this page. With none of
+    /// them the op returns every verdict, as before; the MCP tool applies its own smaller defaults.
     fn conformance(&self, req: &Value) -> DbResult<Value> {
         let rule = if let Some(name) = req["rule_name"].as_str() {
             self.schema
@@ -2249,30 +2254,34 @@ impl ReadState {
         };
         let offset = req["offset"].as_u64().unwrap_or(0) as usize;
         let limit = req["limit"].as_u64().map(|l| l as usize);
-        let rows: Vec<conformance::RequestedVerdict> = match &subjects {
+        let rows: Vec<conformance::Verdict> = match &subjects {
             Some(s) => {
                 conformance::evaluate_subjects(&self.snap, &self.schema.cat, &rule, labels, s)
             }
-            None => conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels)
-                .into_iter()
-                .map(|row| conformance::RequestedVerdict { row, reason: None })
-                .collect(),
+            None => conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels),
         };
-        // Counts per verdict over every row (each visible subject, or each requested id), before
-        // `only`/paging. A requested id answered with a `reason` counts under NOT_APPLICABLE.
-        let mut counts = serde_json::Map::new();
-        for name in CONFORMANCE_OUTCOMES {
-            counts.insert(name.to_string(), json!(0));
-        }
-        for r in &rows {
-            let c = &mut counts[r.row.verdict.as_str()];
+        // Counts per verdict, and per reason of the NOT_APPLICABLE rows, over every row (each
+        // visible subject, or each requested id), before `only`/paging.
+        let zeros = |names: &[&str]| -> serde_json::Map<String, Value> {
+            names.iter().map(|n| (n.to_string(), json!(0))).collect()
+        };
+        let mut counts = zeros(&CONFORMANCE_OUTCOMES);
+        let mut reasons = zeros(&conformance::NotApplicableReason::ALL.map(|r| r.as_str()));
+        let bump = |m: &mut serde_json::Map<String, Value>, k: &str| {
+            let c = &mut m[k];
             *c = json!(c.as_u64().unwrap_or(0) + 1);
+        };
+        for r in &rows {
+            bump(&mut counts, r.verdict.as_str());
+            if let Some(reason) = r.reason {
+                bump(&mut reasons, reason.as_str());
+            }
         }
-        let selected: Vec<&conformance::RequestedVerdict> = rows
+        let selected: Vec<&conformance::Verdict> = rows
             .iter()
             .filter(|r| {
                 only.as_ref()
-                    .is_none_or(|o| o.contains(&r.row.verdict.as_str()))
+                    .is_none_or(|o| o.contains(&r.verdict.as_str()))
             })
             .collect();
         let total = selected.len();
@@ -2280,13 +2289,7 @@ impl ReadState {
             .into_iter()
             .skip(offset)
             .take(limit.unwrap_or(usize::MAX))
-            .map(|r| {
-                let mut v = verdict_json(&r.row);
-                if let Some(reason) = r.reason {
-                    v["reason"] = json!(reason.as_str());
-                }
-                v
-            })
+            .map(verdict_json)
             .collect();
         let returned = out.len();
         Ok(json!({
@@ -2295,6 +2298,7 @@ impl ReadState {
             "returned": returned,
             "truncated": offset.saturating_add(returned) < total,
             "counts": counts,
+            "reasons": reasons,
         }))
     }
 
@@ -2847,7 +2851,7 @@ const CONFORMANCE_OUTCOMES: [&str; 4] = ["OK", "ABSENT", "MISMATCH", "NOT_APPLIC
 /// One verdict in the wire shape shared by the `conformance` op, `conformance_watch`, and the
 /// `conformance_changes` diff entries.
 fn verdict_json(v: &conformance::Verdict) -> Value {
-    json!({
+    let mut out = json!({
         "subject": v.subject,
         "verdict": v.verdict.as_str(),
         "kind": v.mismatch_kind.map(|k| k.as_str()),
@@ -2856,7 +2860,12 @@ fn verdict_json(v: &conformance::Verdict) -> Value {
         "actual": v.actual.clone().map(fmt_obj),
         "as_of": v.as_of,
         "case": v.case,
-    })
+    });
+    // present exactly on NOT_APPLICABLE rows
+    if let Some(reason) = v.reason {
+        out["reason"] = json!(reason.as_str());
+    }
+    out
 }
 
 /// Whether `node` is visible to a principal with `allowed_labels` (unlabeled = public) — the same

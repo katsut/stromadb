@@ -9,6 +9,13 @@
 //!      equal, **distinct_from** the value it must NOT equal (a rule declares either or both);
 //!   3. reads the **actual** value and compares.
 //!
+//! Every `NOT_APPLICABLE` verdict carries a [`NotApplicableReason`]: `out_of_scope` (the scope
+//! failed), `no_matching_case` (a banded rule matched no case), or `required_unresolved` (the actual
+//! is present but the required path resolved to no value, so equality cannot be judged). Missing
+//! data on the required path is therefore never reported as a violation. Precedence: a missing
+//! actual is judged `ABSENT` / `OK` as usual whatever the required path resolved to, and a resolved
+//! `distinct_from` collision is still `MISMATCH` when the required path is unresolved.
+//!
 //! The whole composition is a pure function of the snapshot, so the same snapshot always yields the
 //! same verdicts (sorted by subject id for stable output).
 //!
@@ -260,16 +267,62 @@ impl MismatchKind {
     }
 }
 
+/// Why a subject is `NOT_APPLICABLE`. Every `NOT_APPLICABLE` verdict carries exactly one reason, and
+/// no other verdict carries one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotApplicableReason {
+    /// The rule's `scope` condition does not hold for the subject.
+    OutOfScope,
+    /// The rule is banded and no case's `when` holds.
+    NoMatchingCase,
+    /// The actual is present but the required path resolves to no value (a missing hop value or a
+    /// missing as-of anchor), so equality cannot be judged. The row keeps its derived and observed
+    /// values. A resolved `distinct_from` collision still wins as `MISMATCH`, and a missing actual
+    /// is still judged `ABSENT` / `OK` as usual.
+    RequiredUnresolved,
+    /// Only from [`evaluate_subjects`]: the id names a visible node whose type is not the rule's
+    /// `subject_type`.
+    NotSubjectType,
+    /// Only from [`evaluate_subjects`]: the id names no typed node, or one hidden from the principal
+    /// by its label. The two are deliberately indistinguishable, so the answer does not reveal that a
+    /// hidden node exists.
+    UnknownSubject,
+}
+
+impl NotApplicableReason {
+    /// Every reason, in wire order.
+    pub const ALL: [NotApplicableReason; 5] = [
+        NotApplicableReason::OutOfScope,
+        NotApplicableReason::NoMatchingCase,
+        NotApplicableReason::RequiredUnresolved,
+        NotApplicableReason::NotSubjectType,
+        NotApplicableReason::UnknownSubject,
+    ];
+
+    /// The stable wire name of this reason.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NotApplicableReason::OutOfScope => "out_of_scope",
+            NotApplicableReason::NoMatchingCase => "no_matching_case",
+            NotApplicableReason::RequiredUnresolved => "required_unresolved",
+            NotApplicableReason::NotSubjectType => "not_subject_type",
+            NotApplicableReason::UnknownSubject => "unknown_subject",
+        }
+    }
+}
+
 /// A per-subject verdict. `required`/`distinct`/`actual` are the derived and observed values
 /// (node-valued in the first cut); `as_of` is the valid-time instant an as-of hop was read at, if a
 /// path used one (the required path's anchor wins when both do).
-/// `mismatch_kind` is `Some` only when `verdict == Mismatch`. `case` is the index of the matched
-/// [`Case`] for a banded rule (`None` for a rule without cases, or when no case matched).
+/// `mismatch_kind` is `Some` only when `verdict == Mismatch`, and `reason` only when
+/// `verdict == NotApplicable`. `case` is the index of the matched [`Case`] for a banded rule (`None`
+/// for a rule without cases, or when no case matched).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub subject: NodeId,
     pub verdict: Outcome,
     pub mismatch_kind: Option<MismatchKind>,
+    pub reason: Option<NotApplicableReason>,
     pub required: Option<ObjKey>,
     pub distinct: Option<ObjKey>,
     pub actual: Option<ObjKey>,
@@ -278,12 +331,13 @@ pub struct Verdict {
 }
 
 impl Verdict {
-    /// A `NOT_APPLICABLE` verdict for `subject` carrying no derived or observed values.
-    pub fn not_applicable(subject: NodeId) -> Self {
+    /// A `NOT_APPLICABLE` verdict for `subject` with `reason`, carrying no derived or observed values.
+    pub fn not_applicable(subject: NodeId, reason: NotApplicableReason) -> Self {
         Verdict {
             subject,
             verdict: Outcome::NotApplicable,
             mismatch_kind: None,
+            reason: Some(reason),
             required: None,
             distinct: None,
             actual: None,
@@ -356,70 +410,33 @@ pub fn evaluate(
         .collect()
 }
 
-/// Why a requested subject was answered `NOT_APPLICABLE` without being judged by the rule. Only
-/// [`evaluate_subjects`] produces these; a full evaluation and incremental maintenance never do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SkipReason {
-    /// The id names a visible node whose type is not the rule's `subject_type`.
-    NotSubjectType,
-    /// The id names no typed node, or one hidden from the principal by its label. The two are
-    /// deliberately indistinguishable, so the answer does not reveal that a hidden node exists.
-    UnknownSubject,
-}
-
-impl SkipReason {
-    /// The stable wire name of this reason.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SkipReason::NotSubjectType => "not_subject_type",
-            SkipReason::UnknownSubject => "unknown_subject",
-        }
-    }
-}
-
-/// One row of [`evaluate_subjects`]: the verdict for a requested id, with `reason` set when the
-/// id was not judged by the rule (the verdict is then `NOT_APPLICABLE` with no values).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequestedVerdict {
-    pub row: Verdict,
-    pub reason: Option<SkipReason>,
-}
-
 /// [`evaluate`] restricted to the given `subjects`: exactly one row per distinct listed id, sorted
-/// by id. A visible subject of the rule's type is judged exactly as [`evaluate`] judges it (no
-/// `reason`). Any other id answers `NOT_APPLICABLE` with a [`SkipReason`]: `NotSubjectType` for a
-/// visible node of another type, `UnknownSubject` for an id with no typed node or a node hidden
-/// by `principal_labels` (a hidden node is reported as unknown whatever its type, so its existence
-/// is not revealed). Cost is O(listed), not O(subjects).
+/// by id. A visible subject of the rule's type is judged exactly as [`evaluate`] judges it. Any
+/// other id answers `NOT_APPLICABLE` with no values and a reason only this function produces:
+/// [`NotApplicableReason::NotSubjectType`] for a visible node of another type,
+/// [`NotApplicableReason::UnknownSubject`] for an id with no typed node or a node hidden by
+/// `principal_labels` (a hidden node is reported as unknown whatever its type, so its existence is
+/// not revealed). Cost is O(listed), not O(subjects).
 pub fn evaluate_subjects(
     snap: &Snapshot,
     cat: &Catalog,
     rule: &Rule,
     principal_labels: u32,
     subjects: &[NodeId],
-) -> Vec<RequestedVerdict> {
+) -> Vec<Verdict> {
     let subject_ty = cat.field_id(&rule.subject_type);
     let mut picked: Vec<NodeId> = subjects.to_vec();
     picked.sort_unstable();
     picked.dedup();
     picked
         .into_iter()
-        .map(|s| {
-            let skipped = |reason| RequestedVerdict {
-                row: Verdict::not_applicable(s),
-                reason: Some(reason),
-            };
-            match snap.node_types.get(&s) {
-                Some(_) if !visible(snap, s, principal_labels) => {
-                    skipped(SkipReason::UnknownSubject)
-                }
-                Some(&ty) if Some(ty) == subject_ty => RequestedVerdict {
-                    row: judge(snap, cat, rule, s),
-                    reason: None,
-                },
-                Some(_) => skipped(SkipReason::NotSubjectType),
-                None => skipped(SkipReason::UnknownSubject),
+        .map(|s| match snap.node_types.get(&s) {
+            Some(_) if !visible(snap, s, principal_labels) => {
+                Verdict::not_applicable(s, NotApplicableReason::UnknownSubject)
             }
+            Some(&ty) if Some(ty) == subject_ty => judge(snap, cat, rule, s),
+            Some(_) => Verdict::not_applicable(s, NotApplicableReason::NotSubjectType),
+            None => Verdict::not_applicable(s, NotApplicableReason::UnknownSubject),
         })
         .collect()
 }
@@ -509,12 +526,11 @@ pub(crate) fn judge_traced(
     s: NodeId,
     rec: &mut impl FnMut(NodeId, FieldId),
 ) -> Verdict {
-    let not_applicable = Verdict::not_applicable(s);
     // scope: out-of-scope subjects are not judged.
     if let Some(scope) = &rule.scope
         && !cond_holds_traced(snap, cat, s, scope, rec)
     {
-        return not_applicable;
+        return Verdict::not_applicable(s, NotApplicableReason::OutOfScope);
     }
 
     // A banded rule selects its required path by the first matching case; only the conditions
@@ -534,7 +550,7 @@ pub(crate) fn judge_traced(
         }
         match matched {
             Some(i) => (&rule.cases[i].required, Some(i)),
-            None => return not_applicable,
+            None => return Verdict::not_applicable(s, NotApplicableReason::NoMatchingCase),
         }
     };
 
@@ -553,7 +569,13 @@ pub(crate) fn judge_traced(
         point_one(snap, s, p)
     });
 
-    let (outcome, mismatch_kind) = match &actual {
+    // Precedence (D31): a missing actual is judged ABSENT / OK whatever the required path resolved
+    // to, since absence does not depend on the expected value. A present actual is first checked
+    // for an equality mismatch against a RESOLVED required value; when the required path resolved
+    // to nothing, equality cannot be judged, so a resolved must-differ collision is still a
+    // MISMATCH and anything else is NOT_APPLICABLE with `required_unresolved`.
+    let required_unresolved = !required_hops.is_empty() && required.is_none();
+    let (outcome, mismatch_kind, reason) = match &actual {
         // absent: no actual value. If an absence condition is declared and holds, it is a gap;
         // otherwise it is not (yet) expected, so OK.
         None => {
@@ -562,13 +584,26 @@ pub(crate) fn judge_traced(
                 .as_ref()
                 .is_some_and(|c| cond_holds_traced(snap, cat, s, c, rec))
             {
-                (Outcome::Absent, None)
+                (Outcome::Absent, None, None)
             } else {
-                (Outcome::Ok, None)
+                (Outcome::Ok, None, None)
             }
         }
-        // present: an equality expectation must match (a broken/underived path never matches), and
-        // a must-differ expectation must not collide (an underived path can never collide).
+        // present but the expected value is unknown: only a must-differ collision is decidable
+        // (an underived must-differ path can never collide).
+        Some(a) if required_unresolved => {
+            if distinct.as_ref() == Some(a) {
+                (Outcome::Mismatch, Some(MismatchKind::Wrong), None)
+            } else {
+                (
+                    Outcome::NotApplicable,
+                    None,
+                    Some(NotApplicableReason::RequiredUnresolved),
+                )
+            }
+        }
+        // present: a declared equality expectation must match, and a must-differ expectation must
+        // not collide (an underived must-differ path can never collide).
         Some(a) => {
             if !required_hops.is_empty() && required.as_ref() != Some(a) {
                 // classify: stale if the actual value once satisfied the final as-of hop at an
@@ -579,12 +614,12 @@ pub(crate) fn judge_traced(
                     }
                     _ => MismatchKind::Wrong,
                 };
-                (Outcome::Mismatch, Some(kind))
+                (Outcome::Mismatch, Some(kind), None)
             } else if distinct.as_ref() == Some(a) {
                 // a must-differ collision holds *now* — there is nothing stale about it.
-                (Outcome::Mismatch, Some(MismatchKind::Wrong))
+                (Outcome::Mismatch, Some(MismatchKind::Wrong), None)
             } else {
-                (Outcome::Ok, None)
+                (Outcome::Ok, None, None)
             }
         }
     };
@@ -593,6 +628,7 @@ pub(crate) fn judge_traced(
         subject: s,
         verdict: outcome,
         mismatch_kind,
+        reason,
         required,
         distinct,
         actual,
@@ -909,39 +945,177 @@ mod tests {
         let some = evaluate_subjects(&f.snap, &f.cat, &rule(), u32::MAX, &[6, 3, 6, 10, 999]);
         // one row per distinct id, sorted; judged rows equal the full evaluation's
         assert_eq!(
-            some.iter().map(|r| r.row.subject).collect::<Vec<_>>(),
+            some.iter().map(|r| r.subject).collect::<Vec<_>>(),
             vec![3, 6, 10, 999]
         );
-        let judged: Vec<Verdict> = some
-            .iter()
-            .filter(|r| r.reason.is_none())
-            .map(|r| r.row.clone())
-            .collect();
         let expect: Vec<Verdict> = full
             .iter()
             .filter(|v| v.subject == 3 || v.subject == 6)
             .cloned()
             .collect();
-        assert_eq!(judged, expect);
+        assert_eq!(some[..2], expect[..]);
         // a node of another type and an unknown id answer NOT_APPLICABLE with their reason
-        assert_eq!(some[2].row, Verdict::not_applicable(10));
-        assert_eq!(some[2].reason, Some(SkipReason::NotSubjectType));
-        assert_eq!(some[3].row, Verdict::not_applicable(999));
-        assert_eq!(some[3].reason, Some(SkipReason::UnknownSubject));
+        use NotApplicableReason::{NotSubjectType, OutOfScope, UnknownSubject};
+        assert_eq!(some[2], Verdict::not_applicable(10, NotSubjectType));
+        assert_eq!(some[3], Verdict::not_applicable(999, UnknownSubject));
+        // an out-of-scope subject is judged, with its own reason
+        let scoped = evaluate_subjects(&f.snap, &f.cat, &rule(), u32::MAX, &[4]);
+        assert_eq!(scoped, vec![Verdict::not_applicable(4, OutOfScope)]);
         // a hidden node reads as unknown, whether or not it is of the subject type
         std::sync::Arc::make_mut(&mut f.snap.node_labels).insert(3, 1);
         std::sync::Arc::make_mut(&mut f.snap.node_labels).insert(10, 1);
         let masked = evaluate_subjects(&f.snap, &f.cat, &rule(), 0b1, &[3, 6, 10]);
-        let reasons: Vec<_> = masked.iter().map(|r| (r.row.subject, r.reason)).collect();
+        let reasons: Vec<_> = masked.iter().map(|r| (r.subject, r.reason)).collect();
         assert_eq!(
             reasons,
             vec![
-                (3, Some(SkipReason::UnknownSubject)),
+                (3, Some(UnknownSubject)),
                 (6, None),
-                (10, Some(SkipReason::UnknownSubject)),
+                (10, Some(UnknownSubject))
             ]
         );
-        assert_eq!(masked[0].row, Verdict::not_applicable(3));
+        assert_eq!(masked[0], Verdict::not_applicable(3, UnknownSubject));
+    }
+
+    #[test]
+    fn reason_is_set_exactly_on_not_applicable_verdicts() {
+        let f = fixture();
+        let vs = evaluate(&f.snap, &f.cat, &rule(), u32::MAX);
+        for v in &vs {
+            assert_eq!(
+                v.reason.is_some(),
+                v.verdict == Outcome::NotApplicable,
+                "{v:?}"
+            );
+        }
+        assert_eq!(
+            verdicts_by_subject(&vs)[&4].reason,
+            Some(NotApplicableReason::OutOfScope)
+        );
+        let b = banded_fixture();
+        let vs = evaluate(
+            &b.snap,
+            &b.cat,
+            &banded_rule(Some("approved-at"), false),
+            u32::MAX,
+        );
+        assert_eq!(
+            verdicts_by_subject(&vs)[&7].reason,
+            Some(NotApplicableReason::NoMatchingCase)
+        );
+    }
+
+    // The fixture graph plus issues whose required path cannot be resolved: 7 is assigned to a
+    // person with no department (Eve, 30), 8 has no approval instant to anchor the as-of hop, 9 is
+    // self-approved by that department-less assignee, 10 is released with no approval, 11 is open
+    // with no approval, and 12 approved by Alice whose stale authority is only visible through the
+    // department Eve does not have.
+    fn unresolved_fixture() -> Fixture {
+        let cat = fixture().cat;
+        let id = |c: &Catalog, n: &str| c.field_id(n).unwrap();
+        let (issue, person) = (id(&cat, "Issue"), id(&cat, "Person"));
+        let assigned_to = id(&cat, "assigned-to");
+        let approved_by = id(&cat, "approved-by");
+        let approved_at = id(&cat, "approved-at");
+        let issue_type = id(&cat, "issue-type");
+        let status = id(&cat, "status");
+        let member_of = id(&cat, "member-of");
+        let manager_of = id(&cat, "manager-of");
+        let mut ops: Vec<Op> = Vec::new();
+        let mut seq = 0u64;
+        set_type(&mut ops, &mut seq, 100, id(&cat, "Department"));
+        for p in [10, 12, 30, 201] {
+            set_type(&mut ops, &mut seq, p, person);
+        }
+        set_one(&mut ops, &mut seq, 100, manager_of, ObjKey::Node(10), 1000);
+        set_one(&mut ops, &mut seq, 100, manager_of, ObjKey::Node(12), 5000);
+        set_one(&mut ops, &mut seq, 201, member_of, ObjKey::Node(100), 1000);
+        // (issue, assignee, approver, approved-at, status)
+        type Row<'a> = (NodeId, NodeId, Option<NodeId>, Option<i64>, &'a str);
+        let rows: [Row; 6] = [
+            (7, 30, Some(10), Some(1200), "released"),
+            (8, 201, Some(10), None, "released"),
+            (9, 30, Some(30), Some(1200), "released"),
+            (10, 30, None, Some(1200), "released"),
+            (11, 30, None, None, "open"),
+            (12, 30, Some(10), Some(6000), "released"),
+        ];
+        for (i, who, approver, at, st) in rows {
+            set_type(&mut ops, &mut seq, i, issue);
+            set_one(&mut ops, &mut seq, i, issue_type, text("release"), 0);
+            set_one(&mut ops, &mut seq, i, assigned_to, ObjKey::Node(who), 0);
+            set_one(&mut ops, &mut seq, i, status, text(st), 0);
+            if let Some(a) = approver {
+                set_one(&mut ops, &mut seq, i, approved_by, ObjKey::Node(a), 0);
+            }
+            if let Some(t) = at {
+                set_one(&mut ops, &mut seq, i, approved_at, ObjKey::Int(t), 0);
+            }
+        }
+        Fixture {
+            snap: fold(&ops).observe(),
+            cat,
+        }
+    }
+
+    #[test]
+    fn an_unresolved_required_path_is_not_a_mismatch() {
+        let f = unresolved_fixture();
+        let mut r = rule();
+        r.distinct_from = hops(&["assigned-to"]);
+        let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        let unresolved = Some(NotApplicableReason::RequiredUnresolved);
+        // actual present, the department hop is missing: not judged, values kept for diagnosis
+        assert_eq!(by[&7].verdict, Outcome::NotApplicable);
+        assert_eq!(by[&7].reason, unresolved);
+        assert_eq!(by[&7].mismatch_kind, None);
+        assert_eq!(by[&7].required, None);
+        assert_eq!(by[&7].actual, Some(ObjKey::Node(10)));
+        assert_eq!(by[&7].distinct, Some(ObjKey::Node(30)));
+        assert_eq!(by[&7].as_of, None);
+        // actual present, the as-of anchor is missing: same outcome
+        assert_eq!(
+            (by[&8].verdict, by[&8].reason),
+            (Outcome::NotApplicable, unresolved)
+        );
+        assert_eq!(by[&8].actual, Some(ObjKey::Node(10)));
+        // a resolved must-differ collision is decidable without the required value
+        assert_eq!(by[&9].verdict, Outcome::Mismatch);
+        assert_eq!(by[&9].mismatch_kind, Some(MismatchKind::Wrong));
+        assert_eq!(by[&9].reason, None);
+        // a missing actual is judged as before: ABSENT when absent_when holds, OK otherwise
+        assert_eq!((by[&10].verdict, by[&10].reason), (Outcome::Absent, None));
+        assert_eq!((by[&11].verdict, by[&11].reason), (Outcome::Ok, None));
+        // no stale/wrong classification without a resolved path
+        assert_eq!(
+            (by[&12].verdict, by[&12].reason),
+            (Outcome::NotApplicable, unresolved)
+        );
+        // without distinct_from, the self-approval is unresolved like any other present actual
+        let vs = evaluate(&f.snap, &f.cat, &rule(), u32::MAX);
+        assert_eq!(verdicts_by_subject(&vs)[&9].reason, unresolved);
+    }
+
+    #[test]
+    fn an_unresolved_band_path_is_not_a_mismatch() {
+        let f = banded_fixture();
+        let mut r = banded_rule(Some("approved-at"), true);
+        // the top band walks one `parent` further than the org chart goes
+        r.cases[2].required = hops(&[
+            "requester",
+            "member-of",
+            "parent",
+            "parent",
+            "parent",
+            "manager-of",
+        ]);
+        let vs = evaluate(&f.snap, &f.cat, &r, u32::MAX);
+        let by = verdicts_by_subject(&vs);
+        assert_eq!(by[&4].verdict, Outcome::NotApplicable);
+        assert_eq!(by[&4].reason, Some(NotApplicableReason::RequiredUnresolved));
+        assert_eq!(by[&4].case, Some(2));
+        assert_eq!(by[&1].verdict, Outcome::Ok);
     }
 
     #[test]
