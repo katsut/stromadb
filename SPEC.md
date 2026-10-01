@@ -138,8 +138,27 @@ Discover what is queryable.
 // response
 {"predicates": [{"name": "reports-to", "card": "one",
                  "domain": "Person", "range": {"type": "Person"}}, …],
- "labels": [1, 2, …]}
+ "labels": [1, 2, …],
+ "rules": ["manager-name-current", …]}
 ```
+
+### `rule`
+
+Read back a stored rule's declaration (§2, named rules).
+
+```jsonc
+// request — one rule
+{"op": "rule", "rule_name": "manager-name-current"}
+// response — the rule JSON exactly as declared by its latest rule_def
+{"name": "manager-name-current", "rule": {"subject_type": "Person", "required": {…}, "actual": "manager-name"}}
+// request — every stored rule, sorted by name
+{"op": "rule"}
+// response
+{"rules": [{"name": "manager-name-current", "rule": {…}}, …]}
+```
+
+An unknown `rule_name` is an error. Rules are schema-level, so no label mask applies (as with
+`schema`).
 
 ### `point`
 

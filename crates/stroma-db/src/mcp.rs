@@ -7,7 +7,8 @@
 //! `None`. Framing (newline-delimited stdio, HTTP request/response) is the caller's concern.
 //!
 //! Tools: `schema`, `lookup` (exact-value key → node id), `point`, `expand`, `search` (authz-scoped hybrid), `retrieve_context`,
-//! `conformance` (declared-rule per-subject verdicts), `stats`, `ingest`. Read tools map to
+//! `conformance` (declared-rule per-subject verdicts), `rule` (read back a stored rule's
+//! declaration), `stats`, `ingest`. Read tools map to
 //! [`Db::query`]; `ingest` writes facts (serialized on the database's internal write mutex).
 
 use serde_json::{Value, json};
@@ -21,7 +22,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "schema",
-            "description": "Discover what is queryable: the registered predicates (each with `card` one|many and its `domain`/`range`) and the node labels in use. Call this first to learn which predicate names exist and their cardinality before composing point/expand queries.",
+            "description": "Discover what is queryable: the registered predicates (each with `card` one|many and its `domain`/`range`), the node labels in use, and the names of stored conformance rules (`rule` returns a declaration). Call this first to learn which predicate names exist and their cardinality before composing point/expand queries.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -120,11 +121,21 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "rule": { "type": "object", "description": "an inline rule declaration (see description for shape)" },
-                    "rule_name": { "type": "string", "description": "the name of a rule stored via a `rule_def` ingest line (alternative to `rule`)" },
+                    "rule_name": { "type": "string", "description": "the name of a rule stored via a `rule_def` ingest line (alternative to `rule`); the `rule` tool returns its declaration" },
                     "subjects": { "type": "array", "items": { "type": "integer" }, "description": "evaluate only these subject node ids (e.g. the id `lookup` returned); an id that is not a subject of the rule's type is omitted" },
                     "only": { "type": "array", "items": { "type": "string", "enum": ["OK", "ABSENT", "MISMATCH", "NOT_APPLICABLE"] }, "description": "keep only these verdicts (default without `subjects`: OK, ABSENT, MISMATCH)" },
                     "limit": { "type": "integer", "default": 50, "description": "maximum rows returned" },
                     "offset": { "type": "integer", "default": 0, "description": "rows to skip, for paging with `limit`" }
+                }
+            }
+        },
+        {
+            "name": "rule",
+            "description": "Read back a stored conformance rule's declaration: `{name, rule}` with the rule JSON exactly as declared by its `rule_def` (subject_type, scope, required/distinct_from hops with their as_of anchors, actual, absent_when). Use it to explain a `conformance` verdict or to see which facts a rule reads. Without `rule_name`, returns `{rules:[{name, rule}, ..]}` for every stored rule; `schema` lists the names only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "rule_name": { "type": "string", "description": "the stored rule's name (as listed under `rules` by `schema`); omit to list every stored rule with its declaration" }
                 }
             }
         },
@@ -192,7 +203,7 @@ fn apply_conformance_defaults(req: &mut Value) {
 fn call_tool(db: &Db, name: &str, args: &Value, scope: &Scope) -> Result<Value, String> {
     match name {
         "schema" | "lookup" | "point" | "expand" | "timeline" | "search" | "retrieve_context"
-        | "conformance" => {
+        | "conformance" | "rule" => {
             let mut req = args.clone();
             req["op"] = json!(name);
             if name == "conformance" {

@@ -86,6 +86,7 @@ fn mcp_initialize_list_call() {
             && names.contains(&"search")
             && names.contains(&"expand")
             && names.contains(&"conformance")
+            && names.contains(&"rule")
             && names.contains(&"timeline"),
         "tools: {names:?}"
     );
@@ -247,6 +248,16 @@ fn mcp_conformance() {
         .unwrap();
     assert_eq!(v1002["verdict"], "MISMATCH", "by name 1002: {v1002}");
     assert_eq!(v1002["kind"], "stale", "by name 1002 kind: {v1002}");
+
+    // the `rule` tool reads the stored declaration back exactly as declared
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":5,"method":"tools/call",
+        "params":{"name":"rule","arguments":{"rule_name":"approval"}}}));
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    let out: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(out, json!({ "name": "approval", "rule": rule }));
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+        "params":{"name":"rule","arguments":{"rule_name":"nope"}}}));
+    assert_eq!(r["result"]["isError"], json!(true), "unknown rule: {r}");
 
     let _ = std::fs::remove_dir_all(&base);
 }
