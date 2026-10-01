@@ -81,12 +81,14 @@ an ordinary database directory under it:
   `/mcp` and the console page, answers `404` and creates nothing.
 - **Lifetime.** Each namespace's database is opened on first use, with the same
   `--max-unmerged` bound as `default`, and stays open until the server exits.
-- **Listing.** `GET /namespaces` returns `{"namespaces":["default", …]}`, the existing named ones
-  sorted.
+- **Listing.** `GET /namespaces` returns `{"namespaces":[{"name","nodes","facts"}, …]}`, `default`
+  first then the existing named ones sorted, each with its node and fact counts (from the same
+  counters `GET /stats` reports). The console's topbar namespace selector is built from this.
 - **Access.** Sessions and tokens are server-wide: one login or token reaches every namespace, and
   a token's label cap, read-only bit and provenance stamping apply unchanged inside each. There
-  are no per-namespace credentials. `--allow-reset` lets `/ns/<name>/reset` clear that namespace
-  only; `--demo` seeds only `default`.
+  are no per-namespace credentials, so `GET /namespaces` lists every namespace to every
+  authenticated caller alike (there is nothing narrower to show a non-admin one).
+  `--allow-reset` lets `/ns/<name>/reset` clear that namespace only; `--demo` seeds only `default`.
 
 The console works under a namespace too: open `http://localhost:7687/ns/ocel/` and every call it
 makes goes to `ocel`, with the namespace name shown next to the logo. MCP clients are pointed at

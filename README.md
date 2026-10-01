@@ -205,7 +205,7 @@ see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#namespaces).
 ```bash
 curl -s -X POST localhost:7687/ns/ocel/ingest --data-binary @events.jsonl
 curl -s localhost:7687/ns/ocel/stats
-curl -s localhost:7687/namespaces     # {"namespaces":["default","ocel"]}
+curl -s localhost:7687/namespaces     # {"namespaces":[{"name":"default","nodes":0,"facts":0},{"name":"ocel","nodes":2,"facts":3}]}
 ```
 
 Docker, without a local Rust toolchain:

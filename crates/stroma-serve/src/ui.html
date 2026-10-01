@@ -180,6 +180,13 @@
   .role-row .rn { font:600 12.5px var(--sans); color:var(--fg); } .role-row .rl { font:11px var(--mono); color:var(--mut); margin-left:auto; }
   .role-row .rx { color:var(--mut); cursor:pointer; font-size:14px; line-height:1; padding:0 2px; } .role-row .rx:hover { color:#ff7a90; }
   .pill.role { color:var(--fg-dim); } .pill.role b { color:var(--accent); }
+  .ns-list { display:flex; flex-direction:column; gap:5px; max-height:300px; overflow-y:auto; }
+  .ns-row { display:flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid var(--line); border-radius:var(--r-sm); background:var(--bg); cursor:pointer; transition:border-color .12s; }
+  .ns-row:hover { border-color:var(--accent); }
+  .ns-row.current { cursor:default; border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in oklab, var(--accent) 22%, transparent); }
+  .ns-row .ns-name { font:600 12.5px var(--mono); color:var(--fg); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ns-row .ns-counts { font:11px var(--mono); color:var(--mut); flex:0 0 auto; white-space:nowrap; }
+  .ns-row .ns-cur { font:600 10px var(--sans); color:var(--accent); flex:0 0 auto; }
   /* settings drawer: grouped rows on the right edge; the danger zone is always the last group */
   .drawer { position:absolute; top:0; right:0; bottom:0; z-index:9; width:380px; max-width:100%; overflow-y:auto; background:var(--panel-2); border-left:1px solid var(--line-2); box-shadow:-18px 0 40px -24px rgba(0,0,0,.7); padding:14px 18px 22px; }
   .drawer-h { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; } .drawer-h .pop-h { margin:0; font-size:14px; }
@@ -213,7 +220,7 @@
     <div class="brand">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="5" r="2.4" fill="#37d6a8"/><circle cx="5" cy="17" r="2.4" fill="#5aa9ff"/><circle cx="19" cy="16" r="2.4" fill="#b78cff"/><circle cx="12" cy="12" r="1.6" fill="#e8ecf4"/><path d="M12 5.2 12 10.6M11 11 6 15.4M13 11 18 14.6" stroke="#3a475e" stroke-width="1.3"/></svg>
       <span class="name">Stroma<b>DB</b></span>
-      <span class="pill hidden" id="nsPill" title="namespace"></span>
+      <button class="pill scope-btn hidden" id="nsPill" title="namespace" aria-haspopup="true" aria-expanded="false"></button>
     </div>
     <span class="pill live-ind on" id="livePill" title="live"><span class="dot"></span>LIVE</span>
     <span id="statpills"></span>
@@ -231,6 +238,14 @@
     <div class="tip" data-i18n="scopeIntro" style="margin:0 0 9px">Each node has a sensitivity label. Toggle which labels are visible — hidden ones (and edges to them) drop from every view. Exploration aid, not authentication.</div>
     <div id="scopeChips" class="scope-chips"></div>
     <div id="scopeEffect" class="tip" style="color:var(--accent);margin-bottom:0"></div>
+  </div>
+
+  <!-- namespace selector: lists every namespace the signed-in caller can see, with node/fact
+       counts; hidden entirely when only "default" exists (see renderNamespaces). -->
+  <div class="pop hidden" id="nsPop">
+    <div class="pop-h" data-i18n="nsTitle">Namespace</div>
+    <div class="tip" data-i18n="nsIntro" style="margin:0 0 9px">Switch to another namespace — an isolated database this server also hosts.</div>
+    <div id="nsList" class="ns-list"></div>
   </div>
 
   <!-- settings: a right-side drawer, groups in a fixed order; the destructive reset is always last -->
@@ -371,6 +386,7 @@ const I18N = {
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”",
        settings:"settings", settingsTitle:"Settings", close:"close",
+       nsTitle:"Namespace", nsIntro:"Switch to another namespace — an isolated database this server also hosts.", nsCounts:"{n} nodes · {f} facts", nsCurrent:"current", switchNamespace:"switch namespace",
        grpServer:"Server", version:"version", dbPath:"database", workers:"workers", typesPreds:"types · predicates", embeddingsLbl:"embeddings", durableHead:"durable head", changelog:"changelog", signedInAs:"signed in as", access:"access", readWrite:"read-write", readOnlyLbl:"read-only", allLabels:"all labels", labelsCap:"labels {l}", unnamedToken:"unnamed token", authOpen:"open (auth disabled)", viaToken:"token “{n}”", backToApp:"Back to app ↗",
        mcpEndpoint:"MCP endpoint", copy:"Copy", copied:"copied to clipboard", copyFailed:"copy failed — select the URL and copy it manually",
        grpAdmin:"Admin", compactIntro:"Snapshot the current state and truncate the changelog. Non-destructive: as-of reads keep answering across the boundary.", compactNow:"Compact now", compacting:"compacting…", compactDone:"compacted up to {n} · changelog {w} · snapshot {s}", compactFailed:"compaction failed: {e}", resetState:"Database reset", enabled:"enabled", disabled:"disabled", dangerZone:"Danger zone",
@@ -382,6 +398,7 @@ const I18N = {
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用",
        settings:"設定", settingsTitle:"設定", close:"閉じる",
+       nsTitle:"ネームスペース", nsIntro:"別のネームスペースに切り替え — このサーバーが持つ別の独立したデータベースです。", nsCounts:"ノード {n} · ファクト {f}", nsCurrent:"現在", switchNamespace:"ネームスペースを切り替え",
        grpServer:"サーバー", version:"バージョン", dbPath:"データベース", workers:"ワーカー数", typesPreds:"型 · 述語", embeddingsLbl:"埋め込み", durableHead:"durable head", changelog:"変更ログ", signedInAs:"サインイン", access:"権限", readWrite:"読み書き", readOnlyLbl:"読み取り専用", allLabels:"全ラベル", labelsCap:"ラベル {l}", unnamedToken:"名前なしトークン", authOpen:"認証なし（無効化中）", viaToken:"トークン「{n}」", backToApp:"アプリに戻る ↗",
        mcpEndpoint:"MCP エンドポイント", copy:"コピー", copied:"クリップボードにコピーしました", copyFailed:"コピーできませんでした。URL を選択して手動でコピーしてください",
        grpAdmin:"管理", compactIntro:"現在の状態をスナップショットし、変更ログを切り詰めます。非破壊で、境界をまたぐ時点指定の読み取りもそのまま動きます。", compactNow:"今すぐコンパクション", compacting:"コンパクション中…", compactDone:"{n} までコンパクション済み · 変更ログ {w} · スナップショット {s}", compactFailed:"コンパクションに失敗しました: {e}", resetState:"データベースのリセット", enabled:"有効", disabled:"無効", dangerZone:"危険な操作",
@@ -393,6 +410,7 @@ const I18N = {
        detNode:"节点", detType:"类型", detLabel:"标签", untyped:"无类型", recentre:"以此为中心 ›", noProps:"无存储属性。", loading:"加载中…", restricted:"角色“{r}”下受限。",
        tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”",
        settings:"设置", settingsTitle:"设置", close:"关闭",
+       nsTitle:"命名空间", nsIntro:"切换到另一个命名空间 — 本服务器托管的另一个独立数据库。", nsCounts:"{n} 节点 · {f} 事实", nsCurrent:"当前", switchNamespace:"切换命名空间",
        grpServer:"服务器", version:"版本", dbPath:"数据库", workers:"工作线程", typesPreds:"类型 · 谓词", embeddingsLbl:"嵌入向量", durableHead:"durable head", changelog:"变更日志", signedInAs:"登录身份", access:"权限", readWrite:"读写", readOnlyLbl:"只读", allLabels:"全部标签", labelsCap:"标签 {l}", unnamedToken:"未命名令牌", authOpen:"开放（认证已禁用）", viaToken:"令牌“{n}”", backToApp:"返回应用 ↗",
        mcpEndpoint:"MCP 端点", copy:"复制", copied:"已复制到剪贴板", copyFailed:"复制失败，请选中 URL 手动复制",
        grpAdmin:"管理", compactIntro:"为当前状态创建快照并截断变更日志。非破坏性：跨越边界的时点读取仍然有效。", compactNow:"立即压缩", compacting:"正在压缩…", compactDone:"已压缩至 {n} · 变更日志 {w} · 快照 {s}", compactFailed:"压缩失败：{e}", resetState:"数据库重置", enabled:"已启用", disabled:"已禁用", dangerZone:"危险操作",
@@ -404,7 +422,7 @@ function applyLang(l){ lang = I18N[l] ? l : 'en'; localStorage.setItem('stroma_l
   document.querySelectorAll('[data-i18n]').forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll('[data-i18n-ph]').forEach(e=>e.placeholder=t(e.dataset.i18nPh));
   document.querySelectorAll('[data-i18n-title]').forEach(e=>e.title=t(e.dataset.i18nTitle));
-  legend(); renderSettings(); renderStats(); setLivePill(); renderAppLink(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); renderCompose(); } }
+  legend(); renderSettings(); renderStats(); setLivePill(); renderAppLink(); renderNamespaces(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); renderCompose(); } }
 const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
 const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
@@ -1244,14 +1262,38 @@ $('resetConfirm').onclick=async()=>{ const btn=$('resetConfirm'), out=$('resetRe
   }catch(x){ out.className='tip err-text'; out.textContent=t('resetFailed',{e:''+x}); btn.disabled=false; } };
 $('lang').onchange=e=>applyLang(e.target.value);
 $('logout').onclick=async()=>{ try{ await fetch('/logout',{method:'POST'}); }catch(x){} location.href='/login'; };
-if(NS){ $('nsPill').textContent=NS; $('nsPill').classList.remove('hidden'); }
+
+// ---------- namespace selector: GET /namespaces (global, every namespace the caller can see
+// with its node/fact counts) drives a topbar pill + popover listing the others; hidden entirely
+// when only "default" exists, since there would be nothing to switch to ----------
+let nsList = null;
+async function namespaces(){ try{ const r=await fetch('/namespaces'); if(r.ok){ const j=await r.json(); nsList=j.namespaces||[]; renderNamespaces(); } }
+  catch(x){ console.warn('GET /namespaces failed', x); } }
+function nsHref(name){ return name==='default' ? '/' : '/ns/'+name+'/'; }
+function renderNamespaces(){ const pill=$('nsPill');
+  if(!nsList || nsList.length<2){ pill.classList.add('hidden'); $('nsPop').classList.add('hidden'); return; }
+  pill.textContent = NS || 'default';
+  pill.title = t('switchNamespace');
+  pill.classList.remove('hidden');
+  const cur = NS || 'default';
+  $('nsList').innerHTML = nsList.map(n=>{
+    const active = n.name===cur;
+    return `<div class="ns-row${active?' current':''}" data-ns="${esc(n.name)}">`
+      + `<span class="ns-name">${esc(n.name)}</span>`
+      + (active ? `<span class="ns-cur">${esc(t('nsCurrent'))}</span>` : '')
+      + `<span class="ns-counts">${esc(t('nsCounts',{n:n.nodes, f:n.facts}))}</span>`
+      + `</div>`;
+  }).join(''); }
+$('nsPill').onclick=()=>{ const p=$('nsPop'); p.classList.toggle('hidden'); $('nsPill').setAttribute('aria-expanded', String(!p.classList.contains('hidden'))); };
+$('nsList').onclick=e=>{ const row=e.target.closest('.ns-row'); if(!row || row.classList.contains('current')) return;
+  location.href = nsHref(row.dataset.ns); };
 
 // first-run UX (#256): start from the type overview (one bubble per node type, sized by count)
 // instead of an empty canvas defaulting to node id 1 — a fresh database has no reason to have a
 // node 1, and "draw neighbourhood" on it just looked broken. An empty database gets an explicit
 // empty state instead of the generic "draw a neighbourhood" hint.
 async function boot(){ await stats(); if(_stats && _stats.schema.nodes>0) overviewDraw(); else setNote('emptyDb'); }
-resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); setPanelCollapsed(localStorage.getItem('stroma_panel_collapsed')==='1'); boot(); me(); loadSchema(); qopFields(); loop();
+resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); setPanelCollapsed(localStorage.getItem('stroma_panel_collapsed')==='1'); boot(); me(); namespaces(); loadSchema(); qopFields(); loop();
 </script>
 </body>
 </html>

@@ -22,7 +22,8 @@
 //!                 empty body. Stateless (no session ids); GET /mcp is 405 (no server stream).
 //!                 Same tool set as `stroma-mcp` (shared `stromadb_store::mcp` dispatch).
 //!   POST /reset           → clears the addressed database (opt-in: only when started with --allow-reset)
-//!   GET  /namespaces      → {"namespaces":["default", ...]}  (every namespace that exists)
+//!   GET  /namespaces      → {"namespaces":[{"name","nodes","facts"}, ...]}  (every namespace that
+//!                 exists, default first then sorted, with its node/fact counts)
 //!
 //! Namespaces: several isolated databases behind one server (D27). The `--db` directory is the
 //! `default` namespace; a named one is an ordinary database directory at `<db>/ns/<name>/`
@@ -350,6 +351,25 @@ impl Namespaces {
         names.sort();
         names.insert(0, DEFAULT_NS.to_string());
         names
+    }
+
+    /// Every namespace with its node and fact counts, for the console's namespace selector:
+    /// `[{"name", "nodes", "facts"}, ...]`, `default` first then sorted. Opens each namespace
+    /// (lazily, cached thereafter, same as any other request to it) to read its `stats()`; one
+    /// already-open namespace costs nothing extra.
+    fn list_with_counts(&self) -> Vec<Value> {
+        self.list()
+            .into_iter()
+            .filter_map(|name| {
+                let db = self.get(&name, false).ok().flatten()?;
+                let s = db.stats();
+                Some(json!({
+                    "name": name,
+                    "nodes": s["schema"]["nodes"],
+                    "facts": s["facts"]["durable_head"],
+                }))
+            })
+            .collect()
     }
 }
 
@@ -890,7 +910,13 @@ pub fn run(args: &[String]) {
                         }),
                     ));
                 } else if method == Method::Get && path == "/namespaces" {
-                    let _ = req.respond(json_response(200, &json!({ "namespaces": nss.list() })));
+                    // global like /me: every authenticated caller (session or token) sees every
+                    // namespace with its node/fact counts — namespace access is not currently
+                    // restricted per-token, so there is nothing narrower to show a non-admin caller.
+                    let _ = req.respond(json_response(
+                        200,
+                        &json!({ "namespaces": nss.list_with_counts() }),
+                    ));
                 } else {
                     match dispatch(&nss, auth.allow_reset, &mut req, &path, &scope) {
                         Reply::Json(status, body) => {
@@ -1031,6 +1057,38 @@ mod tests {
         let (st, body) = call(&nss, Method::Post, "/ns/a/query", expand);
         assert_eq!(st, 200, "{body}");
         assert!(body.contains("[2]"), "a after reopen: {body}");
+        drop(nss);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // list_with_counts: default first, each entry carries its node/fact counts, and an empty
+    // default with one populated namespace still lists both.
+    #[test]
+    fn namespace_counts() {
+        let root =
+            std::env::temp_dir().join(format!("stroma_ns_counts_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nss = open_root(&root);
+        let graph = concat!(
+            "{\"type_def\":{\"name\":\"Person\"}}\n",
+            "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+            "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+            "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
+            "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+        );
+        call(&nss, Method::Post, "/ns/a/ingest", graph);
+
+        let counts = nss.list_with_counts();
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts[0]["name"], "default");
+        assert_eq!(counts[0]["nodes"], 0);
+        assert_eq!(counts[0]["facts"], 0);
+        assert_eq!(counts[1]["name"], "a");
+        assert_eq!(counts[1]["nodes"], 2);
+        // durable_head counts durable ops (each node's type assignment plus the one relation),
+        // not just explicit `fact` lines — same counter /stats reports as "facts.durable_head".
+        assert_eq!(counts[1]["facts"], 3);
+
         drop(nss);
         let _ = std::fs::remove_dir_all(&root);
     }
