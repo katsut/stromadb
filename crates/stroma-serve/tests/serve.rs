@@ -331,6 +331,21 @@ fn serve_api_token_auth() {
         200,
         "valid token must authorize ingest"
     );
+    // a stored rule's declaration reads back over the HTTP query surface
+    let rule = serde_json::json!({"subject_type": "Person", "required": {"hops": [{"predicate": "knows"}]}, "actual": "knows"});
+    let def = serde_json::json!({"rule_def": {"name": "knows-self", "rule": rule}}).to_string();
+    let (st, body) = http_bearer_body(&addr, "POST", "/ingest", &def, Some("s3cr3t-token"));
+    assert_eq!(st, 200, "rule_def ingest: {body}");
+    let (st, body) = http_bearer_body(
+        &addr,
+        "POST",
+        "/query",
+        "{\"op\":\"rule\",\"rule_name\":\"knows-self\"}",
+        Some("s3cr3t-token"),
+    );
+    assert_eq!(st, 200, "rule read-back: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v, serde_json::json!({"name": "knows-self", "rule": rule}));
     // /reset is disabled by default (server started without --allow-reset) → 403
     assert_eq!(
         http_bearer(&addr, "POST", "/reset", "", Some("s3cr3t-token")),
@@ -483,6 +498,7 @@ fn serve_mcp_endpoint() {
         "search",
         "retrieve_context",
         "conformance",
+        "rule",
         "stats",
         "ingest",
     ] {

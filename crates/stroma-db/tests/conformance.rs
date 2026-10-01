@@ -278,6 +278,36 @@ fn conformance_by_stored_rule_name() {
     let named_after_reopen = verdict_map(&db.query(&by_name).unwrap());
     assert_eq!(named_after_reopen, inline);
 
+    // the stored declaration reads back exactly as declared, after the reopen too
+    let back = db
+        .query(&json!({ "op": "rule", "rule_name": "release-approval" }))
+        .unwrap();
+    assert_eq!(
+        back,
+        json!({ "name": "release-approval", "rule": rule_body() })
+    );
+    // the read-back declaration evaluates to the same verdicts inline
+    let replay = json!({ "op": "conformance", "rule": back["rule"] });
+    assert_eq!(verdict_map(&db.query(&replay).unwrap()), inline);
+    // re-declaring replaces it; listing returns every stored rule sorted by name
+    let mut narrowed = rule_body();
+    narrowed["scope"] = json!({ "predicate": "issue-type", "equals": "task" });
+    let redef = json!({ "rule_def": { "name": "release-approval", "rule": narrowed } });
+    let other = json!({ "rule_def": { "name": "a-first", "rule": rule_body() } });
+    db.ingest_str(&format!("{redef}\n{other}\n")).unwrap();
+    let all = db.query(&json!({ "op": "rule" })).unwrap();
+    assert_eq!(
+        all,
+        json!({ "rules": [
+            { "name": "a-first", "rule": rule_body() },
+            { "name": "release-approval", "rule": narrowed },
+        ] })
+    );
+    let err = db
+        .query(&json!({ "op": "rule", "rule_name": "no-such-rule" }))
+        .unwrap_err();
+    assert!(err.contains("no-such-rule"), "unexpected error: {err}");
+
     // an unknown rule name is a clear error, not a panic.
     let err = db
         .query(&json!({ "op": "conformance", "rule_name": "no-such-rule" }))

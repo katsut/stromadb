@@ -93,10 +93,18 @@ struct Schema {
     cardinality: HashMap<String, Cardinality>,
     /// Named conformance rules declared once (`rule_def`) and evaluated by `rule_name`. Parsed at
     /// declaration; names are resolved against the catalog only at evaluation.
-    rules: HashMap<String, conformance::Rule>,
+    rules: HashMap<String, StoredRule>,
     /// Provenance source ids registered via `source_def` — the inventory of writers that have ever
     /// stamped facts (surfaced by `/stats`; the interner alone cannot tell sources from other names).
     sources: BTreeSet<FieldId>,
+}
+
+/// A stored conformance rule: the parsed form the evaluator runs, plus the declaration exactly as
+/// it was given in its `rule_def` line, which the `rule` op returns.
+#[derive(Clone)]
+struct StoredRule {
+    rule: conformance::Rule,
+    definition: Value,
 }
 
 /// A directory-backed database. Reads are lock-free over a pinned [`ReadState`]; writes hold the
@@ -483,7 +491,7 @@ impl Db {
             .schema
             .rules
             .get(name)
-            .cloned()
+            .map(|s| s.rule.clone())
             .ok_or(format!("unknown rule_name: {name}"))?;
         let missing = conformance::unresolved_names(&rule, &w.schema.cat);
         if !missing.is_empty() {
@@ -1444,6 +1452,7 @@ impl ReadState {
             "graph" => self.graph(req),
             "overview" => self.overview(req),
             "schema" => Ok(self.schema_view()),
+            "rule" => self.rule_definition(req),
             "pipeline" => self.pipeline(req),
             "conformance" => self.conformance(req),
             "completeness" => self.completeness(req),
@@ -1616,6 +1625,29 @@ impl ReadState {
         let mut rules: Vec<&str> = self.schema.rules.keys().map(|s| s.as_str()).collect();
         rules.sort_unstable();
         json!({ "predicates": preds, "labels": labels_in_use(&self.snap), "rules": rules })
+    }
+
+    /// Read back stored rule declarations. With `rule_name`, returns `{ "name", "rule" }` where
+    /// `rule` is the JSON exactly as declared in its latest `rule_def` (an unknown name is an
+    /// error). Without it, returns `{ "rules": [ { "name", "rule" }, .. ] }` for every stored rule,
+    /// sorted by name. Rules are schema-level, so no label mask applies, as with `schema`.
+    fn rule_definition(&self, req: &Value) -> DbResult<Value> {
+        if let Some(name) = req.get("rule_name").filter(|v| !v.is_null()) {
+            let name = name.as_str().ok_or("rule.rule_name must be a string")?;
+            let stored = self
+                .schema
+                .rules
+                .get(name)
+                .ok_or(format!("unknown rule_name: {name}"))?;
+            return Ok(json!({ "name": name, "rule": stored.definition }));
+        }
+        let mut names: Vec<&String> = self.schema.rules.keys().collect();
+        names.sort_unstable();
+        let rules: Vec<Value> = names
+            .into_iter()
+            .map(|n| json!({ "name": n, "rule": self.schema.rules[n].definition }))
+            .collect();
+        Ok(json!({ "rules": rules }))
     }
 
     /// Whole-graph view: every declared node and its node-valued edges, authz-scoped and capped at
@@ -2146,7 +2178,7 @@ impl ReadState {
             self.schema
                 .rules
                 .get(name)
-                .cloned()
+                .map(|s| s.rule.clone())
                 .ok_or(format!("unknown rule_name: {name}"))?
         } else if !req["rule"].is_null() {
             parse_conformance_rule(&req["rule"])?
@@ -2563,7 +2595,13 @@ fn apply_rule_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
         .ok_or("rule_def.name missing")?
         .to_string();
     let rule = parse_conformance_rule(&rd["rule"])?;
-    schema.rules.insert(name, rule);
+    schema.rules.insert(
+        name,
+        StoredRule {
+            rule,
+            definition: rd["rule"].clone(),
+        },
+    );
     Ok(())
 }
 
