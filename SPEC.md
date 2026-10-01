@@ -292,15 +292,21 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
  }}
 // response
 {"verdicts": [
-  {"subject": 1, "verdict": "OK",             "kind": null,    "required": "Grace", "actual": "Grace", "as_of": 1704067200},
-  {"subject": 2, "verdict": "MISMATCH",       "kind": "stale", "required": "Lin",   "actual": "Ada",   "as_of": 1701388800},
-  {"subject": 5, "verdict": "ABSENT",         "kind": null,    "required": "Ivy",   "actual": null,    "as_of": null},
-  {"subject": 9, "verdict": "NOT_APPLICABLE", "kind": null,    "required": null,    "actual": null,    "as_of": null, "reason": "out_of_scope"}
+  {"subject": 1, "verdict": "OK",             "kind": null,    "required": {"text": "Grace"}, "actual": {"text": "Grace"}, "as_of": 1704067200},
+  {"subject": 2, "verdict": "MISMATCH",       "kind": "stale", "required": {"text": "Lin"},   "actual": {"text": "Ada"},   "as_of": 1706745600},
+  {"subject": 5, "verdict": "ABSENT",         "kind": null,    "required": {"text": "Ivy"},   "actual": null,              "as_of": 1704067200},
+  {"subject": 9, "verdict": "NOT_APPLICABLE", "kind": null,    "required": null,              "actual": null,              "as_of": null, "reason": "out_of_scope"}
 ]}
 ```
 
 - `required.hops` is a path of `one`-predicates walked from each subject to derive an expected value;
   a hop may be read **as-of** a valid-time anchor named by the `as_of` predicate on the subject.
+  Every hop but the last must reach a node. The last hop may read a node or a literal, as `name`
+  does above, and the `actual` is compared with that value exactly as both are stored: equal text
+  matches, and an int never equals a float. A literal's valid-time history decides `stale` versus
+  `wrong` the same way a node's does. A rule whose path has a `many`-predicate hop, or a
+  literal-valued hop before the last, can never resolve, so `conformance` and `conformance_watch`
+  reject it with an error, as they do an unknown name.
 - `distinct_from.hops` (optional) derives a value the actual must **differ** from — e.g. a
   self-approval ban is `{"hops": [{"predicate": "assigned-to"}]}`. A rule declares `required`,
   `distinct_from`, or both; each verdict carries the resolved `distinct` value when declared.

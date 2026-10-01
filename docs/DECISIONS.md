@@ -453,6 +453,37 @@
   banded random stream now adds and closes org edges and asserts that it crosses the unresolved
   boundary in both directions, with the full-evaluate oracle after every event.
 
+### D32. A derived path may end in a literal; paths that can never resolve are rejected
+- **Context:** the walk kept only node values, so a path whose last hop reads a literal, such as a
+  manager's `name`, always resolved to nothing. Such a rule reported every present actual as
+  `required_unresolved` (before D31, as a `wrong` MISMATCH), while SPEC.md showed exactly that rule
+  shape with text values. The same walk silently gave nothing for a `many`-predicate hop and for a
+  literal-valued hop in the middle of a path.
+- **Decision:** every hop but the last must reach a node; the last hop's value is the path's value
+  as read, node or literal, with the same `as_of` handling as before. The actual is compared with
+  it by exact stored-value equality, the keying ingest already applies and the one `equals`
+  conditions use: equal text matches, and an int never equals a float. `stale` versus `wrong` uses
+  the same valid-time history probe on the last as-of hop, compared by value, so an approver named
+  under a manager's old name is `stale`. A missing literal or a missing anchor is
+  `required_unresolved` (D31). `distinct_from` follows the same rule.
+- **Rejected, not resolved to nothing:** a hop on a `many` predicate (a set is never a single
+  expected value) and a literal-valued hop before the last (a literal has no outgoing predicates)
+  can never resolve. `conformance` and `conformance_watch` refuse such a rule with an error naming
+  the path and hop, next to the unknown-name check. A `rule_def` line is still only parsed at
+  ingest, because a rule may be declared before its predicates and a predicate may be re-declared
+  later. So the check runs where names are resolved, and a stored rule never blocks replay of
+  `rules.jsonl`. Embeddings are not predicates and cannot appear on a path, so they need no check.
+- **Why support, not reject:** the literal case is the natural shape of "the recorded name must
+  match the name in effect at review time", and it needs no new read primitive. `point_one` and
+  `point_one_asof` already return literals, and the terminal read is the same traced read as
+  before.
+- **Incremental maintenance:** unchanged in mechanism. The last hop's `(node, predicate)` read is
+  recorded whether or not a value or anchor is present, so a rename, a close, or the first name
+  re-judges exactly the subjects whose path ends there (D26). Property test: a random stream of
+  renames with valid time, name closes, reporting-line moves, anchor and actual changes over an
+  as-of and a current-value literal rule, with a full-evaluate oracle after every event, asserting
+  that it reaches `stale` mismatches and crosses `required_unresolved` in both directions.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |
