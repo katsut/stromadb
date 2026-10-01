@@ -358,6 +358,7 @@ name = "stromadb-store"
 version = "0.3.0"
 dependencies = [
  "libc",
+ "proptest",
  "serde_json",
  "stromadb-core",
 ]

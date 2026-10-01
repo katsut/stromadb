@@ -2750,6 +2750,10 @@ fn apply_rule_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
     Ok(())
 }
 
+/// A typed `{node|int|float|text|bool}` object → its ObjKey. A `float` is keyed by the bits of the
+/// `f64` the JSON number parses to, with no narrowing: the fold key, the WAL/snapshot codec, and the
+/// conformance range comparison all carry the full 64 bits, so a value such as `16777217.0` or
+/// `1234567.89` reads back and compares exactly as ingested.
 fn obj_key(v: &Value) -> DbResult<ObjKey> {
     if let Some(n) = v.get("node").and_then(|x| x.as_u64()) {
         return Ok(ObjKey::Node(n));
@@ -2758,7 +2762,7 @@ fn obj_key(v: &Value) -> DbResult<ObjKey> {
         return Ok(ObjKey::Int(i));
     }
     if let Some(f) = v.get("float").and_then(|x| x.as_f64()) {
-        return Ok(ObjKey::Float((f as f32 as f64).to_bits()));
+        return Ok(ObjKey::Float(f.to_bits()));
     }
     if let Some(t) = v.get("text").and_then(|x| x.as_str()) {
         return Ok(ObjKey::Text(t.to_string()));
@@ -2778,7 +2782,7 @@ fn value_key(v: &Value) -> DbResult<ObjKey> {
         Value::String(s) => Ok(ObjKey::Text(s.clone())),
         Value::Number(n) if n.is_i64() => Ok(ObjKey::Int(n.as_i64().unwrap())),
         Value::Number(n) if n.is_u64() => Ok(ObjKey::Int(n.as_u64().unwrap() as i64)),
-        Value::Number(n) => Ok(ObjKey::Float((n.as_f64().unwrap() as f32 as f64).to_bits())),
+        Value::Number(n) => Ok(ObjKey::Float(n.as_f64().unwrap().to_bits())),
         Value::Object(_) if v.get("node").is_none() => obj_key(v),
         _ => Err(
             "edge-property value must be a literal: a number/string/bool, or {int|float|text|bool}"
