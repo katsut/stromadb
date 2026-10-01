@@ -21,6 +21,9 @@
 //!                    is the WAL ops, which the recovered snapshot carries — not replayed)
 //!   embeddings.bin   received embeddings, flat f32 LE; embeddings.ids = u64 LE per row
 //!   meta.json        { "dim": N }
+//!   counts.json      { "nodes": N, "facts": H } — derived listing hint (not an input): rewritten
+//!                    on open, close, compaction, reset and after each ingest; read by
+//!                    [`persisted_counts`] to report a database without opening it
 //!   LOCK             advisory lock file guarding the directory against concurrent opens; holds
 //!                    the owning pid (informational — the flock, not the content, is the guard)
 //!
@@ -182,6 +185,13 @@ struct WriteState {
     node_type_w: HashMap<NodeId, FieldId>,
     /// Since-boot total of suppressed no-op writes (facts, closes, props, nodes) — /stats observability.
     suppressed_total: u64,
+    /// Maintained headline counters, kept equal to the published snapshot by every node write so
+    /// `/stats` never scans: distinct nodes carrying a type or a label (`|types ∪ labels|`), and
+    /// the node count per ABAC label. Node attributes are never removed, so both only grow or move.
+    node_count: u64,
+    label_counts: BTreeMap<u8, u64>,
+    /// What `counts.json` last recorded (see [`WriteState::persist_counts`]).
+    counts_persisted: Option<Counts>,
     /// Received embeddings, `Arc`-shared with the read view; appended (copy-on-write) by `embed`.
     emb_ids: Arc<Vec<u64>>,
     emb: Arc<Vec<f32>>,
@@ -235,6 +245,14 @@ pub struct ReadState {
     dim: usize,
     /// The durable changelog head this view was pinned at — the `as_of` for the version vector.
     durable_head: u64,
+    /// `/stats` counters captured at publish time, so a stats read is O(1) and never takes the
+    /// write lock (it would otherwise wait out a whole ingest batch, index rebuild included).
+    node_count: u64,
+    label_counts: BTreeMap<u8, u64>,
+    unmerged: usize,
+    suppressed_total: u64,
+    index_retrained: bool,
+    wal_bytes: u64,
 }
 
 impl Db {
@@ -299,6 +317,12 @@ impl Db {
             snap.node_labels.iter().map(|(&k, &v)| (k, v)).collect();
         let node_type_w: HashMap<NodeId, FieldId> =
             snap.node_types.iter().map(|(&k, &v)| (k, v)).collect();
+        // seed the maintained counters once from the recovered state; writes keep them current
+        let node_count = node_ids(&snap).len() as u64;
+        let mut label_counts: BTreeMap<u8, u64> = BTreeMap::new();
+        for &l in node_label_w.values() {
+            *label_counts.entry(l).or_insert(0) += 1;
+        }
         let mut w = WriteState {
             dir: dir.to_path_buf(),
             eng,
@@ -306,6 +330,9 @@ impl Db {
             node_label_w,
             node_type_w,
             suppressed_total: 0,
+            node_count,
+            label_counts,
+            counts_persisted: None,
             emb_ids: Arc::new(emb_ids),
             emb: Arc::new(emb),
             dim,
@@ -316,6 +343,7 @@ impl Db {
             n_max,
         };
         w.rebuild_index();
+        w.persist_counts();
         let rs = Arc::new(w.build_read_state());
         Ok(Db {
             write: Mutex::new(w),
@@ -376,12 +404,15 @@ impl Db {
         w.schema = Arc::new(Schema::default());
         w.node_label_w.clear();
         w.node_type_w.clear();
+        w.node_count = 0;
+        w.label_counts.clear();
         w.emb_ids = Arc::new(Vec::new());
         w.emb = Arc::new(Vec::new());
         w.dim = 0;
         w.index = Arc::new(None);
         w.index_retrained = false;
         w.live_rules.clear();
+        w.persist_counts();
         self.publish(&w);
         Ok(())
     }
@@ -399,11 +430,15 @@ impl Db {
         let covered = w.eng.compact().map_err(|e| format!("compact: {e}"))?;
         let wal = w.dir.join("wal.log");
         let size = |p: &std::path::Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        Ok(CompactionStats {
+        let stats = CompactionStats {
             covered,
             wal_bytes: size(&wal),
             snapshot_bytes: size(&w.dir.join("wal.log.snap")),
-        })
+        };
+        // the WAL shrank: republish so the cached storage counter reflects it
+        w.persist_counts();
+        self.publish(&w);
+        Ok(stats)
     }
 
     /// Ingest a JSONL batch (type_def / pred_def / rule_def / node / fact / retract / close).
@@ -425,6 +460,7 @@ impl Db {
         let s = w.ingest(jsonl);
         w.default_source = None;
         let s = s?;
+        w.persist_counts();
         self.publish(&w);
         Ok(s)
     }
@@ -599,63 +635,96 @@ impl Db {
             .durable_head
     }
 
-    pub fn stats(&self) -> Value {
-        let w = self.write.lock().unwrap_or_else(|e| e.into_inner());
-        let wal_bytes = fs::metadata(w.dir.join("wal.log"))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        let snap = w.eng.snapshot_arc();
-        // ABAC label distribution: one pass over the snapshot's node-label map — the graph's
-        // sensitivity-tier composition, keyed by label value.
-        let mut labels: BTreeMap<u8, u64> = BTreeMap::new();
-        for &l in snap.node_labels.values() {
-            *labels.entry(l).or_insert(0) += 1;
+    /// Headline node and fact counts (`schema.nodes`, `facts.durable_head` of [`Db::stats`]) off
+    /// the pinned view — O(1), no write lock.
+    pub fn counts(&self) -> Counts {
+        let rs = self.read_state();
+        Counts {
+            nodes: rs.node_count,
+            facts: rs.durable_head,
         }
-        let labels: serde_json::Map<String, Value> = labels
-            .into_iter()
+    }
+
+    /// Engine/schema/embedding/storage counters. Reads only the pinned view: every figure is a
+    /// counter captured at publish time (or a small catalog walk), so this is O(1) in the graph
+    /// size and never waits for an in-flight write.
+    pub fn stats(&self) -> Value {
+        let rs = self.read_state();
+        // ABAC label distribution — the graph's sensitivity-tier composition, keyed by label value.
+        let labels: serde_json::Map<String, Value> = rs
+            .label_counts
+            .iter()
             .map(|(l, n)| (l.to_string(), json!(n)))
             .collect();
         // Provenance inventory: every source name that has ever stamped a fact, sorted by name.
-        let mut sources: Vec<&str> = w
+        let mut sources: Vec<&str> = rs
             .schema
             .sources
             .iter()
-            .filter_map(|&s| w.schema.cat.name(s))
+            .filter_map(|&s| rs.schema.cat.name(s))
             .collect();
         sources.sort_unstable();
         json!({
             "server": { "version": env!("CARGO_PKG_VERSION"), "uptime_seconds": START.elapsed().as_secs() },
             // suppressed_since_boot is process-lifetime observability (like uptime), not durable
             // state: how much observation noise the ingest boundary has absorbed.
-            "facts": { "durable_head": w.eng.durable_head(), "unmerged": w.eng.unmerged(), "suppressed_since_boot": w.suppressed_total },
+            "facts": { "durable_head": rs.durable_head, "unmerged": rs.unmerged, "suppressed_since_boot": rs.suppressed_total },
             // Catalog size, not lines processed: connectors legitimately re-send their schema with
             // every self-contained batch, so counting the persisted def/node lines reads as
             // unbounded growth on a dashboard while the catalog holds a few dozen entries.
             "schema": {
-                "types": w.schema.cat.types_len(),
-                "predicates": w.schema.cat.predicates().count(),
-                "nodes": node_ids(&snap).len(),
-                "rules": w.schema.rules.len(),
+                "types": rs.schema.cat.types_len(),
+                "predicates": rs.schema.cat.predicates().count(),
+                "nodes": rs.node_count,
+                "rules": rs.schema.rules.len(),
             },
             "labels": labels,
             "sources": sources,
-            "embeddings": { "count": w.emb_ids.len(), "dim": w.dim },
+            "embeddings": { "count": rs.emb_ids.len(), "dim": rs.dim },
             // Quantizer fit (drift observability): live/trained assignment error and whether the
             // last rebuild had to retrain. A drift_ratio creeping past ~1.5 is the "recall is
             // silently degrading" signal this block exists to surface.
-            "index": w.index.as_ref().as_ref().map(|i| {
+            "index": rs.index.as_ref().as_ref().map(|i| {
                 let f = i.fit();
                 json!({
                     "nlist": i.nlist(),
                     "trained_fit": f.trained,
                     "live_fit": f.live,
                     "drift_ratio": f.ratio,
-                    "retrained_last_build": w.index_retrained,
+                    "retrained_last_build": rs.index_retrained,
                 })
             }),
-            "storage": { "wal_bytes": wal_bytes, "embeddings_bytes": w.emb.len() * 4 },
+            "storage": { "wal_bytes": rs.wal_bytes, "embeddings_bytes": rs.emb.len() * 4 },
         })
     }
+}
+
+impl Drop for Db {
+    /// Leave an exact `counts.json` behind so a listing can report this database without opening it.
+    fn drop(&mut self) {
+        self.write
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .persist_counts();
+    }
+}
+
+/// Headline counts of a database: distinct nodes and the durable changelog head (facts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counts {
+    pub nodes: u64,
+    pub facts: u64,
+}
+
+/// The counts a database directory last persisted to `counts.json` (on open, after each ingest,
+/// compaction, reset and close), read without opening the database or taking its lock. `None`
+/// when the file is absent or unreadable (e.g. a directory last written by an older version).
+pub fn persisted_counts(dir: &Path) -> Option<Counts> {
+    let v: Value = serde_json::from_str(&fs::read_to_string(dir.join("counts.json")).ok()?).ok()?;
+    Some(Counts {
+        nodes: v["nodes"].as_u64()?,
+        facts: v["facts"].as_u64()?,
+    })
 }
 
 impl WriteState {
@@ -738,6 +807,38 @@ impl WriteState {
             emb: Arc::clone(&self.emb),
             dim: self.dim,
             durable_head: self.eng.durable_head(),
+            node_count: self.node_count,
+            label_counts: self.label_counts.clone(),
+            unmerged: self.eng.unmerged(),
+            suppressed_total: self.suppressed_total,
+            index_retrained: self.index_retrained,
+            // one stat per publish, off the read path
+            wal_bytes: fs::metadata(self.dir.join("wal.log"))
+                .map(|m| m.len())
+                .unwrap_or(0),
+        }
+    }
+
+    /// Write `counts.json` ({"nodes","facts"}) via tmp + rename, so [`persisted_counts`] can list
+    /// this database without opening it. Called on open, after every ingest, compaction, reset and
+    /// on close; skipped when the counts did not change. Not fsynced — one small write + rename
+    /// next to the batch's WAL fsync — so it survives a killed process, not necessarily a power
+    /// loss. Best effort: the file is a listing hint, never an input, so a failure is logged.
+    fn persist_counts(&mut self) {
+        let counts = Counts {
+            nodes: self.node_count,
+            facts: self.eng.durable_head(),
+        };
+        if self.counts_persisted == Some(counts) {
+            return;
+        }
+        let body = json!({ "nodes": counts.nodes, "facts": counts.facts }).to_string();
+        let tmp = self.dir.join("counts.json.tmp");
+        let res =
+            fs::write(&tmp, body).and_then(|()| fs::rename(&tmp, self.dir.join("counts.json")));
+        match res {
+            Ok(()) => self.counts_persisted = Some(counts),
+            Err(e) => eprintln!("stromadb: write {}/counts.json: {e}", self.dir.display()),
         }
     }
 
@@ -1064,6 +1165,9 @@ impl WriteState {
     fn apply_node(&mut self, n: &Value) -> DbResult<bool> {
         let id = n["id"].as_u64().ok_or("node.id missing")?;
         let mut wrote = false;
+        // The mirrors (and the maintained counters with them) move only after the engine accepted
+        // the op, so they never run ahead of what the snapshot will hold.
+        let mut counted = self.node_type_w.contains_key(&id) || self.node_label_w.contains_key(&id);
         if let Some(t) = n["type"].as_str() {
             let tid = self
                 .schema
@@ -1071,7 +1175,6 @@ impl WriteState {
                 .field_id(t)
                 .ok_or(format!("unknown type: {t}"))?;
             if self.node_type_w.get(&id) != Some(&tid) {
-                self.node_type_w.insert(id, tid);
                 self.eng
                     .write(
                         0,
@@ -1081,16 +1184,32 @@ impl WriteState {
                         },
                     )
                     .map_err(|e| format!("backpressure: {e:?}"))?;
+                self.node_type_w.insert(id, tid);
+                if !counted {
+                    self.node_count += 1;
+                    counted = true;
+                }
                 wrote = true;
             }
         }
         if let Some(l) = n["label"].as_u64() {
             let label = l as u8;
             if self.node_label_w.get(&id) != Some(&label) {
-                self.node_label_w.insert(id, label);
                 self.eng
                     .write(0, WriteKind::SetNodeLabel { node: id, label })
                     .map_err(|e| format!("backpressure: {e:?}"))?;
+                if let Some(old) = self.node_label_w.insert(id, label)
+                    && let Some(c) = self.label_counts.get_mut(&old)
+                {
+                    *c -= 1;
+                    if *c == 0 {
+                        self.label_counts.remove(&old);
+                    }
+                }
+                *self.label_counts.entry(label).or_insert(0) += 1;
+                if !counted {
+                    self.node_count += 1;
+                }
                 wrote = true;
             }
         }
@@ -2899,5 +3018,119 @@ fn fmt_obj(o: ObjKey) -> Value {
         ObjKey::Float(b) => json!({ "float": f64::from_bits(b) }),
         ObjKey::Text(t) => json!({ "text": t }),
         ObjKey::Bool(b) => json!({ "bool": b }),
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("stroma_stats_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        d
+    }
+
+    /// The maintained counters must equal a full recount of the published snapshot.
+    fn assert_exact(db: &Db) {
+        let rs = db.read_state();
+        let mut labels: BTreeMap<u8, u64> = BTreeMap::new();
+        for &l in rs.snap.node_labels.values() {
+            *labels.entry(l).or_insert(0) += 1;
+        }
+        let expect_labels: serde_json::Map<String, Value> = labels
+            .iter()
+            .map(|(l, n)| (l.to_string(), json!(n)))
+            .collect();
+        let s = db.stats();
+        assert_eq!(s["schema"]["nodes"], json!(node_ids(&rs.snap).len()));
+        assert_eq!(s["labels"], Value::Object(expect_labels));
+        assert_eq!(s["facts"]["durable_head"], json!(rs.durable_head));
+        assert_eq!(
+            db.counts(),
+            Counts {
+                nodes: node_ids(&rs.snap).len() as u64,
+                facts: rs.durable_head
+            }
+        );
+    }
+
+    #[test]
+    fn counts_stay_exact_across_ingest_retract_compaction_and_reopen() {
+        let dir = tmp("exact");
+        let db = Db::open_or_init(&dir).unwrap();
+        assert_exact(&db);
+        db.ingest_str(concat!(
+            "{\"type_def\":{\"name\":\"T\"}}\n",
+            "{\"pred_def\":{\"name\":\"rel\",\"cardinality\":\"many\",\"domain\":\"T\",\"range\":\"T\"}}\n",
+            "{\"node\":{\"id\":1,\"type\":\"T\",\"label\":0}}\n",
+            "{\"node\":{\"id\":2,\"type\":\"T\"}}\n",
+            "{\"node\":{\"id\":3,\"label\":2}}\n",
+            "{\"fact\":{\"subject\":1,\"predicate\":\"rel\",\"object\":{\"node\":2}}}\n",
+            "{\"fact\":{\"subject\":1,\"predicate\":\"rel\",\"object\":{\"node\":3}}}\n",
+        ))
+        .unwrap();
+        assert_exact(&db);
+        assert_eq!(db.counts().nodes, 3);
+        // re-sent (suppressed) node, a label added to a typed node, a relabel, a new node
+        db.ingest_str(concat!(
+            "{\"node\":{\"id\":1,\"type\":\"T\",\"label\":0}}\n",
+            "{\"node\":{\"id\":2,\"label\":2}}\n",
+            "{\"node\":{\"id\":1,\"label\":3}}\n",
+            "{\"node\":{\"id\":4,\"type\":\"T\",\"label\":3}}\n",
+            "{\"retract\":{\"subject\":1,\"predicate\":\"rel\",\"object\":{\"node\":3}}}\n",
+        ))
+        .unwrap();
+        assert_exact(&db);
+        assert_eq!(db.counts().nodes, 4);
+        assert_eq!(db.stats()["labels"], json!({"2": 2, "3": 2}));
+        let wal_before = db.stats()["storage"]["wal_bytes"].as_u64().unwrap();
+        db.compact().unwrap();
+        assert_exact(&db);
+        assert!(db.stats()["storage"]["wal_bytes"].as_u64().unwrap() < wal_before);
+        db.ingest_str("{\"node\":{\"id\":5,\"type\":\"T\"}}\n")
+            .unwrap();
+        assert_exact(&db);
+        let before = db.counts();
+        drop(db);
+        // close leaves an exact manifest for unopened listing
+        assert_eq!(persisted_counts(&dir), Some(before));
+        let db = Db::open(&dir).unwrap();
+        assert_exact(&db);
+        assert_eq!(db.counts(), before);
+        db.reset().unwrap();
+        assert_exact(&db);
+        assert_eq!(persisted_counts(&dir), Some(Counts { nodes: 0, facts: 0 }));
+        drop(db);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Structural lock-freedom: stats/counts must answer while a writer holds the write mutex (an
+    /// ingest batch or index rebuild in flight). A regression to taking the lock deadlocks the
+    /// reader, which the timeout turns into a failure instead of a hang.
+    #[test]
+    fn stats_never_waits_for_the_write_lock() {
+        let dir = tmp("lockfree");
+        let db = Db::open_or_init(&dir).unwrap();
+        db.ingest_str("{\"type_def\":{\"name\":\"T\"}}\n{\"node\":{\"id\":1,\"type\":\"T\"}}\n")
+            .unwrap();
+        let held = db.write.lock().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let st = db.stats();
+                tx.send((st["schema"]["nodes"].clone(), db.counts()))
+                    .unwrap();
+            });
+            let got = rx.recv_timeout(Duration::from_secs(30));
+            drop(held);
+            let (nodes, counts) = got.expect("stats() blocked on the write lock");
+            assert_eq!(nodes, json!(1));
+            assert_eq!(counts.nodes, 1);
+        });
+        drop(db);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

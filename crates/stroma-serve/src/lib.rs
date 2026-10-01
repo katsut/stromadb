@@ -22,8 +22,10 @@
 //!                 empty body. Stateless (no session ids); GET /mcp is 405 (no server stream).
 //!                 Same tool set as `stroma-mcp` (shared `stromadb_store::mcp` dispatch).
 //!   POST /reset           → clears the addressed database (opt-in: only when started with --allow-reset)
-//!   GET  /namespaces      → {"namespaces":[{"name","nodes","facts"}, ...]}  (every namespace that
-//!                 exists, default first then sorted, with its node/fact counts)
+//!   GET  /namespaces      → {"namespaces":[{"name","nodes","facts","loaded"}, ...]}  (every
+//!                 namespace that exists, default first then sorted, with its node/fact counts;
+//!                 never opens a namespace — an unopened one reports the counts it last persisted
+//!                 (updated on every write), or null when it has none)
 //!
 //! Namespaces: several isolated databases behind one server (D27). The `--db` directory is the
 //! `default` namespace; a named one is an ordinary database directory at `<db>/ns/<name>/`
@@ -353,21 +355,42 @@ impl Namespaces {
         names
     }
 
+    /// An already-open namespace's database, without opening it or waiting on a first open that
+    /// is in flight.
+    fn loaded(&self, name: &str) -> Option<SharedDb> {
+        if name == DEFAULT_NS {
+            return Some(self.default.clone());
+        }
+        let slot = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)?
+            .clone();
+        let slot = slot.try_lock().ok()?;
+        slot.clone()
+    }
+
     /// Every namespace with its node and fact counts, for the console's namespace selector:
-    /// `[{"name", "nodes", "facts"}, ...]`, `default` first then sorted. Opens each namespace
-    /// (lazily, cached thereafter, same as any other request to it) to read its `stats()`; one
-    /// already-open namespace costs nothing extra.
+    /// `[{"name", "nodes", "facts", "loaded"}, ...]`, `default` first then sorted. Never opens a
+    /// namespace: an open one reports its live counters (O(1), lock-free), an unopened one the
+    /// counts its directory last persisted (`counts.json`, rewritten after every write), or
+    /// `null` counts when it has none yet.
     fn list_with_counts(&self) -> Vec<Value> {
         self.list()
             .into_iter()
-            .filter_map(|name| {
-                let db = self.get(&name, false).ok().flatten()?;
-                let s = db.stats();
-                Some(json!({
+            .map(|name| {
+                let db = self.loaded(&name);
+                let counts = match &db {
+                    Some(db) => Some(db.counts()),
+                    None => stromadb_store::persisted_counts(&self.dir(&name)),
+                };
+                json!({
                     "name": name,
-                    "nodes": s["schema"]["nodes"],
-                    "facts": s["facts"]["durable_head"],
-                }))
+                    "nodes": counts.map(|c| c.nodes),
+                    "facts": counts.map(|c| c.facts),
+                    "loaded": db.is_some(),
+                })
             })
             .collect()
     }
@@ -1088,6 +1111,25 @@ mod tests {
         // durable_head counts durable ops (each node's type assignment plus the one relation),
         // not just explicit `fact` lines — same counter /stats reports as "facts.durable_head".
         assert_eq!(counts[1]["facts"], 3);
+        assert_eq!(counts[1]["loaded"], true);
+
+        // after a restart, listing must not open "a": its counts come from what it persisted
+        // on its last write, and it stays out of the open cache
+        drop(nss);
+        let nss = open_root(&root);
+        let counts = nss.list_with_counts();
+        assert_eq!(counts[1]["name"], "a");
+        assert_eq!(counts[1]["nodes"], 2);
+        assert_eq!(counts[1]["facts"], 3);
+        assert_eq!(counts[1]["loaded"], false);
+        assert!(nss.open.lock().unwrap().is_empty());
+
+        // no persisted counts yet (e.g. written by an older version): names still list, counts null
+        std::fs::remove_file(root.join("ns").join("a").join("counts.json")).unwrap();
+        let counts = nss.list_with_counts();
+        assert_eq!(counts[1]["name"], "a");
+        assert!(counts[1]["nodes"].is_null());
+        assert_eq!(counts[1]["loaded"], false);
 
         drop(nss);
         let _ = std::fs::remove_dir_all(&root);

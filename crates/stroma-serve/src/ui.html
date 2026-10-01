@@ -1281,7 +1281,7 @@ function renderNamespaces(){ const pill=$('nsPill');
     return `<div class="ns-row${active?' current':''}" data-ns="${esc(n.name)}">`
       + `<span class="ns-name">${esc(n.name)}</span>`
       + (active ? `<span class="ns-cur">${esc(t('nsCurrent'))}</span>` : '')
-      + `<span class="ns-counts">${esc(t('nsCounts',{n:n.nodes, f:n.facts}))}</span>`
+      + (n.nodes==null ? '' : `<span class="ns-counts">${esc(t('nsCounts',{n:n.nodes, f:n.facts}))}</span>`)
       + `</div>`;
   }).join(''); }
 $('nsPill').onclick=()=>{ const p=$('nsPop'); p.classList.toggle('hidden'); $('nsPill').setAttribute('aria-expanded', String(!p.classList.contains('hidden'))); };
