@@ -744,3 +744,200 @@ fn conformance_mcp_defaults_are_bounded() {
     );
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+// An amount-banded approval table. Team 1 (manager 10) sits in division 2 (manager 11), which sits
+// in company 3 (manager 12); requester 20 is in team 1. Every request is approved at 1200.
+const BANDED: &str = r#"
+{"type_def":{"name":"Person"}}
+{"type_def":{"name":"Department"}}
+{"type_def":{"name":"Request"}}
+{"pred_def":{"name":"member-of","cardinality":"one","domain":"Person","range":"Department"}}
+{"pred_def":{"name":"parent","cardinality":"one","domain":"Department","range":"Department"}}
+{"pred_def":{"name":"manager-of","cardinality":"one","domain":"Department","range":"Person"}}
+{"pred_def":{"name":"requester","cardinality":"one","domain":"Request","range":"Person"}}
+{"pred_def":{"name":"approved-by","cardinality":"one","domain":"Request","range":"Person"}}
+{"pred_def":{"name":"approved-at","cardinality":"one","domain":"Request","range_value":"int"}}
+{"pred_def":{"name":"amount","cardinality":"one","domain":"Request","range_value":"int"}}
+{"node":{"id":1,"type":"Department"}}
+{"node":{"id":2,"type":"Department"}}
+{"node":{"id":3,"type":"Department"}}
+{"node":{"id":10,"type":"Person"}}
+{"node":{"id":11,"type":"Person"}}
+{"node":{"id":12,"type":"Person"}}
+{"node":{"id":20,"type":"Person"}}
+{"fact":{"subject":1,"predicate":"parent","object":{"node":2}}}
+{"fact":{"subject":2,"predicate":"parent","object":{"node":3}}}
+{"fact":{"subject":1,"predicate":"manager-of","object":{"node":10}}}
+{"fact":{"subject":2,"predicate":"manager-of","object":{"node":11}}}
+{"fact":{"subject":3,"predicate":"manager-of","object":{"node":12}}}
+{"fact":{"subject":20,"predicate":"member-of","object":{"node":1}}}
+{"node":{"id":101,"type":"Request"}}
+{"fact":{"subject":101,"predicate":"requester","object":{"node":20}}}
+{"fact":{"subject":101,"predicate":"amount","object":{"int":300000}}}
+{"fact":{"subject":101,"predicate":"approved-at","object":{"int":1200}}}
+{"fact":{"subject":101,"predicate":"approved-by","object":{"node":10}}}
+{"node":{"id":102,"type":"Request"}}
+{"fact":{"subject":102,"predicate":"requester","object":{"node":20}}}
+{"fact":{"subject":102,"predicate":"amount","object":{"int":1500000}}}
+{"fact":{"subject":102,"predicate":"approved-at","object":{"int":1200}}}
+{"fact":{"subject":102,"predicate":"approved-by","object":{"node":10}}}
+{"node":{"id":103,"type":"Request"}}
+{"fact":{"subject":103,"predicate":"requester","object":{"node":20}}}
+{"fact":{"subject":103,"predicate":"amount","object":{"int":1500000}}}
+{"fact":{"subject":103,"predicate":"approved-at","object":{"int":1200}}}
+{"fact":{"subject":103,"predicate":"approved-by","object":{"node":11}}}
+{"node":{"id":104,"type":"Request"}}
+{"fact":{"subject":104,"predicate":"requester","object":{"node":20}}}
+{"fact":{"subject":104,"predicate":"amount","object":{"int":5000000}}}
+{"fact":{"subject":104,"predicate":"approved-at","object":{"int":1200}}}
+{"fact":{"subject":104,"predicate":"approved-by","object":{"node":12}}}
+{"node":{"id":105,"type":"Request"}}
+{"fact":{"subject":105,"predicate":"requester","object":{"node":20}}}
+{"fact":{"subject":105,"predicate":"amount","object":{"int":400000}}}
+{"fact":{"subject":105,"predicate":"amount","object":{"int":1500000},"valid_from":2000}}
+{"fact":{"subject":105,"predicate":"approved-at","object":{"int":1200}}}
+{"fact":{"subject":105,"predicate":"approved-by","object":{"node":10}}}
+"#;
+
+fn banded_rule(as_of: bool) -> serde_json::Value {
+    let when = |mut c: serde_json::Value| {
+        if as_of {
+            c["as_of"] = json!("approved-at");
+        }
+        c
+    };
+    json!({
+        "subject_type": "Request",
+        "cases": [
+            { "when": when(json!({"predicate": "amount", "lte": 500000})),
+              "required": {"hops": [{"predicate":"requester"},{"predicate":"member-of"},{"predicate":"manager-of"}]} },
+            { "when": when(json!({"predicate": "amount", "gt": 500000, "lte": {"int": 2000000}})),
+              "required": {"hops": [{"predicate":"requester"},{"predicate":"member-of"},{"predicate":"parent"},{"predicate":"manager-of"}]} },
+            { "required": {"hops": [{"predicate":"requester"},{"predicate":"member-of"},{"predicate":"parent"},{"predicate":"parent"},{"predicate":"manager-of"}]} }
+        ],
+        "actual": "approved-by"
+    })
+}
+
+fn verdict_case_map(r: &serde_json::Value) -> BTreeMap<u64, (String, serde_json::Value)> {
+    r["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["subject"].as_u64().unwrap(),
+                (
+                    v["verdict"].as_str().unwrap().to_string(),
+                    v["case"].clone(),
+                ),
+            )
+        })
+        .collect()
+}
+
+// Amount-banded rules end-to-end: a three-band `cases` rule yields OK / MISMATCH per band with the
+// matched case on each row; a request whose amount was raised into a higher band after its
+// approval is judged against the band in effect at the approval instant when the conditions say
+// `as_of`, and against the current band otherwise; a stored banded rule survives a reopen; a live
+// watch re-decides a subject when its amount is revised across a band.
+#[test]
+fn banded_rule_over_amount_ranges() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_conformance_banded_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(BANDED).unwrap();
+
+    let eval = |db: &Db, rule: serde_json::Value| {
+        verdict_case_map(
+            &db.query(&json!({"op": "conformance", "rule": rule}))
+                .unwrap(),
+        )
+    };
+    let row = |v: &str, c: serde_json::Value| (v.to_string(), c);
+    let at_approval = eval(&db, banded_rule(true));
+    assert_eq!(at_approval[&101], row("OK", json!(0)));
+    assert_eq!(at_approval[&102], row("MISMATCH", json!(1)));
+    assert_eq!(at_approval[&103], row("OK", json!(1)));
+    assert_eq!(at_approval[&104], row("OK", json!(2)));
+    // 400,000 at the approval instant: the team manager's approval was right
+    assert_eq!(at_approval[&105], row("OK", json!(0)));
+    // read at the current value instead, the raise to 1,500,000 calls for the division manager
+    let current = eval(&db, banded_rule(false));
+    assert_eq!(current[&105], row("MISMATCH", json!(1)));
+
+    // a rule without cases reports no case
+    let plain = db
+        .query(&json!({"op": "conformance", "rule": {
+            "subject_type": "Request",
+            "scope": {"predicate": "amount", "between": [1000000, 2000000]},
+            "required": {"hops": [{"predicate":"requester"},{"predicate":"member-of"},{"predicate":"parent"},{"predicate":"manager-of"}]},
+            "actual": "approved-by"
+        }}))
+        .unwrap();
+    let plain = verdict_case_map(&plain);
+    assert_eq!(plain[&101], row("NOT_APPLICABLE", json!(null)));
+    assert_eq!(plain[&103], row("OK", json!(null)));
+    assert_eq!(plain[&105], row("MISMATCH", json!(null)));
+
+    // malformed conditions are clear errors
+    let bad = |cond: serde_json::Value| {
+        db.query(&json!({"op": "conformance", "rule": {
+            "subject_type": "Request",
+            "scope": cond,
+            "required": {"hops": [{"predicate":"requester"}]},
+            "actual": "approved-by"
+        }}))
+        .unwrap_err()
+    };
+    assert!(bad(json!({"predicate": "amount", "gt": "big"})).contains("finite number"));
+    assert!(bad(json!({"predicate": "amount", "gt": 1, "gte": 2})).contains("both gt and gte"));
+    assert!(bad(json!({"predicate": "amount", "equals": 1, "lt": 2})).contains("exactly one test"));
+    assert!(bad(json!({"predicate": "amount"})).contains("exactly one test"));
+    assert!(bad(json!({"predicate": "amount", "between": [1]})).contains("[lo, hi]"));
+    assert!(
+        bad(json!({"predicate": "amount", "lt": 2, "as_of": "no-such-anchor"}))
+            .contains("no-such-anchor")
+    );
+    let mut both = banded_rule(true);
+    both["required"] = json!({"hops": [{"predicate":"requester"}]});
+    let err = db
+        .query(&json!({"op": "conformance", "rule": both}))
+        .unwrap_err();
+    assert!(err.contains("both required and cases"), "{err}");
+
+    // stored banded rule: survives a reopen and is watchable
+    let def = json!({"rule_def": {"name": "approval-bands", "rule": banded_rule(true)}});
+    db.ingest_str(&def.to_string()).unwrap();
+    drop(db); // release the directory lock
+    let db = Db::open(&dir).unwrap();
+    let by_name = json!({"op": "conformance", "rule_name": "approval-bands"});
+    assert_eq!(verdict_case_map(&db.query(&by_name).unwrap()), at_approval);
+    let w = db
+        .query(&json!({"op": "conformance_watch", "rule_name": "approval-bands"}))
+        .unwrap();
+    let cursor = w["cursor"].as_u64().unwrap();
+    // a retroactive correction: request 101 was really 900,000 from before its approval
+    db.ingest_str(
+        "{\"fact\":{\"subject\":101,\"predicate\":\"amount\",\"object\":{\"int\":900000},\"valid_from\":1000}}\n",
+    )
+    .unwrap();
+    let c = db
+        .query(
+            &json!({"op": "conformance_changes", "rule_name": "approval-bands", "cursor": cursor}),
+        )
+        .unwrap();
+    let changes = c["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0]["subject"], json!(101));
+    assert_eq!(changes[0]["old"]["verdict"], json!("OK"));
+    assert_eq!(changes[0]["old"]["case"], json!(0));
+    assert_eq!(changes[0]["new"]["verdict"], json!("MISMATCH"));
+    assert_eq!(changes[0]["new"]["case"], json!(1));
+    assert_eq!(changes[0]["new"]["required"], json!({"node": 11}));
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}

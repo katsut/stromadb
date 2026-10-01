@@ -89,6 +89,7 @@ fn run(n_issues: usize) {
     let rule = Rule {
         subject_type: "Issue".into(),
         scope: None,
+        cases: Vec::new(),
         required: vec![
             Hop {
                 predicate: "assigned-to".into(),
@@ -105,10 +106,7 @@ fn run(n_issues: usize) {
         ],
         distinct_from: Vec::new(),
         actual: "approved-by".into(),
-        absent_when: Some(Cond {
-            predicate: "status".into(),
-            equals: ObjKey::Text("released".into()),
-        }),
+        absent_when: Some(Cond::equals("status", ObjKey::Text("released".into()))),
     };
 
     // build: persons in departments, issues assigned round-robin, all approved + released
