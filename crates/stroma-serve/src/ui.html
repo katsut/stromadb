@@ -242,7 +242,6 @@
     <span id="statpills"></span>
     <button class="pill scope-btn" id="scopeBtn" title="visibility scope"><span data-i18n="scope">scope</span>: <b id="scopeSummary">all</b></button>
     <span class="tb-spacer"></span>
-    <a class="tb-btn hidden" id="appLink" target="_blank" rel="noopener noreferrer"></a>
     <select class="lang" id="lang" title="language"><option value="en">EN</option><option value="ja">日本語</option><option value="zh">中文</option></select>
     <button class="icon-btn" id="theme" data-i18n-title="theme">☾</button>
     <button class="icon-btn" id="settingsBtn" data-i18n-title="settings" title="settings" aria-controls="settings" aria-expanded="false">⚙</button>
@@ -404,7 +403,7 @@ const I18N = {
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”",
        settings:"settings", settingsTitle:"Settings", close:"close",
        nsTitle:"Namespace", nsIntro:"Switch to another namespace — an isolated database this server also hosts.", nsCounts:"{n} nodes · {f} facts", nsCurrent:"current", switchNamespace:"switch namespace",
-       grpServer:"Server", version:"version", dbPath:"database", workers:"workers", typesPreds:"types · predicates", embeddingsLbl:"embeddings", durableHead:"durable head", changelog:"changelog", signedInAs:"signed in as", access:"access", readWrite:"read-write", readOnlyLbl:"read-only", allLabels:"all labels", labelsCap:"labels {l}", unnamedToken:"unnamed token", authOpen:"open (auth disabled)", viaToken:"token “{n}”", backToApp:"Back to app ↗",
+       grpServer:"Server", version:"version", dbPath:"database", workers:"workers", typesPreds:"types · predicates", embeddingsLbl:"embeddings", durableHead:"durable head", changelog:"changelog", signedInAs:"signed in as", access:"access", readWrite:"read-write", readOnlyLbl:"read-only", allLabels:"all labels", labelsCap:"labels {l}", unnamedToken:"unnamed token", authOpen:"open (auth disabled)", viaToken:"token “{n}”",
        mcpEndpoint:"MCP endpoint", copy:"Copy", copied:"copied to clipboard", copyFailed:"copy failed — select the URL and copy it manually",
        grpAdmin:"Admin", compactIntro:"Snapshot the current state and truncate the changelog. Non-destructive: as-of reads keep answering across the boundary.", compactNow:"Compact now", compacting:"compacting…", compactDone:"compacted up to {n} · changelog {w} · snapshot {s}", compactFailed:"compaction failed: {e}", resetState:"Database reset", enabled:"enabled", disabled:"disabled", dangerZone:"Danger zone",
        resetIntro:"Remove everything stored in this database and start empty.", resetDb:"Reset database…", resetTitle:"Reset database", resetBody:"This removes all facts, schema, rules and embeddings, and cannot be undone. A server started with --demo does not re-seed the sample graph until it is restarted.", resetType:"type RESET to confirm", cancel:"Cancel", resetConfirm:"Reset", resetting:"resetting…", resetFailed:"reset failed: {e}", resetDone:"database reset — it is now empty" },
@@ -416,7 +415,7 @@ const I18N = {
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用",
        settings:"設定", settingsTitle:"設定", close:"閉じる",
        nsTitle:"ネームスペース", nsIntro:"別のネームスペースに切り替え — このサーバーが持つ別の独立したデータベースです。", nsCounts:"ノード {n} · ファクト {f}", nsCurrent:"現在", switchNamespace:"ネームスペースを切り替え",
-       grpServer:"サーバー", version:"バージョン", dbPath:"データベース", workers:"ワーカー数", typesPreds:"型 · 述語", embeddingsLbl:"埋め込み", durableHead:"durable head", changelog:"変更ログ", signedInAs:"サインイン", access:"権限", readWrite:"読み書き", readOnlyLbl:"読み取り専用", allLabels:"全ラベル", labelsCap:"ラベル {l}", unnamedToken:"名前なしトークン", authOpen:"認証なし（無効化中）", viaToken:"トークン「{n}」", backToApp:"アプリに戻る ↗",
+       grpServer:"サーバー", version:"バージョン", dbPath:"データベース", workers:"ワーカー数", typesPreds:"型 · 述語", embeddingsLbl:"埋め込み", durableHead:"durable head", changelog:"変更ログ", signedInAs:"サインイン", access:"権限", readWrite:"読み書き", readOnlyLbl:"読み取り専用", allLabels:"全ラベル", labelsCap:"ラベル {l}", unnamedToken:"名前なしトークン", authOpen:"認証なし（無効化中）", viaToken:"トークン「{n}」",
        mcpEndpoint:"MCP エンドポイント", copy:"コピー", copied:"クリップボードにコピーしました", copyFailed:"コピーできませんでした。URL を選択して手動でコピーしてください",
        grpAdmin:"管理", compactIntro:"現在の状態をスナップショットし、変更ログを切り詰めます。非破壊で、境界をまたぐ時点指定の読み取りもそのまま動きます。", compactNow:"今すぐコンパクション", compacting:"コンパクション中…", compactDone:"{n} までコンパクション済み · 変更ログ {w} · スナップショット {s}", compactFailed:"コンパクションに失敗しました: {e}", resetState:"データベースのリセット", enabled:"有効", disabled:"無効", dangerZone:"危険な操作",
        resetIntro:"このデータベースの内容をすべて削除し、空の状態に戻します。", resetDb:"データベースをリセット…", resetTitle:"データベースをリセット", resetBody:"すべてのファクト・スキーマ・ルール・埋め込みを削除します。元には戻せません。--demo で起動したサーバーは、再起動するまでサンプルグラフを再投入しません。", resetType:"確認のため RESET と入力", cancel:"キャンセル", resetConfirm:"リセット", resetting:"リセット中…", resetFailed:"リセットに失敗しました: {e}", resetDone:"データベースをリセットしました。現在は空です" },
@@ -428,7 +427,7 @@ const I18N = {
        tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”",
        settings:"设置", settingsTitle:"设置", close:"关闭",
        nsTitle:"命名空间", nsIntro:"切换到另一个命名空间 — 本服务器托管的另一个独立数据库。", nsCounts:"{n} 节点 · {f} 事实", nsCurrent:"当前", switchNamespace:"切换命名空间",
-       grpServer:"服务器", version:"版本", dbPath:"数据库", workers:"工作线程", typesPreds:"类型 · 谓词", embeddingsLbl:"嵌入向量", durableHead:"durable head", changelog:"变更日志", signedInAs:"登录身份", access:"权限", readWrite:"读写", readOnlyLbl:"只读", allLabels:"全部标签", labelsCap:"标签 {l}", unnamedToken:"未命名令牌", authOpen:"开放（认证已禁用）", viaToken:"令牌“{n}”", backToApp:"返回应用 ↗",
+       grpServer:"服务器", version:"版本", dbPath:"数据库", workers:"工作线程", typesPreds:"类型 · 谓词", embeddingsLbl:"嵌入向量", durableHead:"durable head", changelog:"变更日志", signedInAs:"登录身份", access:"权限", readWrite:"读写", readOnlyLbl:"只读", allLabels:"全部标签", labelsCap:"标签 {l}", unnamedToken:"未命名令牌", authOpen:"开放（认证已禁用）", viaToken:"令牌“{n}”",
        mcpEndpoint:"MCP 端点", copy:"复制", copied:"已复制到剪贴板", copyFailed:"复制失败，请选中 URL 手动复制",
        grpAdmin:"管理", compactIntro:"为当前状态创建快照并截断变更日志。非破坏性：跨越边界的时点读取仍然有效。", compactNow:"立即压缩", compacting:"正在压缩…", compactDone:"已压缩至 {n} · 变更日志 {w} · 快照 {s}", compactFailed:"压缩失败：{e}", resetState:"数据库重置", enabled:"已启用", disabled:"已禁用", dangerZone:"危险操作",
        resetIntro:"删除此数据库中存储的全部内容，恢复为空。", resetDb:"重置数据库…", resetTitle:"重置数据库", resetBody:"这将删除所有事实、模式、规则和嵌入向量，且无法撤销。以 --demo 启动的服务器在重启之前不会重新载入示例图。", resetType:"输入 RESET 以确认", cancel:"取消", resetConfirm:"重置", resetting:"正在重置…", resetFailed:"重置失败：{e}", resetDone:"数据库已重置，现在为空" },
@@ -439,7 +438,7 @@ function applyLang(l){ lang = I18N[l] ? l : 'en'; localStorage.setItem('stroma_l
   document.querySelectorAll('[data-i18n]').forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll('[data-i18n-ph]').forEach(e=>e.placeholder=t(e.dataset.i18nPh));
   document.querySelectorAll('[data-i18n-title]').forEach(e=>e.title=t(e.dataset.i18nTitle));
-  legend(); renderSettings(); renderStats(); setLivePill(); renderAppLink(); renderNamespaces(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); renderCompose(); } }
+  legend(); renderSettings(); renderStats(); setLivePill(); renderNamespaces(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); renderCompose(); } }
 const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
 const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
@@ -1232,11 +1231,7 @@ applyTheme(localStorage.getItem('stroma_theme')||'dark');
 // group and no reset at all; without --allow-reset the reset stays visible but disabled, with the
 // server's own hint.
 let perms=null;
-async function me(){ try{ const r=await fetch('/me'); if(r.ok){ perms=await r.json(); renderSettings(); renderAppLink(); } }catch(x){ console.warn('GET /me failed', x); } }
-// an optional link back to the application this database feeds (--app-url / $STROMA_APP_URL),
-// hidden unless the server set one
-function renderAppLink(){ const a=$('appLink'); const url=perms&&perms.app_url;
-  a.classList.toggle('hidden', !url); if(url){ a.href=url; a.textContent=t('backToApp'); } }
+async function me(){ try{ const r=await fetch('/me'); if(r.ok){ perms=await r.json(); renderSettings(); } }catch(x){ console.warn('GET /me failed', x); } }
 const fmtBytes = n => n<1024 ? n+' B' : n<1048576 ? (n/1024).toFixed(1)+' KiB' : (n/1048576).toFixed(1)+' MiB';
 // the server reports the MCP URL on its bound address; a wildcard bind (0.0.0.0 / ::) is not
 // reachable as such, so fall back to the address this page was loaded from

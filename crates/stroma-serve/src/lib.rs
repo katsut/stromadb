@@ -10,7 +10,7 @@
 //!   POST /logout          → clears the session
 //!   GET  /me              → caller's permissions {"user", "read_only", "allow_reset", "reset_hint",
 //!                 "auth", "token_name", "labels"} plus server info {"version", "db_path",
-//!                 "workers", "mcp_url", "app_url"} (the console's settings panel)
+//!                 "workers", "mcp_url"} (the console's settings panel)
 //!   GET  /events?since=N  → long-poll; returns {"head": M} when the durable head advances (or ~20s)
 //!   GET  /stats           → engine/schema/embedding/storage counters
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
@@ -99,9 +99,6 @@ struct ServerInfo {
     workers: usize,
     /// The MCP endpoint on the address actually bound (so `--addr host:0` reports the real port).
     mcp_url: String,
-    /// Optional link back to the application this database feeds (`--app-url`/`$STROMA_APP_URL`).
-    /// The console renders it as a topbar "Back to app ↗" link when set; `None` hides it.
-    app_url: Option<String>,
 }
 
 fn now_secs() -> u64 {
@@ -616,7 +613,6 @@ const VALUE_FLAGS: &[&str] = &[
     "--admin-password",
     "--api-token",
     "--tokens",
-    "--app-url",
 ];
 
 /// Flags that take no value.
@@ -635,8 +631,6 @@ fn usage() -> &'static str {
      \x20 --admin-password <pw>   console login password (default: password)\n\
      \x20 --api-token <token>     legacy single unnamed, unrestricted bearer token\n\
      \x20 --tokens <file>         named token registry (JSON)\n\
-     \x20 --app-url <url>         optional link back to the app this database feeds; shown in the\n\
-     \x20                         console topbar as \"Back to app\" (hidden when unset)\n\
      \x20 --demo                  boot with the bundled sample org graph\n\
      \x20 --allow-reset           enable POST /reset, which clears the database\n\
      \x20 --no-auth               disable the auth gate (local dev only)\n\
@@ -783,13 +777,11 @@ pub fn run(args: &[String]) {
         .server_addr()
         .to_ip()
         .map_or_else(|| addr.clone(), |a| a.to_string());
-    let app_url = opt(args, "--app-url", "STROMA_APP_URL", "");
     let info = Arc::new(ServerInfo {
         db_path: std::fs::canonicalize(&dir)
             .map_or_else(|_| dir.clone(), |p| p.to_string_lossy().into_owned()),
         workers,
         mcp_url: format!("http://{bound}/mcp"),
-        app_url: (!app_url.is_empty()).then_some(app_url),
     });
     eprintln!("stromadb serving on http://{addr}  (db: {dir}, {workers} workers)");
     eprintln!("console: open http://{addr}/ in a browser");
@@ -929,7 +921,6 @@ pub fn run(args: &[String]) {
                             "db_path": info.db_path,
                             "workers": info.workers,
                             "mcp_url": info.mcp_url,
-                            "app_url": info.app_url,
                         }),
                     ));
                 } else if method == Method::Get && path == "/namespaces" {
