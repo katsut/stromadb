@@ -594,8 +594,8 @@ fn conformance_for_given_subjects() {
         .unwrap();
     assert_eq!(&one["verdicts"][0], full_1005);
 
-    // a list: one row per distinct id, sorted; an out-of-scope subject answers NOT_APPLICABLE with
-    // no reason, a Person (10) answers `not_subject_type`, an unknown id `unknown_subject`
+    // a list: one row per distinct id, sorted; an out-of-scope subject answers `out_of_scope`, a
+    // Person (10) answers `not_subject_type`, an unknown id `unknown_subject`
     let mut req = rule();
     req["subjects"] = json!([1006, 1004, 1004, 10, 999_999]);
     let some = db.query(&req).unwrap();
@@ -607,10 +607,7 @@ fn conformance_for_given_subjects() {
     assert_eq!(rows[1]["verdict"], json!("MISMATCH"));
     assert!(rows[1].get("reason").is_none(), "{some}");
     assert_eq!(rows[2]["verdict"], json!("NOT_APPLICABLE"));
-    assert!(
-        rows[2].get("reason").is_none(),
-        "scope NA is judged: {some}"
-    );
+    assert_eq!(rows[2]["reason"], json!("out_of_scope"), "{some}");
     assert_eq!(rows[3]["verdict"], json!("NOT_APPLICABLE"));
     assert_eq!(rows[3]["reason"], json!("unknown_subject"));
     assert_eq!(some["total"], json!(4));
@@ -618,6 +615,11 @@ fn conformance_for_given_subjects() {
     assert_eq!(
         some["counts"],
         json!({"OK": 0, "ABSENT": 0, "MISMATCH": 1, "NOT_APPLICABLE": 3})
+    );
+    assert_eq!(
+        some["reasons"],
+        json!({"out_of_scope": 1, "no_matching_case": 0, "required_unresolved": 0,
+               "not_subject_type": 1, "unknown_subject": 1})
     );
     // `only` filters reason rows like any NOT_APPLICABLE row
     req["only"] = json!(["MISMATCH"]);
@@ -653,18 +655,18 @@ fn conformance_for_given_subjects() {
             "reason": "unknown_subject"
         })
     );
-    assert!(rows[2].get("reason").is_none(), "{masked}");
+    assert_eq!(rows[2]["reason"], json!("out_of_scope"), "{masked}");
 
-    // a full evaluation never carries a reason
+    // a full evaluation carries a reason exactly on its NOT_APPLICABLE rows
     let full = db.query(&rule()).unwrap();
-    assert!(
-        full["verdicts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|v| v.get("reason").is_none()),
-        "{full}"
-    );
+    for v in full["verdicts"].as_array().unwrap() {
+        assert_eq!(
+            v.get("reason").is_some(),
+            v["verdict"] == "NOT_APPLICABLE",
+            "{v}"
+        );
+    }
+    assert_eq!(full["reasons"]["out_of_scope"], json!(1), "{full}");
 
     // bad shapes are clear errors
     for bad in [
@@ -713,6 +715,73 @@ fn conformance_only_limit_offset() {
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
+// A present approval whose required path cannot be walked (the assignee has no department yet) is
+// NOT_APPLICABLE `required_unresolved`, never a `wrong` MISMATCH; an ABSENT stays ABSENT. A watch
+// moves the subject to its real verdict when the missing edge arrives.
+#[test]
+fn required_unresolved_is_not_a_mismatch() {
+    let (dir, db) = fixture_db("unresolved");
+    db.ingest_str(concat!(
+        "{\"node\":{\"id\":103,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":1010,\"type\":\"Issue\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1010,\"predicate\":\"assigned-to\",\"object\":{\"node\":103}}}\n",
+        "{\"fact\":{\"subject\":1010,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+        "{\"fact\":{\"subject\":1010,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+        "{\"fact\":{\"subject\":1010,\"predicate\":\"approved-at\",\"object\":{\"int\":1200}}}\n",
+        "{\"fact\":{\"subject\":1010,\"predicate\":\"status\",\"object\":{\"text\":\"released\"},\"valid_from\":1300}}\n",
+    ))
+    .unwrap();
+    let rule_def = json!({ "rule_def": { "name": "release-approval", "rule": rule_body() } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+
+    let mut req = rule();
+    req["subjects"] = json!([1003, 1010]);
+    let r = db.query(&req).unwrap();
+    let rows = r["verdicts"].as_array().unwrap();
+    // 1003: no approval and no anchor — the absence still wins
+    assert_eq!(rows[0]["verdict"], json!("ABSENT"), "{r}");
+    assert!(rows[0].get("reason").is_none(), "{r}");
+    assert_eq!(rows[0]["required"], json!(null));
+    assert_eq!(
+        rows[1],
+        json!({
+            "subject": 1010, "verdict": "NOT_APPLICABLE", "kind": null, "required": null,
+            "distinct": null, "actual": {"node": 10}, "as_of": null, "case": null,
+            "reason": "required_unresolved"
+        })
+    );
+    let full = db.query(&rule()).unwrap();
+    assert_eq!(full["counts"]["MISMATCH"], json!(2), "{full}");
+    assert_eq!(full["counts"]["NOT_APPLICABLE"], json!(2), "{full}");
+    assert_eq!(full["reasons"]["required_unresolved"], json!(1), "{full}");
+    assert_eq!(full["reasons"]["out_of_scope"], json!(1), "{full}");
+    // the bounded MCP default omits the row but still reports it per reason
+    let m = mcp_conformance(&db, json!({"rule": rule_body()}));
+    assert!(!subjects_of(&m).contains(&1010), "{m}");
+    assert_eq!(m["reasons"]["required_unresolved"], json!(1), "{m}");
+
+    // watch, then the assignee's department arrives: 1010 is judged (Alice manages dept 1 at 1200)
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    let cursor = w["cursor"].as_u64().unwrap();
+    db.ingest_str(
+        "{\"fact\":{\"subject\":103,\"predicate\":\"member-of\",\"object\":{\"node\":1},\"valid_from\":1000}}\n",
+    )
+    .unwrap();
+    let c = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}))
+        .unwrap();
+    let changes = c["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{c}");
+    assert_eq!(changes[0]["subject"], json!(1010));
+    assert_eq!(changes[0]["old"]["reason"], json!("required_unresolved"));
+    assert_eq!(changes[0]["new"]["verdict"], json!("OK"));
+    assert!(changes[0]["new"].get("reason").is_none(), "{c}");
+    assert_eq!(changes[0]["new"]["required"], json!({"node": 10}));
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 fn mcp_conformance(db: &Db, args: serde_json::Value) -> serde_json::Value {
     let msg = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
                      "params":{"name":"conformance","arguments":args}});
@@ -746,14 +815,18 @@ fn conformance_mcp_defaults_are_bounded() {
         vec![1006],
         "subject-scoped keeps every row"
     );
-    // every requested id gets one row, with a reason when the rule does not judge it
+    // every requested id gets one row; NOT_APPLICABLE rows say why
     let mixed = mcp_conformance(
         &db,
         json!({"rule": rule_body(), "subjects": [999_999, 1006, 10]}),
     );
     assert_eq!(subjects_of(&mixed), vec![10, 1006, 999_999], "{mixed}");
     assert_eq!(mixed["verdicts"][0]["reason"], json!("not_subject_type"));
-    assert!(mixed["verdicts"][1].get("reason").is_none(), "{mixed}");
+    assert_eq!(
+        mixed["verdicts"][1]["reason"],
+        json!("out_of_scope"),
+        "{mixed}"
+    );
     assert_eq!(mixed["verdicts"][2]["reason"], json!("unknown_subject"));
     assert_eq!(mixed["total"], json!(3));
     assert_eq!(mixed["counts"]["NOT_APPLICABLE"], json!(3));

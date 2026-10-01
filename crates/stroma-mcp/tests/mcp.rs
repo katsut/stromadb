@@ -177,6 +177,11 @@ fn mcp_conformance() {
         "{\"fact\":{\"subject\":1002,\"predicate\":\"assigned-to\",\"object\":{\"node\":201}}}\n",
         "{\"fact\":{\"subject\":1002,\"predicate\":\"approved-at\",\"object\":{\"int\":6000}}}\n",
         "{\"fact\":{\"subject\":1002,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":6000}}\n",
+        // 1003's assignee (12) belongs to no department: its required path cannot be walked
+        "{\"node\":{\"id\":1003,\"type\":\"Issue\"}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"assigned-to\",\"object\":{\"node\":12}}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-at\",\"object\":{\"int\":1200}}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
     ))
     .unwrap();
     drop(db);
@@ -227,6 +232,36 @@ fn mcp_conformance() {
     assert_eq!(v1002["required"], json!({ "node": 12 }));
     assert_eq!(v1002["actual"], json!({ "node": 10 }));
     assert_eq!(v1002["as_of"], json!(6000));
+
+    // 1003 cannot be judged (no department on the path): not a MISMATCH, so the bounded default
+    // omits its row, and `reasons` still counts it.
+    assert!(
+        verdicts.iter().all(|v| v["subject"] != 1003),
+        "1003 omitted: {out}"
+    );
+    assert_eq!(out["counts"]["MISMATCH"], json!(1), "{out}");
+    assert_eq!(out["reasons"]["required_unresolved"], json!(1), "{out}");
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":8,"method":"tools/call",
+        "params":{"name":"conformance","arguments":{"rule":rule,"subjects":[1003]}}}));
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    let out: Value = serde_json::from_str(text).unwrap();
+    let v1003 = &out["verdicts"][0];
+    assert_eq!(v1003["verdict"], "NOT_APPLICABLE", "1003: {v1003}");
+    assert_eq!(v1003["reason"], "required_unresolved", "1003: {v1003}");
+    assert_eq!(v1003["kind"], json!(null));
+    assert_eq!(v1003["actual"], json!({ "node": 10 }));
+
+    // the tool descriptions document the reasons
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}));
+    let tools = r["result"]["tools"].as_array().unwrap();
+    for name in ["conformance", "rule"] {
+        let desc = tools.iter().find(|t| t["name"] == name).unwrap()["description"]
+            .as_str()
+            .unwrap();
+        for reason in ["required_unresolved", "out_of_scope", "no_matching_case"] {
+            assert!(desc.contains(reason), "{name} description lacks {reason}");
+        }
+    }
 
     // With `subjects`, every requested id gets exactly one row: a Person (10) is not a subject of
     // the rule's type, 777 names no node.

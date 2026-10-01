@@ -774,6 +774,7 @@ mod tests {
         let persons = [10u64, 11, 12, 20];
         let depts = [100u64, 101, 102];
         let mut rng = 0x0bad_cafe_1234_5678u64;
+        let (mut resolved, mut unresolved_again) = (0usize, 0usize);
         for step in 0..2000u64 {
             let r = requests[(splitmix(&mut rng) % requests.len() as u64) as usize];
             let p = persons[(splitmix(&mut rng) % 4) as usize];
@@ -799,9 +800,16 @@ mod tests {
                     predicate: g.amount,
                     valid_from: vf,
                 },
-                _ => match splitmix(&mut rng) % 3 {
+                // org edges appear and disappear, so required paths go unresolved and resolve
+                // again (only person 20 starts with a department)
+                _ => match splitmix(&mut rng) % 4 {
                     0 => set(100, g.parent, ObjKey::Node(dp), 0),
-                    1 => set(20, g.member_of, ObjKey::Node(dp), 0),
+                    1 => set(p, g.member_of, ObjKey::Node(dp), 0),
+                    2 => WriteKind::CloseOne {
+                        subject: p,
+                        predicate: g.member_of,
+                        valid_from: 0,
+                    },
                     _ => set(r, g.requester, ObjKey::Node(p), 0),
                 },
             };
@@ -809,7 +817,18 @@ mod tests {
             let (keys, nodes) = g.eng.materialize_tracked_with_nodes();
             let snap = g.eng.snapshot();
             for (m, rule) in ms.iter_mut().zip(&rules) {
-                m.apply(&snap, &g.cat, &keys, &nodes);
+                for d in m.apply(&snap, &g.cat, &keys, &nodes) {
+                    let unresolved = |v: &Option<Verdict>| {
+                        v.as_ref().and_then(|v| v.reason)
+                            == Some(conformance::NotApplicableReason::RequiredUnresolved)
+                    };
+                    if unresolved(&d.old) && !unresolved(&d.new) {
+                        resolved += 1;
+                    }
+                    if !unresolved(&d.old) && unresolved(&d.new) {
+                        unresolved_again += 1;
+                    }
+                }
                 assert_eq!(
                     m.verdicts(),
                     &full_eval(&snap, &g.cat, rule),
@@ -817,5 +836,80 @@ mod tests {
                 );
             }
         }
+        // the stream really crossed the unresolved boundary in both directions
+        assert!(
+            resolved > 0 && unresolved_again > 0,
+            "{resolved} / {unresolved_again}"
+        );
+    }
+
+    #[test]
+    fn a_late_edge_resolves_the_required_path_incrementally() {
+        use conformance::{MismatchKind, NotApplicableReason, Outcome};
+        let requests: Vec<NodeId> = (1000..1050).collect();
+        let mut g = banded(&requests);
+        let rule = banded_rule(Some("approved-at"));
+        let mut m = MaintainedConformance::new(rule.clone(), &g.eng.snapshot(), &g.cat);
+        let write = |g: &mut Banded, m: &mut MaintainedConformance, s, p, o| {
+            g.eng
+                .write(
+                    0,
+                    WriteKind::SetOne {
+                        subject: s,
+                        predicate: p,
+                        object: o,
+                        valid_from: 0,
+                        valid_to: None,
+                    },
+                )
+                .unwrap();
+            let (keys, nodes) = g.eng.materialize_tracked_with_nodes();
+            let snap = g.eng.snapshot();
+            let diffs = m.apply(&snap, &g.cat, &keys, &nodes);
+            assert_eq!(m.verdicts(), &full_eval(&snap, &g.cat, &rule));
+            diffs
+        };
+        // requesters 11 and 12 belong to no department yet: both paths stop at `member-of`
+        let (requester, member_of) = (g.requester, g.member_of);
+        write(&mut g, &mut m, 1003, requester, ObjKey::Node(11));
+        write(&mut g, &mut m, 1004, requester, ObjKey::Node(12));
+        for s in [1003, 1004] {
+            let v = &m.verdicts()[&s];
+            assert_eq!(
+                (v.verdict, v.reason, v.required.clone()),
+                (
+                    Outcome::NotApplicable,
+                    Some(NotApplicableReason::RequiredUnresolved),
+                    None
+                )
+            );
+            assert_eq!(v.actual, Some(ObjKey::Node(10)));
+        }
+        // the missing edge's key is in the support set of exactly the subject that stopped there
+        assert_eq!(
+            m.dependents.get(&(11, member_of)),
+            Some(&BTreeSet::from([1003]))
+        );
+
+        // 11 joins team 100, whose manager (10) is the approver: unresolved → OK, nothing else moves
+        let diffs = write(&mut g, &mut m, 11, member_of, ObjKey::Node(100));
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        let new = diffs[0].new.as_ref().unwrap();
+        assert_eq!(diffs[0].subject, 1003);
+        assert_eq!(
+            (new.verdict, new.reason, new.required.clone()),
+            (Outcome::Ok, None, Some(ObjKey::Node(10)))
+        );
+
+        // 12 joins division 101, managed by 11: unresolved → MISMATCH (the approver is 10)
+        let diffs = write(&mut g, &mut m, 12, member_of, ObjKey::Node(101));
+        assert_eq!(diffs.len(), 1, "{diffs:?}");
+        let new = diffs[0].new.as_ref().unwrap();
+        assert_eq!(diffs[0].subject, 1004);
+        assert_eq!(
+            (new.verdict, new.mismatch_kind, new.reason),
+            (Outcome::Mismatch, Some(MismatchKind::Wrong), None)
+        );
+        assert_eq!(new.required, Some(ObjKey::Node(11)));
     }
 }
