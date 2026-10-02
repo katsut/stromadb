@@ -266,12 +266,16 @@ struct NodeAttrState {
 /// Folded graph state keyed by `(subject, predicate)`. `edge_props` is an independent store: per
 /// `(subject, predicate)`, per edge object, an LWW register per property key. `node_attrs` is a
 /// second independent store: per node, LWW registers for its entity type and ABAC label. Both are
-/// independent of the graph fold, so neither affects graph-state determinism.
+/// independent of the graph fold, so neither affects graph-state determinism. `fact_labels` is a
+/// third: the access label a version row was written with, keyed by the row's (globally unique)
+/// order key. A row's label never changes after the write, so the store is a plain map union and
+/// the fold stays a join-semilattice; it only decides read visibility, never the fold order.
 #[derive(Clone, Debug, Default)]
 pub struct Fold {
     keys: BTreeMap<(NodeId, FieldId), KeyState>,
     edge_props: BTreeMap<(NodeId, FieldId), BTreeMap<ObjKey, BTreeMap<String, PropReg>>>,
     node_attrs: BTreeMap<NodeId, NodeAttrState>,
+    fact_labels: BTreeMap<(NodeId, FieldId), BTreeMap<OrderKey, u8>>,
 }
 
 /// One history row above the hard-delete floor: `(order key, object, valid_from, valid_to)`.
@@ -297,9 +301,35 @@ pub struct Snapshot {
     pub node_types: Arc<FxHashMap<NodeId, FieldId>>,
     /// Node → ABAC sensitivity label (LWW-resolved). Same flat-`Arc` rationale as `node_types`.
     pub node_labels: Arc<FxHashMap<NodeId, u8>>,
+    /// The access label stored with each live version row that carries one, per key, by the row's
+    /// order key (rows of `one_history` and of every element in `many_history`). Sparse: a key
+    /// whose rows carry no label has no entry. Read visibility combines this with the predicate's
+    /// current label floor (see [`crate::mask`]); the observation above is unmasked.
+    pub fact_labels: BTreeMap<(NodeId, FieldId), BTreeMap<OrderKey, u8>>,
+    /// Number of live labeled rows per stored label, over `fact_labels` — maintained with it, so
+    /// "does this mask hide any stored row" is answered without a scan.
+    pub fact_label_counts: BTreeMap<u8, u64>,
 }
 
 impl Fold {
+    /// Fold one diff whose version row carries an access label (`None` = unlabeled, identical to
+    /// [`Fold::apply`]). Only row-writing ops (`SetOne`, `CloseOne`, `AddMany`, `CloseMany`) have a
+    /// row to label; on any other op the label is ignored. The label is keyed by the row's order
+    /// key, so re-applying the op (idempotence) and any apply order (commutativity) leave the same
+    /// label map.
+    pub fn apply_labeled(&mut self, op: &Op, label: Option<u8>) {
+        self.apply(op);
+        let Some(l) = label else { return };
+        let ok = match op {
+            Op::SetOne { ok, .. }
+            | Op::CloseOne { ok, .. }
+            | Op::AddMany { ok, .. }
+            | Op::CloseMany { ok, .. } => *ok,
+            _ => return,
+        };
+        self.fact_labels.entry(op.key()).or_default().insert(ok, l);
+    }
+
     /// Fold one diff. Each op is a monotonic join-update (grow a set / raise a max), so any apply
     /// sequence is order-independent.
     pub fn apply(&mut self, op: &Op) {
@@ -530,6 +560,13 @@ impl Fold {
                 me.label = Some((ok, label));
             }
         }
+        // row labels: a union keyed by unique order keys (one row, one label)
+        for (k, rows) in &other.fact_labels {
+            let me = self.fact_labels.entry(*k).or_default();
+            for (ok, l) in rows {
+                me.insert(*ok, *l);
+            }
+        }
     }
 
     /// Drop state dominated by the hard-delete floor; provably preserves `observe()`.
@@ -555,6 +592,19 @@ impl Fold {
                 }
             }
         }
+        // labels of rows at or below a key's hard-delete floor label nothing any read can see
+        let keys = &self.keys;
+        self.fact_labels.retain(|k, rows| {
+            let hd = match keys.get(k) {
+                Some(KeyState::One(s)) => s.hd,
+                Some(KeyState::Many(s)) => s.hd,
+                None => None,
+            };
+            if let Some(h) = hd {
+                rows.retain(|ok, _| *ok > h);
+            }
+            !rows.is_empty()
+        });
     }
 
     /// The live add-tags for a cardinality-Many element `(subject, predicate, object)` — the tags a
@@ -579,9 +629,11 @@ impl Fold {
     }
 
     /// Ingest no-op probe for a cardinality-Many assertion: the element is currently PRESENT (its
-    /// greatest live row is an add) and some live add row matches `(source, valid_from, valid_to)`
-    /// exactly. A re-assertion matching this changes nothing; anything else — a different source
-    /// (corroboration), a corrected interval, or a re-grant after a close — must append.
+    /// greatest live row is an add) and some live add row matches `(source, valid_from, valid_to,
+    /// label)` exactly. A re-assertion matching this changes nothing; anything else — a different
+    /// source (corroboration), a corrected interval, a re-grant after a close, or a different
+    /// access label — must append.
+    #[allow(clippy::too_many_arguments)]
     pub fn many_live_asserted(
         &self,
         subject: NodeId,
@@ -590,7 +642,10 @@ impl Fold {
         source: FieldId,
         valid_from: i64,
         valid_to: Option<i64>,
+        label: Option<u8>,
     ) -> bool {
+        let labels = self.fact_labels.get(&(subject, predicate));
+        let label_of = |ok: &OrderKey| labels.and_then(|m| m.get(ok)).copied();
         let Some(KeyState::Many(s)) = self.keys.get(&(subject, predicate)) else {
             return false;
         };
@@ -610,6 +665,7 @@ impl Fold {
                     && ok.source == source
                     && v.valid_from == valid_from
                     && v.valid_to == valid_to
+                    && label_of(ok) == label
             })
     }
 
@@ -641,6 +697,24 @@ impl Fold {
         snap.many.remove(k);
         snap.many_history.remove(k);
         snap.edge_props.remove(k);
+        if let Some(old) = snap.fact_labels.remove(k) {
+            for l in old.values() {
+                if let Some(c) = snap.fact_label_counts.get_mut(l) {
+                    *c -= 1;
+                    if *c == 0 {
+                        snap.fact_label_counts.remove(l);
+                    }
+                }
+            }
+        }
+        // labels of this key's LIVE rows (those projected into one_history / many_history below)
+        let stored = self.fact_labels.get(k);
+        let mut live_labels: BTreeMap<OrderKey, u8> = BTreeMap::new();
+        let mut note = |ok: &OrderKey| {
+            if let Some(&l) = stored.and_then(|m| m.get(ok)) {
+                live_labels.insert(*ok, l);
+            }
+        };
         // edge properties for this key: project each edge's LWW-resolved property values.
         if let Some(objs) = self.edge_props.get(k) {
             let projected: BTreeMap<ObjKey, BTreeMap<String, ObjKey>> = objs
@@ -674,6 +748,9 @@ impl Fold {
                             .collect(),
                     );
                 }
+                for (ok, _) in &live {
+                    note(ok);
+                }
             }
             Some(KeyState::Many(s)) => {
                 let mut present = BTreeSet::new();
@@ -684,6 +761,9 @@ impl Fold {
                         .filter(|(ok, _)| !s.removes.contains(ok) && s.hd.is_none_or(|h| **ok > h))
                         .map(|(ok, v)| (*ok, v.object.clone(), v.valid_from, v.valid_to))
                         .collect();
+                    for (ok, ..) in &live {
+                        note(ok);
+                    }
                     if let Some((_, top, _, _)) = live.last() {
                         // present iff the element's greatest live row is an add — with adds only
                         // this is exactly the old add-wins OR-Set observation
@@ -701,6 +781,12 @@ impl Fold {
                 }
             }
             None => {}
+        }
+        if !live_labels.is_empty() {
+            for l in live_labels.values() {
+                *snap.fact_label_counts.entry(*l).or_insert(0) += 1;
+            }
+            snap.fact_labels.insert(*k, live_labels);
         }
     }
 
@@ -850,6 +936,21 @@ impl Fold {
                 None => buf.push(0),
             }
         }
+        // Row access labels: an optional trailing section, written only when some row carries a
+        // label, so a fold without labels encodes byte-identically to the format before labels
+        // existed (and such a snapshot decodes here with no labels).
+        if !self.fact_labels.is_empty() {
+            wal::put_u32(buf, self.fact_labels.len() as u32);
+            for ((node, field), rows) in &self.fact_labels {
+                wal::put_u64(buf, *node);
+                wal::put_u32(buf, *field);
+                wal::put_u32(buf, rows.len() as u32);
+                for (ok, l) in rows {
+                    wal::put_orderkey(buf, ok);
+                    buf.push(*l);
+                }
+            }
+        }
     }
 
     /// Decode a fold serialized by [`Fold::encode_into`]. `None` on a malformed buffer (a caller
@@ -951,6 +1052,28 @@ impl Fold {
             };
             f.node_attrs.insert(node, NodeAttrState { ty, label });
         }
+        // optional trailing row-label section (absent in a fold encoded before labels existed);
+        // the encoder never writes an empty section or an empty key, so reject both (canonical)
+        if !r.done() {
+            let n = r.u32()?;
+            if n == 0 {
+                return None;
+            }
+            for _ in 0..n {
+                let node = r.u64()?;
+                let field = r.u32()?;
+                let m = r.u32()?;
+                if m == 0 {
+                    return None;
+                }
+                let mut rows = BTreeMap::new();
+                for _ in 0..m {
+                    let ok = r.orderkey()?;
+                    rows.insert(ok, r.u8()?);
+                }
+                f.fact_labels.insert((node, field), rows);
+            }
+        }
         r.done().then_some(f)
     }
 }
@@ -960,6 +1083,15 @@ pub fn fold(ops: &[Op]) -> Fold {
     let mut f = Fold::default();
     for op in ops {
         f.apply(op);
+    }
+    f
+}
+
+/// Fold a slice of ops, each with the access label of its row, in order.
+pub fn fold_labeled(ops: &[(Op, Option<u8>)]) -> Fold {
+    let mut f = Fold::default();
+    for (op, label) in ops {
+        f.apply_labeled(op, *label);
     }
     f
 }
@@ -1206,11 +1338,67 @@ mod tests {
         let (s, p) = (0u64, 100u32);
         let o = ObjKey::Node(7);
         let mut f = fold(&[add_at(s, p, 7, 100, ok(1, 3, 0))]);
-        assert!(f.many_live_asserted(s, p, &o, 3, 100, None)); // identical re-assertion → suppress
-        assert!(!f.many_live_asserted(s, p, &o, 4, 100, None)); // different source → corroborate
-        assert!(!f.many_live_asserted(s, p, &o, 3, 150, None)); // corrected interval → append
+        assert!(f.many_live_asserted(s, p, &o, 3, 100, None, None)); // identical re-assertion → suppress
+        assert!(!f.many_live_asserted(s, p, &o, 4, 100, None, None)); // different source → corroborate
+        assert!(!f.many_live_asserted(s, p, &o, 3, 150, None, None)); // corrected interval → append
+        assert!(!f.many_live_asserted(s, p, &o, 3, 100, None, Some(2))); // new label → append
         f.apply(&close_at(s, p, 7, 200, ok(2, 3, 1)));
         // closed → not present → a re-grant must append even with the original interval
-        assert!(!f.many_live_asserted(s, p, &o, 3, 100, None));
+        assert!(!f.many_live_asserted(s, p, &o, 3, 100, None, None));
+    }
+
+    #[test]
+    fn row_labels_project_live_rows_and_survive_the_codec() {
+        let (s, p) = (1u64, 4u32);
+        let set = |o: &str, okey: OrderKey| Op::SetOne {
+            subject: s,
+            predicate: p,
+            object: ObjKey::Text(o.into()),
+            valid_from: 0,
+            valid_to: None,
+            ok: okey,
+        };
+        let ops = vec![
+            (set("a@example.com", ok(1, 0, 0)), Some(2)),
+            (set("b@example.com", ok(2, 0, 1)), None),
+            (add_at(s, 9, 7, 0, ok(3, 0, 2)), Some(5)),
+        ];
+        let f = fold_labeled(&ops);
+        let snap = f.observe();
+        assert_eq!(
+            snap.fact_labels[&(s, p)],
+            BTreeMap::from([(ok(1, 0, 0), 2)])
+        );
+        assert_eq!(
+            snap.fact_labels[&(s, 9)],
+            BTreeMap::from([(ok(3, 0, 2), 5)])
+        );
+        assert_eq!(snap.fact_label_counts, BTreeMap::from([(2, 1), (5, 1)]));
+        // order-free: the reversed stream observes identically, labels included
+        let mut rev = ops.clone();
+        rev.reverse();
+        assert_eq!(fold_labeled(&rev).observe(), snap);
+        // the codec carries labels; an unlabeled fold encodes without the trailing section
+        let mut buf = Vec::new();
+        f.encode_into(&mut buf);
+        assert_eq!(Fold::decode(&buf).unwrap().observe(), snap);
+        let mut plain = Vec::new();
+        let unlabeled = fold(&[set("x", ok(1, 0, 0))]);
+        unlabeled.encode_into(&mut plain);
+        let mut no_section = Vec::new();
+        fold_labeled(&[(set("x", ok(1, 0, 0)), None)]).encode_into(&mut no_section);
+        assert_eq!(plain, no_section);
+        // a hard delete above a labeled row drops its label with it (gc)
+        let mut g = f.clone();
+        g.apply(&Op::HardDelete {
+            subject: s,
+            predicate: p,
+            ok: ok(9, 0, 9),
+            cardinality: Cardinality::One,
+        });
+        g.gc();
+        let gs = g.observe();
+        assert!(!gs.fact_labels.contains_key(&(s, p)));
+        assert_eq!(gs.fact_label_counts, BTreeMap::from([(5, 1)]));
     }
 }

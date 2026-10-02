@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::catalog::Catalog;
-use crate::conformance::{self, Rule, Verdict};
+use crate::conformance::{self, Rule, Support, Verdict};
 use crate::fact::{FieldId, NodeId};
 use crate::fold::Snapshot;
 use crate::live::Diff;
@@ -79,12 +79,18 @@ impl<R: CompletenessRule> Maintained<R> {
 
 /// One subject's verdict change: `old = None` means the subject just entered the maintained set
 /// (a node newly of the rule's subject type), `new = None` that it left it. Both `Some` = the
-/// verdict flipped.
+/// verdict flipped, or (equal) the access labels on the rows it read changed, which only a
+/// label-masked reader can tell apart.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerdictDiff {
     pub subject: NodeId,
     pub old: Option<Verdict>,
     pub new: Option<Verdict>,
+    /// What `old` was judged from (empty when `old` is `None`) — so a reader can apply its label
+    /// mask to the old verdict as of that judgment ([`conformance::mask_verdict`]).
+    pub old_support: Support,
+    /// What `new` was judged from (empty when `new` is `None`).
+    pub new_support: Support,
 }
 
 /// A declared conformance rule maintained incrementally against a live-updating snapshot: the full
@@ -108,6 +114,8 @@ pub struct MaintainedConformance {
     dependents: HashMap<(NodeId, FieldId), BTreeSet<NodeId>>,
     /// subject → the keys its last judgment read (for cleanup on re-judge / removal)
     supports: HashMap<NodeId, Vec<(NodeId, FieldId)>>,
+    /// subject → the access labels stored on the rows its last judgment read (see [`Support`])
+    row_labels: HashMap<NodeId, u32>,
 }
 
 impl MaintainedConformance {
@@ -118,6 +126,7 @@ impl MaintainedConformance {
             verdicts: BTreeMap::new(),
             dependents: HashMap::new(),
             supports: HashMap::new(),
+            row_labels: HashMap::new(),
         };
         let Some(ty) = cat.field_id(&m.rule.subject_type) else {
             return m;
@@ -137,6 +146,16 @@ impl MaintainedConformance {
     /// The maintained per-subject verdicts (unfiltered — apply the consumer's label mask on read).
     pub fn verdicts(&self) -> &BTreeMap<NodeId, Verdict> {
         &self.verdicts
+    }
+
+    /// What `s`'s maintained verdict was judged from — every `(node, predicate)` its last judgment
+    /// read and the access labels on those rows then (empty for a subject without a verdict). A
+    /// reader applies its label mask with it ([`conformance::mask_verdict`]).
+    pub fn support(&self, s: NodeId) -> Support {
+        Support {
+            keys: self.supports.get(&s).cloned().unwrap_or_default(),
+            row_labels: self.row_labels.get(&s).copied().unwrap_or(0),
+        }
     }
 
     /// Re-judge only what the materialized tail touched (`keys` + attribute-touched `nodes` from
@@ -173,17 +192,24 @@ impl MaintainedConformance {
         let mut diffs = Vec::new();
         for s in candidates {
             let old = self.verdicts.get(&s).cloned();
+            let old_support = self.support(s);
             let new = if snap.node_types.get(&s) == Some(&ty) {
                 Some(self.judge_into(snap, cat, s))
             } else {
                 self.remove(s);
                 None
             };
-            if old != new {
+            let new_support = self.support(s);
+            // An unchanged verdict is still journaled when the labels on the rows it read changed:
+            // a masked reader may now see it as `hidden_by_label` (or no longer). Readers drop
+            // entries whose old and new look the same through their mask.
+            if old != new || old_support.row_labels != new_support.row_labels {
                 diffs.push(VerdictDiff {
                     subject: s,
                     old,
                     new,
+                    old_support,
+                    new_support,
                 });
             }
         }
@@ -198,7 +224,11 @@ impl MaintainedConformance {
         for &key in &deps {
             self.dependents.entry(key).or_default().insert(s);
         }
-        self.supports.insert(s, deps);
+        let support = Support::of(deps, snap);
+        if support.row_labels != 0 {
+            self.row_labels.insert(s, support.row_labels);
+        }
+        self.supports.insert(s, support.keys);
         self.verdicts.insert(s, v.clone());
         v
     }
@@ -209,6 +239,7 @@ impl MaintainedConformance {
     }
 
     fn clear_supports(&mut self, s: NodeId) {
+        self.row_labels.remove(&s);
         for key in self.supports.remove(&s).unwrap_or_default() {
             if let Some(set) = self.dependents.get_mut(&key) {
                 set.remove(&s);

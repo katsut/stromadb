@@ -16,6 +16,7 @@
 use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
 use crate::fold::Snapshot;
+use crate::mask::Facts;
 use crate::query::{expand, point_one};
 
 /// One node with at least one absent required predicate: the node id plus the missing predicate names
@@ -38,7 +39,8 @@ pub fn unresolved_names(type_name: &str, required: &[String], cat: &Catalog) -> 
         .collect()
 }
 
-/// Evaluate expected-but-absent completeness over `snap`: one [`Incomplete`] per node of `type_name`
+/// Evaluate expected-but-absent completeness over `facts` (a snapshot, or one read through a label
+/// mask, under which a hidden fact counts as absent): one [`Incomplete`] per node of `type_name`
 /// that has ≥1 absent required predicate, sorted by node id.
 ///
 /// Post-authz: a node whose ABAC label is not permitted by `principal_labels` is skipped (same bit-test
@@ -46,7 +48,7 @@ pub fn unresolved_names(type_name: &str, required: &[String], cat: &Catalog) -> 
 /// required predicate name unknown to the catalog is treated as absent on every node (the DB boundary
 /// rejects unknown names up front via [`unresolved_names`], so this is only a defensive fallback).
 pub fn evaluate(
-    snap: &Snapshot,
+    facts: &impl Facts,
     cat: &Catalog,
     type_name: &str,
     required: &[String],
@@ -62,6 +64,7 @@ pub fn evaluate(
         .map(|p| (p.as_str(), cat.field_id(p)))
         .collect();
 
+    let snap = facts.snapshot();
     let mut nodes: Vec<NodeId> = snap
         .node_types
         .iter()
@@ -75,7 +78,7 @@ pub fn evaluate(
         .filter_map(|n| {
             let missing: Vec<String> = resolved
                 .iter()
-                .filter(|(_, pid)| !present(snap, n, *pid))
+                .filter(|(_, pid)| !present(facts, n, *pid))
                 .map(|(name, _)| (*name).to_string())
                 .collect();
             (!missing.is_empty()).then_some(Incomplete { node: n, missing })
@@ -86,7 +89,7 @@ pub fn evaluate(
 /// Whether required predicate `pid` has any value on `node` — a one-cardinality current value
 /// ([`point_one`]) or a non-empty node-valued expansion ([`expand`], covering many-cardinality). An
 /// unresolved predicate (`None`) is treated as absent.
-fn present(snap: &Snapshot, node: NodeId, pid: Option<FieldId>) -> bool {
+fn present(snap: &impl Facts, node: NodeId, pid: Option<FieldId>) -> bool {
     match pid {
         None => false,
         Some(p) => point_one(snap, node, p).is_some() || !expand(snap, node, p).is_empty(),

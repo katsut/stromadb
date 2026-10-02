@@ -80,7 +80,17 @@ pub(crate) fn put_orderkey(buf: &mut Vec<u8>, ok: &OrderKey) {
     put_u64(buf, ok.seq);
 }
 
-fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
+/// Trailing optional access label of a row-writing record: `[1][label u8]`, written only when the
+/// row carries a label, so an unlabeled record is byte-identical to the format before labels
+/// existed and an old record (no trailing bytes) decodes as unlabeled.
+fn put_label_tail(buf: &mut Vec<u8>, label: Option<u8>) {
+    if let Some(l) = label {
+        buf.push(1);
+        buf.push(l);
+    }
+}
+
+fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind, label: Option<u8>) {
     put_u32(buf, source);
     match kind {
         WriteKind::SetOne {
@@ -103,6 +113,7 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
                 }
                 None => buf.push(0),
             }
+            put_label_tail(buf, label);
         }
         WriteKind::CloseOne {
             subject,
@@ -113,6 +124,7 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
             put_u64(buf, *subject);
             put_u32(buf, *predicate);
             put_i64(buf, *valid_from);
+            put_label_tail(buf, label);
         }
         WriteKind::AddMany {
             subject,
@@ -135,6 +147,7 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
                 }
                 None => buf.push(0),
             }
+            put_label_tail(buf, label);
         }
         WriteKind::RemoveMany {
             subject,
@@ -197,6 +210,7 @@ fn encode_payload(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
             put_u32(buf, *predicate);
             put_objkey(buf, object);
             put_i64(buf, *valid_from);
+            put_label_tail(buf, label);
         }
     }
 }
@@ -230,11 +244,18 @@ fn decode_wal_start(payload: &[u8]) -> Option<u64> {
 
 /// Append one framed record (`[len][crc][payload]`) to `buf`. The framing header is backfilled after
 /// the payload is encoded in place, so no scratch allocation is needed.
-pub(crate) fn frame_record(buf: &mut Vec<u8>, source: FieldId, kind: &WriteKind) {
+/// `label` is the row's access label; it is encoded only for the row-writing kinds (`SetOne`,
+/// `CloseOne`, `AddMany`, `CloseMany`) and ignored for every other kind.
+pub(crate) fn frame_record(
+    buf: &mut Vec<u8>,
+    source: FieldId,
+    kind: &WriteKind,
+    label: Option<u8>,
+) {
     let header = buf.len();
     buf.extend_from_slice(&[0u8; 8]); // placeholder for [len][crc]
     let payload_start = buf.len();
-    encode_payload(buf, source, kind);
+    encode_payload(buf, source, kind, label);
     finish_frame(buf, header, payload_start);
 }
 
@@ -318,6 +339,17 @@ impl<'a> Reader<'a> {
             _ => None,
         }
     }
+    /// Trailing optional access label (`[1][u8]`, see `put_label_tail`). No trailing bytes =
+    /// unlabeled, which is how every record written before labels existed decodes.
+    fn label_tail(&mut self) -> Option<Option<u8>> {
+        if self.remaining() == 0 {
+            return Some(None);
+        }
+        match self.u8()? {
+            1 => Some(Some(self.u8()?)),
+            _ => None,
+        }
+    }
     /// Trailing valid-time pair `[valid_from i64][opt valid_to]`. A record written before these
     /// fields existed has no trailing bytes and decodes to `(0, None)` (backward compatible).
     pub(crate) fn valid_time_tail(&mut self) -> Option<(i64, Option<i64>)> {
@@ -330,11 +362,15 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
+/// One decoded record: its source, its write, and the access label of the row it writes.
+pub type Recovered = (FieldId, WriteKind, Option<u8>);
+
+fn decode_record(payload: &[u8]) -> Option<Recovered> {
     let mut r = Reader { b: payload, pos: 0 };
     let source = r.u32()?;
     let subject: NodeId;
     let predicate: FieldId;
+    let mut label = None;
     let kind = match r.u8()? {
         0 => {
             subject = r.u64()?;
@@ -342,6 +378,7 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
             let object = r.objkey()?;
             let valid_from = r.i64()?;
             let valid_to = r.opt_i64_tail()?;
+            label = r.label_tail()?;
             WriteKind::SetOne {
                 subject,
                 predicate,
@@ -354,6 +391,7 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
             subject = r.u64()?;
             predicate = r.u32()?;
             let valid_from = r.i64()?;
+            label = r.label_tail()?;
             WriteKind::CloseOne {
                 subject,
                 predicate,
@@ -365,6 +403,7 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
             predicate = r.u32()?;
             let object = r.objkey()?;
             let (valid_from, valid_to) = r.valid_time_tail()?;
+            label = r.label_tail()?;
             WriteKind::AddMany {
                 subject,
                 predicate,
@@ -430,6 +469,7 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
             predicate = r.u32()?;
             let object = r.objkey()?;
             let valid_from = r.i64()?;
+            label = r.label_tail()?;
             WriteKind::CloseMany {
                 subject,
                 predicate,
@@ -443,7 +483,7 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
     if r.pos != payload.len() {
         return None;
     }
-    Some((source, kind))
+    Some((source, kind, label))
 }
 
 /// Replay the WAL at `path` into `(first_seqno, records)`: the seqno of the file's first record
@@ -451,7 +491,7 @@ fn decode_record(payload: &[u8]) -> Option<(FieldId, WriteKind)> {
 /// the ordered records. Stops at the first torn/corrupt frame (short read, bad checksum, or
 /// undecodable payload), dropping only that tail — a committed prefix is always recovered intact.
 /// A missing file recovers as empty (fresh database).
-pub fn recover(path: &Path) -> io::Result<(u64, Vec<(FieldId, WriteKind)>)> {
+pub fn recover(path: &Path) -> io::Result<(u64, Vec<Recovered>)> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((0, Vec::new())),
@@ -503,8 +543,12 @@ mod tests {
     use super::*;
 
     fn roundtrip(source: FieldId, kind: WriteKind) {
+        roundtrip_labeled(source, kind, None);
+    }
+
+    fn roundtrip_labeled(source: FieldId, kind: WriteKind, label: Option<u8>) {
         let mut buf = Vec::new();
-        frame_record(&mut buf, source, &kind);
+        frame_record(&mut buf, source, &kind, label);
         let recovered = {
             // strip the [len][crc] header and decode the payload directly
             let len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
@@ -513,6 +557,74 @@ mod tests {
         assert_eq!(recovered.0, source);
         // WriteKind has no PartialEq; compare via debug repr (sufficient for the codec).
         assert_eq!(format!("{:?}", recovered.1), format!("{kind:?}"));
+        assert_eq!(recovered.2, label);
+    }
+
+    #[test]
+    fn labels_roundtrip_on_row_writes_and_unlabeled_bytes_are_unchanged() {
+        let set = WriteKind::SetOne {
+            subject: 1,
+            predicate: 2,
+            object: ObjKey::Text("a@example.com".into()),
+            valid_from: 0,
+            valid_to: None,
+        };
+        roundtrip_labeled(0, set.clone(), Some(3));
+        roundtrip_labeled(
+            0,
+            WriteKind::SetOne {
+                subject: 1,
+                predicate: 2,
+                object: ObjKey::Int(5),
+                valid_from: 1,
+                valid_to: Some(9),
+            },
+            Some(0),
+        );
+        roundtrip_labeled(
+            4,
+            WriteKind::AddMany {
+                subject: 1,
+                predicate: 2,
+                object: ObjKey::Node(3),
+                valid_from: 0,
+                valid_to: None,
+            },
+            Some(31),
+        );
+        roundtrip_labeled(
+            0,
+            WriteKind::CloseOne {
+                subject: 1,
+                predicate: 2,
+                valid_from: 7,
+            },
+            Some(1),
+        );
+        roundtrip_labeled(
+            0,
+            WriteKind::CloseMany {
+                subject: 1,
+                predicate: 2,
+                object: ObjKey::Node(3),
+                valid_from: 7,
+            },
+            Some(2),
+        );
+        // an unlabeled record is exactly the pre-label encoding: one label byte pair shorter
+        let (mut plain, mut labeled) = (Vec::new(), Vec::new());
+        frame_record(&mut plain, 0, &set, None);
+        frame_record(&mut labeled, 0, &set, Some(3));
+        assert_eq!(labeled.len(), plain.len() + 2);
+        // a non-row write carries no label even if one is passed
+        let mut prop = Vec::new();
+        let kind = WriteKind::SetNodeType {
+            node: 1,
+            type_id: 2,
+        };
+        frame_record(&mut prop, 0, &kind, Some(3));
+        let len = u32::from_le_bytes(prop[0..4].try_into().unwrap()) as usize;
+        assert_eq!(decode_record(&prop[8..8 + len]).unwrap().2, None);
     }
 
     #[test]
@@ -627,8 +739,9 @@ mod tests {
         put_u64(&mut payload, 8); // subject
         put_u32(&mut payload, 4); // predicate
         put_objkey(&mut payload, &ObjKey::Node(99));
-        let (source, kind) = decode_record(&payload).unwrap();
+        let (source, kind, label) = decode_record(&payload).unwrap();
         assert_eq!(source, 9);
+        assert_eq!(label, None);
         assert!(matches!(
             kind,
             WriteKind::AddMany {
@@ -654,6 +767,7 @@ mod tests {
                 valid_from: 0,
                 valid_to: None,
             },
+            None,
         );
         // flip a payload byte → checksum mismatch on recovery
         let last = buf.len() - 1;

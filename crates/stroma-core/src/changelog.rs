@@ -87,6 +87,9 @@ pub enum WriteKind {
 struct Record {
     source: FieldId,
     kind: WriteKind,
+    /// Access label of the row this write produces (`None` = unlabeled; ignored for writes that
+    /// produce no row).
+    label: Option<u8>,
 }
 
 /// Returned when the unmaterialized backlog would exceed the bound — apply backpressure upstream.
@@ -292,7 +295,11 @@ impl Changelog {
         let (base, recovered) = wal::recover(path)?;
         let records: Vec<Record> = recovered
             .into_iter()
-            .map(|(source, kind)| Record { source, kind })
+            .map(|(source, kind, label)| Record {
+                source,
+                kind,
+                label,
+            })
             .collect();
         let n = records.len();
         let wal = OpenOptions::new().create(true).append(true).open(path)?;
@@ -390,7 +397,7 @@ impl Changelog {
         }
         let mut buf = Vec::new();
         for r in &self.records[self.durable_upto..] {
-            wal::frame_record(&mut buf, r.source, &r.kind);
+            wal::frame_record(&mut buf, r.source, &r.kind, r.label);
         }
         let file = self.wal.as_mut().unwrap();
         file.write_all(&buf)?;
@@ -410,6 +417,18 @@ impl Changelog {
 
     /// Append a write; returns its assigned `seqno`, or [`Backpressure`] if the backlog is full.
     pub fn append(&mut self, source: FieldId, kind: WriteKind) -> Result<u64, Backpressure> {
+        self.append_labeled(source, kind, None)
+    }
+
+    /// [`Changelog::append`] for a write whose row carries an access label. The label is
+    /// persisted with the record and replayed onto the row (see [`Fold::apply_labeled`]); writes
+    /// that produce no row ignore it.
+    pub fn append_labeled(
+        &mut self,
+        source: FieldId,
+        kind: WriteKind,
+        label: Option<u8>,
+    ) -> Result<u64, Backpressure> {
         let unmaterialized = self.records.len() - self.materialized as usize;
         if unmaterialized >= self.max_unmaterialized {
             return Err(Backpressure {
@@ -418,7 +437,11 @@ impl Changelog {
             });
         }
         let seqno = self.base + self.records.len() as u64;
-        self.records.push(Record { source, kind });
+        self.records.push(Record {
+            source,
+            kind,
+            label,
+        });
         Ok(seqno)
     }
 
@@ -428,6 +451,14 @@ impl Changelog {
         &mut self,
         writes: Vec<(FieldId, WriteKind)>,
     ) -> Result<Vec<u64>, Backpressure> {
+        self.append_batch_labeled(writes.into_iter().map(|(s, k)| (s, k, None)).collect())
+    }
+
+    /// [`Changelog::append_batch`] where each write carries the access label of its row.
+    pub fn append_batch_labeled(
+        &mut self,
+        writes: Vec<(FieldId, WriteKind, Option<u8>)>,
+    ) -> Result<Vec<u64>, Backpressure> {
         let unmaterialized = self.records.len() - self.materialized as usize;
         if unmaterialized + writes.len() > self.max_unmaterialized {
             return Err(Backpressure {
@@ -436,9 +467,13 @@ impl Changelog {
             });
         }
         let mut seqnos = Vec::with_capacity(writes.len());
-        for (source, kind) in writes {
+        for (source, kind, label) in writes {
             let seqno = self.base + self.records.len() as u64;
-            self.records.push(Record { source, kind });
+            self.records.push(Record {
+                source,
+                kind,
+                label,
+            });
             seqnos.push(seqno);
         }
         Ok(seqnos)
@@ -504,7 +539,7 @@ impl Changelog {
                     keys.insert(op.key());
                 }
             }
-            fold.apply(&op);
+            fold.apply_labeled(&op, r.label);
         }
         (keys, nodes)
     }

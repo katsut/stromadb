@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d1ed0c881f56cb53d8cd5da5dfcbd184be9a44dfd4430948bbf75f685aff3c4f # shrinks to steps = [Fact { s: 1, p: 3, v: 0, label: Some(1) }, Fact { s: 1, p: 0, v: 0, label: None }], floor = None, mask = 4
+cc cc91e4082a398e7ee4e2f837d25bbd748bd77faa475fd0c4aa049d878573c433 # shrinks to steps = [Fact { s: 4, p: 3, v: 1, label: None }, Close { s: 4, p: 3, v: 1, label: Some(0) }], floor = None, mask = 0

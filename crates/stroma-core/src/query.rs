@@ -1,18 +1,23 @@
-//! Read primitives over a folded [`Snapshot`]: point lookup and 1–2 hop expand.
+//! Read primitives over folded fact state: point lookup and 1–2 hop expand.
 //!
 //! These are the symbolic-core read operators. They operate on the merged snapshot the
 //! engine produces (read-merge, see [`crate::engine`]); physical co-location (CSR adjacency) is a
 //! later optimization that does not change these contracts.
+//!
+//! Every primitive reads through [`Facts`], so the same code answers an unmasked read (a
+//! [`Snapshot`]) and a read under a principal's label mask ([`crate::mask::Masked`]).
 
 use std::collections::{BTreeSet, HashMap};
 
 use crate::catalog::Catalog;
 use crate::fact::{FieldId, NodeId};
-use crate::fold::{ObjKey, Snapshot, VersionRow};
+use crate::fold::{ObjKey, VersionRow};
+use crate::mask::Facts;
 
 /// Current functional value of a cardinality-One `(subject, predicate)` (None if absent or closed).
-pub fn point_one(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<ObjKey> {
-    snap.one.get(&(subject, predicate)).cloned().flatten()
+pub fn point_one(snap: &impl Facts, subject: NodeId, predicate: FieldId) -> Option<ObjKey> {
+    snap.one_value(&(subject, predicate))
+        .and_then(|v| v.into_owned())
 }
 
 /// Valid-time as-of read of a cardinality-One `(subject, predicate)`: the value in effect at
@@ -22,13 +27,12 @@ pub fn point_one(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option
 /// Returns `None` if nothing covered `at`, or the effective version closed the value. This is
 /// *valid-time* as-of (bitemporal, single-valued); transaction-time as-of is the version-vector pin.
 pub fn point_one_asof(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subject: NodeId,
     predicate: FieldId,
     at: i64,
 ) -> Option<ObjKey> {
-    snap.one_history
-        .get(&(subject, predicate))?
+    snap.one_rows(&(subject, predicate))?
         .iter()
         .filter(|(_ok, _obj, valid_from, valid_to)| {
             *valid_from <= at && valid_to.is_none_or(|to| at < to)
@@ -41,31 +45,39 @@ pub fn point_one_asof(
 /// live row, which is the last entry of the ascending `one_history`. `None` when the key has no
 /// history. This is the head every current-value read resolves; the ingest boundary also compares
 /// an incoming re-assertion against it to suppress no-op writes.
-pub fn point_one_head(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<&VersionRow> {
-    snap.one_history.get(&(subject, predicate))?.last()
+pub fn point_one_head(
+    snap: &impl Facts,
+    subject: NodeId,
+    predicate: FieldId,
+) -> Option<VersionRow> {
+    snap.one_rows(&(subject, predicate))?.last().cloned()
 }
 
 /// The interned `source` of the current functional value's winning version — the provenance of the
 /// value [`point_one`] returns (the [`point_one_head`] row's `OrderKey.source`). `None` when the
 /// key has no history; a `source` of `0` is the "unset"/unknown sentinel (callers decide how to
 /// surface it — typically by omitting provenance).
-pub fn point_one_source(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<FieldId> {
+pub fn point_one_source(snap: &impl Facts, subject: NodeId, predicate: FieldId) -> Option<FieldId> {
     point_one_head(snap, subject, predicate).map(|(ok, _obj, _vf, _vt)| ok.source)
 }
 
 /// The `valid_from` of the current functional value's winning version — the [`point_one_head`]
 /// row. `None` when the key has no history.
-pub fn point_one_valid_from(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<i64> {
-    point_one_head(snap, subject, predicate).map(|(_ok, _obj, vf, _vt)| *vf)
+pub fn point_one_valid_from(snap: &impl Facts, subject: NodeId, predicate: FieldId) -> Option<i64> {
+    point_one_head(snap, subject, predicate).map(|(_ok, _obj, vf, _vt)| vf)
 }
 
 /// The `valid_from` of the winning version *when that version is a close* — the
 /// [`point_one_head`] row, but `Some` only when that row carries no object. `None` for a live
 /// winner and for a key with no history at all, so a caller can tell "ended by a close at `vf`"
 /// apart from "never written".
-pub fn point_one_closed_from(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Option<i64> {
+pub fn point_one_closed_from(
+    snap: &impl Facts,
+    subject: NodeId,
+    predicate: FieldId,
+) -> Option<i64> {
     point_one_head(snap, subject, predicate)
-        .and_then(|(_ok, obj, vf, _vt)| obj.is_none().then_some(*vf))
+        .and_then(|(_ok, obj, vf, _vt)| obj.is_none().then_some(vf))
 }
 
 /// One segment of a valid-time timeline: `value` is in effect over `[valid_from, valid_to)`
@@ -84,12 +96,12 @@ pub struct Segment {
 /// as-of resolution once per boundary and stitches equal neighbours back together. Instants where
 /// nothing is in effect (before the first write, after a close) have no covering segment. Output is
 /// sorted, non-overlapping, and bounded by the number of history rows.
-pub fn point_one_timeline(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> Vec<Segment> {
-    let Some(rows) = snap.one_history.get(&(subject, predicate)) else {
+pub fn point_one_timeline(snap: &impl Facts, subject: NodeId, predicate: FieldId) -> Vec<Segment> {
+    let Some(rows) = snap.one_rows(&(subject, predicate)) else {
         return Vec::new();
     };
     let mut bounds: BTreeSet<i64> = BTreeSet::new();
-    for (_ok, _obj, vf, vt) in rows {
+    for (_ok, _obj, vf, vt) in rows.iter() {
         bounds.insert(*vf);
         if let Some(to) = vt {
             bounds.insert(*to);
@@ -124,7 +136,7 @@ pub fn point_one_timeline(snap: &Snapshot, subject: NodeId, predicate: FieldId) 
 /// predicate's timeline on the node each segment resolved to — the interval form of composing
 /// [`point_one_asof`] per hop, agreeing with it at every instant. A segment whose intermediate
 /// value is not a node contributes nothing (a broken path derives nothing there).
-pub fn derived_timeline(snap: &Snapshot, subject: NodeId, hops: &[FieldId]) -> Vec<Segment> {
+pub fn derived_timeline(snap: &impl Facts, subject: NodeId, hops: &[FieldId]) -> Vec<Segment> {
     derived_timeline_traced(snap, subject, hops, &mut |_, _| {})
 }
 
@@ -133,7 +145,7 @@ pub fn derived_timeline(snap: &Snapshot, subject: NodeId, hops: &[FieldId]) -> V
 /// confidence (weakest link over the supports); the segments returned are identical to the
 /// untraced form.
 pub fn derived_timeline_traced(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subject: NodeId,
     hops: &[FieldId],
     rec: &mut impl FnMut(NodeId, FieldId),
@@ -245,20 +257,20 @@ pub struct ConfidenceSignals {
 /// stale; **medium** otherwise (a single sourced value, fresh or freshness-unknown). `low` is checked
 /// first, so a source-less or stale value is never `high`.
 pub fn confidence_signals(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subject: NodeId,
     predicate: FieldId,
     now: Option<i64>,
     max_age: Option<i64>,
 ) -> ConfidenceSignals {
-    let history = snap.one_history.get(&(subject, predicate));
+    let history = snap.one_rows(&(subject, predicate));
+    let history: &[VersionRow] = history.as_deref().unwrap_or(&[]);
     // The winning (current functional) value is the greatest-`OrderKey` live row = the last entry.
-    let winner = history.and_then(|h| h.last());
+    let winner = history.last();
     let has_source = winner.is_some_and(|(ok, ..)| ok.source != 0);
     let corroboration = match winner {
         Some((_, obj, ..)) => history
-            .into_iter()
-            .flatten()
+            .iter()
             .filter(|(_, o, ..)| o == obj)
             .map(|(ok, ..)| ok.source)
             .filter(|&src| src != 0)
@@ -284,18 +296,18 @@ pub fn confidence_signals(
 }
 
 /// All properties on the edge `(subject, predicate, object)` (empty if none), LWW-resolved.
-pub fn edge_props<'a>(
-    snap: &'a Snapshot,
+pub fn edge_props<'a, F: Facts>(
+    snap: &'a F,
     subject: NodeId,
     predicate: FieldId,
     object: &ObjKey,
 ) -> Option<&'a std::collections::BTreeMap<String, ObjKey>> {
-    snap.edge_props.get(&(subject, predicate))?.get(object)
+    snap.edge_props_of(&(subject, predicate), object)
 }
 
 /// A single property value on the edge `(subject, predicate, object)`.
 pub fn edge_prop(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subject: NodeId,
     predicate: FieldId,
     object: &ObjKey,
@@ -307,10 +319,9 @@ pub fn edge_prop(
 }
 
 /// Present element set of a cardinality-Many `(subject, predicate)` (empty if absent).
-pub fn point_many(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTreeSet<ObjKey> {
-    snap.many
-        .get(&(subject, predicate))
-        .cloned()
+pub fn point_many(snap: &impl Facts, subject: NodeId, predicate: FieldId) -> BTreeSet<ObjKey> {
+    snap.many_set(&(subject, predicate))
+        .map(|s| s.into_owned())
         .unwrap_or_default()
 }
 
@@ -334,18 +345,34 @@ fn elem_in_effect_at(rows: &[VersionRow], at: i64) -> bool {
 /// (observed-remove) have no live rows and never answer — a retract destroys history by design;
 /// closing is the temporal path.
 pub fn point_many_asof(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subject: NodeId,
     predicate: FieldId,
     at: i64,
 ) -> BTreeSet<ObjKey> {
-    snap.many_history
-        .get(&(subject, predicate))
-        .into_iter()
-        .flatten()
-        .filter(|(_, rows)| elem_in_effect_at(rows, at))
-        .map(|(obj, _)| obj.clone())
-        .collect()
+    snap.many_rows(&(subject, predicate))
+        .map(|elems| {
+            elems
+                .iter()
+                .filter(|(_, rows)| elem_in_effect_at(rows, at))
+                .map(|(obj, _)| obj.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The winning row of one cardinality-Many element — its greatest-order-key live row. `None` when
+/// the element has no live row.
+pub fn many_head(
+    snap: &impl Facts,
+    subject: NodeId,
+    predicate: FieldId,
+    object: &ObjKey,
+) -> Option<VersionRow> {
+    snap.many_rows(&(subject, predicate))?
+        .get(object)?
+        .last()
+        .cloned()
 }
 
 /// The close boundary of one cardinality-Many element *when its winning row is a close* — `Some`
@@ -353,28 +380,27 @@ pub fn point_many_asof(
 /// [`point_one_closed_from`], per element). `None` for a present element and for one never
 /// written, so an ingest guard can suppress a duplicate close without conflating the two.
 pub fn many_closed_from(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subject: NodeId,
     predicate: FieldId,
     object: &ObjKey,
 ) -> Option<i64> {
-    snap.many_history
-        .get(&(subject, predicate))?
-        .get(object)?
-        .last()
-        .and_then(|(_ok, obj, vf, _vt)| obj.is_none().then_some(*vf))
+    many_head(snap, subject, predicate, object)
+        .and_then(|(_ok, obj, vf, _vt)| obj.is_none().then_some(vf))
 }
 
 /// 1-hop expand: neighbor node ids reachable from `subject` via `predicate` (both the One current
 /// value and the Many present set, restricted to node-valued objects).
-pub fn expand(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTreeSet<NodeId> {
+pub fn expand(snap: &impl Facts, subject: NodeId, predicate: FieldId) -> BTreeSet<NodeId> {
     let mut out = BTreeSet::new();
     if let Some(ObjKey::Node(n)) = point_one(snap, subject, predicate) {
         out.insert(n);
     }
-    for o in snap.many.get(&(subject, predicate)).into_iter().flatten() {
-        if let ObjKey::Node(n) = o {
-            out.insert(*n);
+    if let Some(set) = snap.many_set(&(subject, predicate)) {
+        for o in set.iter() {
+            if let ObjKey::Node(n) = o {
+                out.insert(*n);
+            }
         }
     }
     out
@@ -384,25 +410,25 @@ pub fn expand(snap: &Snapshot, subject: NodeId, predicate: FieldId) -> BTreeSet<
 /// to the set of subjects `s` that point at it (`{s : s --predicate--> o}`). A single scan restricted
 /// to `predicate` — the reverse-direction lookup the symmetric / inverse expansions need without
 /// storing both directions.
-fn reverse_adjacency(snap: &Snapshot, predicate: FieldId) -> HashMap<NodeId, BTreeSet<NodeId>> {
+fn reverse_adjacency(snap: &impl Facts, predicate: FieldId) -> HashMap<NodeId, BTreeSet<NodeId>> {
     let mut rev: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
-    for (&(s, p), v) in snap.one.iter() {
+    snap.for_each_one(.., |&(s, p), v| {
         if p == predicate
             && let Some(ObjKey::Node(o)) = v
         {
             rev.entry(*o).or_default().insert(s);
         }
-    }
-    for (&(s, p), set) in snap.many.iter() {
+    });
+    snap.for_each_many(.., |&(s, p), set| {
         if p != predicate {
-            continue;
+            return;
         }
         for o in set {
             if let ObjKey::Node(o) = o {
                 rev.entry(*o).or_default().insert(s);
             }
         }
-    }
+    });
     rev
 }
 
@@ -417,7 +443,7 @@ fn reverse_adjacency(snap: &Snapshot, predicate: FieldId) -> HashMap<NodeId, BTr
 ///   predicate's stored edges (so an inverse predicate is answerable without storing both directions).
 /// - **transitive**: every node reachable in `1..=max_depth` hops (each hop honoring the above).
 pub fn expand_rel(
-    snap: &Snapshot,
+    snap: &impl Facts,
     catalog: &Catalog,
     subject: NodeId,
     predicate: FieldId,
@@ -430,7 +456,7 @@ pub fn expand_rel(
 /// answers from the state in effect at that instant (One values via [`point_one_asof`], Many
 /// elements via [`point_many_asof`]), so a transitive closure over history never mixes eras.
 pub fn expand_rel_asof(
-    snap: &Snapshot,
+    snap: &impl Facts,
     catalog: &Catalog,
     subject: NodeId,
     predicate: FieldId,
@@ -442,7 +468,7 @@ pub fn expand_rel_asof(
 
 /// 1-hop expand at valid-time `at`: node-valued neighbours in effect at that instant.
 pub fn expand_asof(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subject: NodeId,
     predicate: FieldId,
     at: i64,
@@ -462,33 +488,33 @@ pub fn expand_asof(
 /// [`reverse_adjacency`] at valid-time `at` — the same single restricted scan, but each key's
 /// contribution is its as-of winner(s) instead of its current state (histories, not present sets).
 fn reverse_adjacency_asof(
-    snap: &Snapshot,
+    snap: &impl Facts,
     predicate: FieldId,
     at: i64,
 ) -> HashMap<NodeId, BTreeSet<NodeId>> {
     let mut rev: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
-    for &(s, p) in snap.one_history.keys() {
+    snap.for_each_one_key(|&(s, p)| {
         if p == predicate
             && let Some(ObjKey::Node(o)) = point_one_asof(snap, s, p, at)
         {
             rev.entry(o).or_default().insert(s);
         }
-    }
-    for &(s, p) in snap.many_history.keys() {
+    });
+    snap.for_each_many_key(|&(s, p)| {
         if p != predicate {
-            continue;
+            return;
         }
         for o in point_many_asof(snap, s, p, at) {
             if let ObjKey::Node(o) = o {
                 rev.entry(o).or_default().insert(s);
             }
         }
-    }
+    });
     rev
 }
 
 fn expand_rel_at(
-    snap: &Snapshot,
+    snap: &impl Facts,
     catalog: &Catalog,
     subject: NodeId,
     predicate: FieldId,
@@ -572,20 +598,20 @@ fn expand_rel_at(
 /// All node-valued neighbours of `subject` across *every* predicate (One current value + Many
 /// present set) — the predicate-agnostic 1-hop expansion used to grow a distance-bounded view of a
 /// heterogeneous (ontology) graph. O(predicates on the subject) via a range scan over the fold.
-pub fn neighbors(snap: &Snapshot, subject: NodeId) -> BTreeSet<NodeId> {
+pub fn neighbors(snap: &impl Facts, subject: NodeId) -> BTreeSet<NodeId> {
     let mut out = BTreeSet::new();
-    for (_, v) in snap.one.range((subject, u32::MIN)..=(subject, u32::MAX)) {
+    snap.for_each_one((subject, u32::MIN)..=(subject, u32::MAX), |_, v| {
         if let Some(ObjKey::Node(n)) = v {
             out.insert(*n);
         }
-    }
-    for (_, set) in snap.many.range((subject, u32::MIN)..=(subject, u32::MAX)) {
+    });
+    snap.for_each_many((subject, u32::MIN)..=(subject, u32::MAX), |_, set| {
         for o in set {
             if let ObjKey::Node(n) = o {
                 out.insert(*n);
             }
         }
-    }
+    });
     out
 }
 
@@ -594,21 +620,21 @@ pub fn neighbors(snap: &Snapshot, subject: NodeId) -> BTreeSet<NodeId> {
 /// the subject) via range scans over the fold.
 #[allow(clippy::type_complexity)]
 pub fn describe(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subject: NodeId,
 ) -> (Vec<(FieldId, ObjKey)>, Vec<(FieldId, Vec<ObjKey>)>) {
     let mut ones = Vec::new();
-    for (&(_, p), v) in snap.one.range((subject, u32::MIN)..=(subject, u32::MAX)) {
+    snap.for_each_one((subject, u32::MIN)..=(subject, u32::MAX), |&(_, p), v| {
         if let Some(ok) = v {
             ones.push((p, ok.clone()));
         }
-    }
+    });
     let mut manys = Vec::new();
-    for (&(_, p), set) in snap.many.range((subject, u32::MIN)..=(subject, u32::MAX)) {
+    snap.for_each_many((subject, u32::MIN)..=(subject, u32::MAX), |&(_, p), set| {
         if !set.is_empty() {
             manys.push((p, set.iter().cloned().collect()));
         }
-    }
+    });
     (ones, manys)
 }
 
@@ -618,7 +644,7 @@ pub fn describe(
 /// direction). Optionally restricted to a single predicate `p`. O(node-valued edges) — a full scan;
 /// a maintained reverse index is the later optimization. Isolated nodes (no edges) are absent.
 pub fn undirected_adjacency(
-    snap: &Snapshot,
+    snap: &impl Facts,
     predicate: Option<FieldId>,
 ) -> HashMap<NodeId, BTreeSet<NodeId>> {
     let mut adj: HashMap<NodeId, BTreeSet<NodeId>> = HashMap::new();
@@ -626,24 +652,24 @@ pub fn undirected_adjacency(
         adj.entry(a).or_default().insert(b);
         adj.entry(b).or_default().insert(a);
     };
-    for (&(s, p), v) in snap.one.iter() {
+    snap.for_each_one(.., |&(s, p), v| {
         if predicate.is_some_and(|pp| pp != p) {
-            continue;
+            return;
         }
         if let Some(ObjKey::Node(n)) = v {
             link(s, *n, &mut adj);
         }
-    }
-    for (&(s, p), set) in snap.many.iter() {
+    });
+    snap.for_each_many(.., |&(s, p), set| {
         if predicate.is_some_and(|pp| pp != p) {
-            continue;
+            return;
         }
         for o in set {
             if let ObjKey::Node(n) = o {
                 link(s, *n, &mut adj);
             }
         }
-    }
+    });
     adj
 }
 
@@ -653,7 +679,7 @@ pub fn undirected_adjacency(
 /// a single `knows` scores 1. Optionally restricted to one predicate (then every weight is 1).
 /// O(node-valued edges) — a full scan.
 pub fn edge_strengths(
-    snap: &Snapshot,
+    snap: &impl Facts,
     predicate: Option<FieldId>,
 ) -> HashMap<(NodeId, NodeId), u32> {
     let mut preds: HashMap<(NodeId, NodeId), BTreeSet<FieldId>> = HashMap::new();
@@ -664,24 +690,24 @@ pub fn edge_strengths(
         let key = if a < b { (a, b) } else { (b, a) };
         preds.entry(key).or_default().insert(p);
     };
-    for (&(s, p), v) in snap.one.iter() {
+    snap.for_each_one(.., |&(s, p), v| {
         if predicate.is_some_and(|pp| pp != p) {
-            continue;
+            return;
         }
         if let Some(ObjKey::Node(n)) = v {
             note(s, *n, p, &mut preds);
         }
-    }
-    for (&(s, p), set) in snap.many.iter() {
+    });
+    snap.for_each_many(.., |&(s, p), set| {
         if predicate.is_some_and(|pp| pp != p) {
-            continue;
+            return;
         }
         for o in set {
             if let ObjKey::Node(n) = o {
                 note(s, *n, p, &mut preds);
             }
         }
-    }
+    });
     preds
         .into_iter()
         .map(|(k, s)| (k, s.len() as u32))
@@ -690,7 +716,7 @@ pub fn edge_strengths(
 
 /// 1-hop expand from a set of subjects (multi-source frontier).
 pub fn expand_set(
-    snap: &Snapshot,
+    snap: &impl Facts,
     subjects: &BTreeSet<NodeId>,
     predicate: FieldId,
 ) -> BTreeSet<NodeId> {
@@ -702,7 +728,7 @@ pub fn expand_set(
 }
 
 /// 2-hop expand: `subject -p1-> X -p2-> Y`, returning the `Y` frontier.
-pub fn two_hop(snap: &Snapshot, subject: NodeId, p1: FieldId, p2: FieldId) -> BTreeSet<NodeId> {
+pub fn two_hop(snap: &impl Facts, subject: NodeId, p1: FieldId, p2: FieldId) -> BTreeSet<NodeId> {
     let hop1 = expand(snap, subject, p1);
     expand_set(snap, &hop1, p2)
 }
@@ -710,7 +736,7 @@ pub fn two_hop(snap: &Snapshot, subject: NodeId, p1: FieldId, p2: FieldId) -> BT
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fold::{Op, OrderKey, fold};
+    use crate::fold::{Op, OrderKey, Snapshot, fold};
 
     fn ok(seq: u64) -> OrderKey {
         OrderKey {
