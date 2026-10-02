@@ -9,6 +9,7 @@
 use crate::fact::{FieldId, NodeId};
 use crate::fold::{ObjKey, Snapshot};
 use crate::ivf::IvfPq;
+use crate::mask::Facts;
 use crate::query;
 use crate::vector::VectorIndex;
 use crate::version::{ReadMode, VersionVector};
@@ -151,9 +152,9 @@ pub enum Filter {
 }
 
 impl Filter {
-    fn keep(&self, snapshot: &Snapshot, n: NodeId) -> bool {
+    fn keep(&self, snapshot: &impl Facts, n: NodeId) -> bool {
         match self {
-            Filter::HasType { ty } => snapshot.node_types.get(&n) == Some(ty),
+            Filter::HasType { ty } => snapshot.snapshot().node_types.get(&n) == Some(ty),
             Filter::HasValue { predicate } => query::point_one(snapshot, n, *predicate).is_some(),
             Filter::IntCmp {
                 predicate,
@@ -208,14 +209,16 @@ fn cap(ids: &mut Vec<NodeId>, scores: &mut Vec<f32>, max_nodes: usize) {
 
 /// Evaluate a pipeline one-shot over the read state. authz is enforced at the source (scoped) and on
 /// every expanded node; the result is bounded by `max_nodes` and carries `vv` as its as_of. Node
-/// attributes (type + ABAC label) are read off the pinned `snapshot` — the lock-free read view.
-pub fn run<A: AnnBackend>(
-    snapshot: &Snapshot,
+/// attributes (type + ABAC label) are read off the pinned snapshot — the lock-free read view; fact
+/// reads (expand, value filters) go through `facts`, so a label-masked view masks them too.
+pub fn run<A: AnnBackend, F: Facts>(
+    facts: &F,
     vector: &A,
     pipeline: &Pipeline,
     principal: &Principal,
     vv: VersionVector,
 ) -> Traverser {
+    let snapshot = facts.snapshot();
     let (mut ids, mut scores): (Vec<NodeId>, Vec<f32>) = match &pipeline.source {
         Source::Point { subjects } => {
             let ids: Vec<NodeId> = subjects
@@ -250,7 +253,7 @@ pub fn run<A: AnnBackend>(
             Transform::Expand { predicate } => {
                 let mut next: Vec<NodeId> = Vec::new();
                 for &s in &ids {
-                    for n in query::expand(snapshot, s, *predicate) {
+                    for n in query::expand(facts, s, *predicate) {
                         if authorized(snapshot, principal, n) && !next.contains(&n) {
                             next.push(n);
                         }
@@ -275,7 +278,7 @@ pub fn run<A: AnnBackend>(
                 let mut ni = Vec::new();
                 let mut ns = Vec::new();
                 for (i, &n) in ids.iter().enumerate() {
-                    if f.keep(snapshot, n) {
+                    if f.keep(facts, n) {
                         ni.push(n);
                         ns.push(scores[i]);
                     }

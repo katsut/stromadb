@@ -54,6 +54,7 @@ use stromadb_core::fold::{ObjKey, Snapshot};
 use stromadb_core::incremental::{MaintainedConformance, VerdictDiff};
 use stromadb_core::ir::{Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run};
 use stromadb_core::ivf::IvfPq;
+use stromadb_core::mask::{self, FactMask, Facts, Masked};
 use stromadb_core::query;
 use stromadb_core::version::{ReadMode, VersionVector};
 
@@ -517,10 +518,7 @@ impl Db {
         let name = req["rule_name"]
             .as_str()
             .ok_or("conformance_watch.rule_name missing (only stored rules can be watched)")?;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         w.materialize_live(); // seed from a fully drained state
         let rule = w
@@ -551,12 +549,23 @@ impl Db {
             );
         }
         let snap = w.eng.snapshot_arc();
-        let verdicts: Vec<Value> = w.live_rules[name]
-            .maintained
+        // maintenance is unfiltered: the caller's node labels drop subjects, and its fact labels
+        // withhold verdicts whose support set touches a hidden fact (`hidden_by_label`)
+        let mask = FactMask::new(&w.schema.cat, labels);
+        let masking = mask.hides_any(&snap);
+        let maintained = &w.live_rules[name].maintained;
+        let verdicts: Vec<Value> = maintained
             .verdicts()
             .values()
             .filter(|v| label_visible(&snap, v.subject, labels))
-            .map(verdict_json)
+            .map(|v| {
+                if masking {
+                    let support = maintained.support(v.subject);
+                    verdict_json(&conformance::mask_verdict(v.clone(), &support, &mask))
+                } else {
+                    verdict_json(v)
+                }
+            })
             .collect();
         Ok(json!({ "verdicts": verdicts, "cursor": head }))
     }
@@ -572,10 +581,7 @@ impl Db {
         let cursor = req["cursor"]
             .as_u64()
             .ok_or("conformance_changes.cursor missing")?;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         w.materialize_live(); // usually a no-op: ingest drains on return
         let head = w.eng.durable_head();
@@ -588,17 +594,35 @@ impl Db {
         if cursor < lr.truncated_to {
             return Ok(json!({ "resync": true, "cursor": head }));
         }
+        // Each side of a change is masked with the support it was judged from, labels as of that
+        // judgment. The journal also holds entries whose verdict did not change but whose read
+        // rows changed labels; an entry that looks the same on both sides through this caller's
+        // mask is dropped.
+        let mask = FactMask::new(&w.schema.cat, labels);
+        let masking = mask.hides_any(&snap);
+        let seen = |v: &Option<conformance::Verdict>, support: &conformance::Support| {
+            v.clone().map(|v| {
+                if masking {
+                    conformance::mask_verdict(v, support, &mask)
+                } else {
+                    v
+                }
+            })
+        };
         let changes: Vec<Value> = lr
             .log
             .iter()
             .filter(|(h, _)| *h > cursor)
             .flat_map(|(_, diffs)| diffs.iter())
             .filter(|d| label_visible(&snap, d.subject, labels))
-            .map(|d| {
-                json!({
-                    "subject": d.subject,
-                    "old": d.old.as_ref().map(verdict_json),
-                    "new": d.new.as_ref().map(verdict_json),
+            .filter_map(|d| {
+                let (old, new) = (seen(&d.old, &d.old_support), seen(&d.new, &d.new_support));
+                (old != new).then(|| {
+                    json!({
+                        "subject": d.subject,
+                        "old": old.as_ref().map(verdict_json),
+                        "new": new.as_ref().map(verdict_json),
+                    })
                 })
             })
             .collect();
@@ -679,6 +703,8 @@ impl Db {
                 "rules": rs.schema.rules.len(),
             },
             "labels": labels,
+            // stored fact rows per access label (live rows only; a predicate floor is not counted)
+            "fact_labels": rs.snap.fact_label_counts.iter().map(|(l, n)| (l.to_string(), json!(n))).collect::<serde_json::Map<String, Value>>(),
             "sources": sources,
             "embeddings": { "count": rs.emb_ids.len(), "dim": rs.dim },
             // Quantizer fit (drift observability): live/trained assignment error and whether the
@@ -879,7 +905,7 @@ impl WriteState {
     /// the snapshot carries them, and mirror the label into `node_label_w` for the index build.
     fn ingest(&mut self, jsonl: &str) -> DbResult<IngestStats> {
         let mut s = IngestStats::default();
-        let mut batch: Vec<(u32, WriteKind)> = Vec::new();
+        let mut batch: Vec<(u32, WriteKind, Option<u8>)> = Vec::new();
         let mut touched_nodes = false;
         // Keys this call has written (pending batch entries + un-materialized retracts). The no-op
         // suppression below compares an incoming write against the engine's materialized state,
@@ -891,9 +917,23 @@ impl WriteState {
             let v: Value =
                 serde_json::from_str(line).map_err(|e| format!("bad json: {e}: {line}"))?;
             if v.get("type_def").is_some() || v.get("pred_def").is_some() {
+                let floor_of = |schema: &Schema| {
+                    v["pred_def"]["name"]
+                        .as_str()
+                        .and_then(|n| schema.cat.field_id(n))
+                        .and_then(|p| schema.cat.predicate(p))
+                        .and_then(|d| d.label_floor)
+                };
+                let floor_before = floor_of(&self.schema);
                 apply_def(Arc::make_mut(&mut self.schema), &v)?;
                 self.append_line("schema.jsonl", line)?;
                 s.defs += 1;
+                // A floor change re-labels existing facts for every reader, but no fact key is
+                // written, so watched rules would not journal it: invalidate every watch, exactly
+                // as re-declaring a rule invalidates its own.
+                if floor_of(&self.schema) != floor_before {
+                    self.live_rules.clear();
+                }
             } else if v.get("source_def").is_some() {
                 // A client-declared provenance source (SPEC §2) — same registration a fact's own
                 // `source` would trigger, so re-sending one a fact already interned is a no-op line
@@ -930,6 +970,8 @@ impl WriteState {
                 let object = obj_key(&f["object"])?;
                 let valid_from = f["valid_from"].as_i64().unwrap_or(0);
                 let valid_to = f["valid_to"].as_i64();
+                // optional per-fact access label, stored on this fact's row
+                let label = record_label(f, "fact")?;
                 // per-fact provenance: intern the optional source name to its stable Field-ID
                 // (absent → the batch's default_source if set, else 0). Interned once and reused
                 // for this fact's edge-property writes too.
@@ -949,17 +991,19 @@ impl WriteState {
                 let snap = self.eng.snapshot_arc();
                 let kind = match self.schema.cardinality.get(pname) {
                     Some(Cardinality::One) => {
-                        // Suppress iff the CURRENT HEAD row matches on object, valid interval, and
-                        // source. Head-only comparison keeps arrival-order semantics intact: a
-                        // re-send equal to an OLDER row still appends — it legitimately moves the
-                        // head, which the upstream late-arrival guard relies on.
+                        // Suppress iff the CURRENT HEAD row matches on object, valid interval,
+                        // source, and access label. Head-only comparison keeps arrival-order
+                        // semantics intact: a re-send equal to an OLDER row still appends — it
+                        // legitimately moves the head, which the upstream late-arrival guard
+                        // relies on. A re-send with a different label appends: it relabels.
                         let dup = clean
-                            && query::point_one_head(&snap, subject, predicate).is_some_and(
+                            && query::point_one_head(&*snap, subject, predicate).is_some_and(
                                 |(ok, obj, vf, vt)| {
                                     obj.as_ref() == Some(&object)
-                                        && *vf == valid_from
-                                        && *vt == valid_to
+                                        && vf == valid_from
+                                        && vt == valid_to
                                         && ok.source == source
+                                        && row_label(&snap, subject, predicate, &ok) == label
                                 },
                             );
                         (!dup).then(|| WriteKind::SetOne {
@@ -977,7 +1021,7 @@ impl WriteState {
                         // close a re-open; all of those append.
                         let dup = clean
                             && self.eng.many_live_asserted(
-                                subject, predicate, &object, source, valid_from, valid_to,
+                                subject, predicate, &object, source, valid_from, valid_to, label,
                             );
                         (!dup).then(|| WriteKind::AddMany {
                             subject,
@@ -990,7 +1034,7 @@ impl WriteState {
                 };
                 match kind {
                     Some(kind) => {
-                        batch.push((source, kind));
+                        batch.push((source, kind, label));
                         dirty.insert((subject, predicate));
                         s.facts += 1; // appended fact writes only — a suppressed no-op is not a fact
                     }
@@ -1018,6 +1062,7 @@ impl WriteState {
                                 key: key.clone(),
                                 value,
                             },
+                            None,
                         ));
                         dirty.insert((subject, predicate));
                     }
@@ -1060,6 +1105,9 @@ impl WriteState {
                     None => return Err(format!("unknown predicate: {pname}")),
                 };
                 let valid_from = c["valid_from"].as_i64().unwrap_or(0);
+                // a close is a row like any other and may carry an access label (a close of a
+                // hidden value is then hidden with it)
+                let label = record_label(c, "close")?;
                 let src_name = c
                     .get("source")
                     .and_then(|x| x.as_str())
@@ -1067,16 +1115,20 @@ impl WriteState {
                     .or_else(|| self.default_source.clone());
                 let source = self.source_id(src_name.as_deref())?;
                 let clean = !dirty.contains(&(subject, predicate));
-                // No-op suppression: the (element's) winner is already a close at the same boundary.
+                // No-op suppression: the (element's) winner is already a close at the same
+                // boundary with the same label.
+                let snap = self.eng.snapshot_arc();
+                let closed_dup = |head: Option<stromadb_core::fold::VersionRow>| {
+                    head.is_some_and(|(ok, obj, vf, _)| {
+                        obj.is_none()
+                            && vf == valid_from
+                            && row_label(&snap, subject, predicate, &ok) == label
+                    })
+                };
                 let kind = if many {
                     let object = obj_key(&c["object"])?;
-                    let dup = clean
-                        && query::many_closed_from(
-                            &self.eng.snapshot_arc(),
-                            subject,
-                            predicate,
-                            &object,
-                        ) == Some(valid_from);
+                    let dup =
+                        clean && closed_dup(query::many_head(&*snap, subject, predicate, &object));
                     (!dup).then_some(WriteKind::CloseMany {
                         subject,
                         predicate,
@@ -1084,12 +1136,8 @@ impl WriteState {
                         valid_from,
                     })
                 } else {
-                    let dup = clean
-                        && query::point_one_closed_from(
-                            &self.eng.snapshot_arc(),
-                            subject,
-                            predicate,
-                        ) == Some(valid_from);
+                    let dup =
+                        clean && closed_dup(query::point_one_head(&*snap, subject, predicate));
                     (!dup).then_some(WriteKind::CloseOne {
                         subject,
                         predicate,
@@ -1098,7 +1146,7 @@ impl WriteState {
                 };
                 match kind {
                     Some(kind) => {
-                        batch.push((source, kind));
+                        batch.push((source, kind, label));
                         dirty.insert((subject, predicate));
                         s.closes += 1;
                     }
@@ -1216,12 +1264,12 @@ impl WriteState {
         Ok(wrote)
     }
 
-    fn flush(&mut self, batch: &mut Vec<(u32, WriteKind)>) -> DbResult<()> {
+    fn flush(&mut self, batch: &mut Vec<(u32, WriteKind, Option<u8>)>) -> DbResult<()> {
         if batch.is_empty() {
             return Ok(());
         }
         self.eng
-            .write_batch(std::mem::take(batch))
+            .write_batch_labeled(std::mem::take(batch))
             .map_err(|e| format!("backpressure: {e:?}"))?;
         self.eng.sync().map_err(|e| format!("fsync: {e}"))?;
         self.materialize_live();
@@ -1308,6 +1356,15 @@ impl WriteState {
 }
 
 impl ReadState {
+    /// The fact view a read with `allowed_labels` runs on — the single choke point of per-fact
+    /// label masking. Every read op below reads facts only through the view this returns (node
+    /// labels still gate whole nodes, via [`label_visible`]). It borrows the pinned snapshot, so
+    /// reads stay lock-free; when the mask hides nothing that exists, every access is a direct
+    /// borrow of the snapshot.
+    fn facts(&self, allowed_labels: u32) -> Masked<'_> {
+        Masked::new(&self.snap, &self.schema.cat, allowed_labels)
+    }
+
     /// Run a JSON query request against this pinned read view.
     pub fn query(&self, req: &Value) -> DbResult<Value> {
         match req["op"].as_str().ok_or("missing op")? {
@@ -1321,10 +1378,8 @@ impl ReadState {
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 // post-authz: a subject outside the caller's labels answers `denied` (same contract
                 // as the node view); a node-valued answer outside them reads as absent.
-                let labels = req["allowed_labels"]
-                    .as_u64()
-                    .map(|m| m as u32)
-                    .unwrap_or(u32::MAX);
+                let labels = req_labels(req);
+                let facts = self.facts(labels);
                 if !label_visible(&self.snap, subject, labels) {
                     return Ok(json!({ "denied": true }));
                 }
@@ -1335,8 +1390,8 @@ impl ReadState {
                 Ok(match self.schema.cardinality.get(pname) {
                     Some(Cardinality::One) => {
                         let obj = match valid_at {
-                            Some(at) => query::point_one_asof(&self.snap, subject, pid, at),
-                            None => query::point_one(&self.snap, subject, pid),
+                            Some(at) => query::point_one_asof(&facts, subject, pid, at),
+                            None => query::point_one(&facts, subject, pid),
                         }
                         .filter(node_ok);
                         // Provenance of the current functional value: the winning version's source
@@ -1344,7 +1399,7 @@ impl ReadState {
                         // `one` shape is unchanged.
                         let provenance: Option<String> = (valid_at.is_none() && obj.is_some())
                             .then(|| {
-                                query::point_one_source(&self.snap, subject, pid)
+                                query::point_one_source(&facts, subject, pid)
                                     .filter(|&src| src != 0)
                                     .and_then(|src| self.schema.cat.name(src))
                                     .map(str::to_string)
@@ -1364,7 +1419,7 @@ impl ReadState {
                         // ingest guard compares it against an incoming event's valid_from to detect
                         // late arrivals before writing).
                         if is_current
-                            && let Some(vf) = query::point_one_valid_from(&self.snap, subject, pid)
+                            && let Some(vf) = query::point_one_valid_from(&facts, subject, pid)
                         {
                             resp["valid_from"] = json!(vf);
                         }
@@ -1373,7 +1428,7 @@ impl ReadState {
                         // key stays exactly `{"one": null}`). Distinguishes "ended" from "never
                         // written" so a writer can defend the close during late-arrival repair.
                         if is_current_absent
-                            && let Some(vf) = query::point_one_closed_from(&self.snap, subject, pid)
+                            && let Some(vf) = query::point_one_closed_from(&facts, subject, pid)
                         {
                             resp["closed_from"] = json!(vf);
                         }
@@ -1384,8 +1439,7 @@ impl ReadState {
                         if is_current {
                             let now = req["now"].as_i64();
                             let max_age = req["max_age"].as_i64();
-                            let c =
-                                query::confidence_signals(&self.snap, subject, pid, now, max_age);
+                            let c = query::confidence_signals(&facts, subject, pid, now, max_age);
                             let mut conf = json!({
                                 "tier": c.tier.as_str(),
                                 "corroboration": c.corroboration,
@@ -1403,10 +1457,10 @@ impl ReadState {
                         // `valid_at` so a client can tell a supporting server from an older one
                         // that would silently answer with the current set.
                         Some(at) => {
-                            json!({ "many": query::point_many_asof(&self.snap, subject, pid, at).into_iter().filter(node_ok).map(fmt_obj).collect::<Vec<_>>(), "valid_at": at })
+                            json!({ "many": query::point_many_asof(&facts, subject, pid, at).into_iter().filter(node_ok).map(fmt_obj).collect::<Vec<_>>(), "valid_at": at })
                         }
                         None => {
-                            json!({ "many": query::point_many(&self.snap, subject, pid).into_iter().filter(node_ok).map(fmt_obj).collect::<Vec<_>>() })
+                            json!({ "many": query::point_many(&facts, subject, pid).into_iter().filter(node_ok).map(fmt_obj).collect::<Vec<_>>() })
                         }
                     },
                 })
@@ -1423,10 +1477,8 @@ impl ReadState {
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 // post-authz, same contract as point: an out-of-labels subject is denied, and
                 // out-of-labels nodes drop from the result set.
-                let labels = req["allowed_labels"]
-                    .as_u64()
-                    .map(|m| m as u32)
-                    .unwrap_or(u32::MAX);
+                let labels = req_labels(req);
+                let facts = self.facts(labels);
                 if !label_visible(&self.snap, subject, labels) {
                     return Ok(json!({ "denied": true }));
                 }
@@ -1438,10 +1490,10 @@ impl ReadState {
                 let max_depth = req["max_depth"].as_u64().map(|d| d as usize).unwrap_or(16);
                 Ok(match req["valid_at"].as_i64() {
                     Some(at) => {
-                        json!({ "nodes": query::expand_rel_asof(&self.snap, &self.schema.cat, subject, pid, max_depth, at).into_iter().filter(vis).collect::<Vec<_>>(), "valid_at": at })
+                        json!({ "nodes": query::expand_rel_asof(&facts, &self.schema.cat, subject, pid, max_depth, at).into_iter().filter(vis).collect::<Vec<_>>(), "valid_at": at })
                     }
                     None => {
-                        json!({ "nodes": query::expand_rel(&self.snap, &self.schema.cat, subject, pid, max_depth).into_iter().filter(vis).collect::<Vec<_>>() })
+                        json!({ "nodes": query::expand_rel(&facts, &self.schema.cat, subject, pid, max_depth).into_iter().filter(vis).collect::<Vec<_>>() })
                     }
                 })
             }
@@ -1473,10 +1525,8 @@ impl ReadState {
                 // post-authz, same contract as point: an out-of-labels subject answers empty, and
                 // segments whose value is an out-of-labels node are dropped (an interval naming a
                 // hidden node would leak its existence).
-                let labels = req["allowed_labels"]
-                    .as_u64()
-                    .map(|m| m as u32)
-                    .unwrap_or(u32::MAX);
+                let labels = req_labels(req);
+                let facts = self.facts(labels);
                 if !label_visible(&self.snap, subject, labels) {
                     return Ok(json!({ "segments": [] }));
                 }
@@ -1485,10 +1535,9 @@ impl ReadState {
                 // three-hop answer resting on one source-less hop reads as low even when the other
                 // hops corroborate.
                 let mut supports: BTreeSet<(u64, u32)> = BTreeSet::new();
-                let segs =
-                    query::derived_timeline_traced(&self.snap, subject, &hops, &mut |n, p| {
-                        supports.insert((n, p));
-                    });
+                let segs = query::derived_timeline_traced(&facts, subject, &hops, &mut |n, p| {
+                    supports.insert((n, p));
+                });
                 let segments: Vec<Value> = segs
                     .into_iter()
                     .filter(|s| !matches!(&s.value, ObjKey::Node(n) if !label_visible(&self.snap, *n, labels)))
@@ -1510,11 +1559,7 @@ impl ReadState {
                     let weakest = supports
                         .iter()
                         .map(|&(n, p)| {
-                            (
-                                query::confidence_signals(&self.snap, n, p, now, max_age),
-                                n,
-                                p,
-                            )
+                            (query::confidence_signals(&facts, n, p, now, max_age), n, p)
                         })
                         .min_by_key(|(c, ..)| c.tier)
                         .expect("hops is non-empty, so at least one support was recorded");
@@ -1554,7 +1599,14 @@ impl ReadState {
                     .field_id(pname)
                     .ok_or(format!("unknown predicate: {pname}"))?;
                 let object = obj_key(&req["object"])?;
-                let props = query::edge_props(&self.snap, subject, pid, &object)
+                // post-authz like point: a subject outside the caller's node labels is denied, and
+                // the props of an edge whose rows are all hidden by fact labels are absent
+                let labels = req_labels(req);
+                if !label_visible(&self.snap, subject, labels) {
+                    return Ok(json!({ "denied": true }));
+                }
+                let facts = self.facts(labels);
+                let props = query::edge_props(&facts, subject, pid, &object)
                     .map(|m| {
                         m.iter()
                             .map(|(k, v)| (k.clone(), fmt_obj(v.clone())))
@@ -1588,10 +1640,8 @@ impl ReadState {
         let focus = req["subject"].as_u64().ok_or("subject required")?;
         let hops = req["hops"].as_u64().unwrap_or(2) as usize;
         let cap = req["max_nodes"].as_u64().unwrap_or(3000) as usize;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let pred = match req["predicate"].as_str() {
             Some(p) => Some(
                 self.schema
@@ -1615,7 +1665,7 @@ impl ReadState {
         }
         depth.insert(focus, 0);
         // undirected adjacency: reach both what the focus points to and what points at it.
-        let adj = query::undirected_adjacency(&self.snap, pred);
+        let adj = query::undirected_adjacency(&facts, pred);
         let mut frontier = vec![focus];
         for d in 0..hops {
             if frontier.is_empty() || depth.len() >= cap {
@@ -1638,9 +1688,9 @@ impl ReadState {
         }
         let nodes: Vec<Value> = depth
             .iter()
-            .map(|(&id, &d)| json!({ "id": id, "depth": d, "name": self.display_name(id) }))
+            .map(|(&id, &d)| json!({ "id": id, "depth": d, "name": self.display_name(&facts, id) }))
             .collect();
-        let strengths = query::edge_strengths(&self.snap, pred);
+        let strengths = query::edge_strengths(&facts, pred);
         let edges: Vec<Value> = edges
             .iter()
             .filter(|(a, b)| depth.contains_key(a) && depth.contains_key(b))
@@ -1655,10 +1705,8 @@ impl ReadState {
     /// `{id, denied:true}` rather than leaking its properties. Powers the UI's node-inspect panel.
     fn node_detail(&self, req: &Value) -> DbResult<Value> {
         let subject = req["subject"].as_u64().ok_or("subject required")?;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let visible = self
             .snap
             .node_labels
@@ -1667,12 +1715,12 @@ impl ReadState {
         if !visible {
             return Ok(json!({ "id": subject, "denied": true }));
         }
-        let (ones, manys) = query::describe(&self.snap, subject);
+        let (ones, manys) = query::describe(&facts, subject);
         let mut props = Vec::with_capacity(ones.len() + manys.len());
         for (p, ok) in ones {
             let name = self.schema.cat.name(p).unwrap_or("?");
             // provenance of this One value: the winning version's source name (omitted when unset)
-            let source: Option<String> = query::point_one_source(&self.snap, subject, p)
+            let source: Option<String> = query::point_one_source(&facts, subject, p)
                 .filter(|&src| src != 0)
                 .and_then(|src| self.schema.cat.name(src))
                 .map(str::to_string);
@@ -1682,7 +1730,7 @@ impl ReadState {
             }
             // coarse confidence tier (no reference time here, so freshness never downgrades it) —
             // the belief-strength companion to the provenance chip
-            let conf = query::confidence_signals(&self.snap, subject, p, None, None);
+            let conf = query::confidence_signals(&facts, subject, p, None, None);
             prop["confidence"] = json!(conf.tier.as_str());
             props.push(prop);
         }
@@ -1737,14 +1785,14 @@ impl ReadState {
                         ValueType::Bool => "bool",
                     } }),
                 };
-                json!({ "name": name, "card": card, "domain": domain, "range": range, "display": p.display, "label": p.label })
+                json!({ "name": name, "card": card, "domain": domain, "range": range, "display": p.display, "label": p.label, "label_floor": p.label_floor })
             })
             .collect();
         preds.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         // Stored rule names, so a client can offer "run rule X" without knowing the declarations.
         let mut rules: Vec<&str> = self.schema.rules.keys().map(|s| s.as_str()).collect();
         rules.sort_unstable();
-        json!({ "predicates": preds, "labels": labels_in_use(&self.snap), "rules": rules })
+        json!({ "predicates": preds, "labels": labels_in_use(&self.snap, &self.schema.cat), "rules": rules })
     }
 
     /// Read back stored rule declarations. With `rule_name`, returns `{ "name", "rule" }` where
@@ -1780,10 +1828,8 @@ impl ReadState {
     /// `{nodes:[{id,depth}], edges:[[a,b]]}` shape so the UI renders it identically.
     fn graph(&self, req: &Value) -> DbResult<Value> {
         let cap = req["max_nodes"].as_u64().unwrap_or(3000) as usize;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let visible = |n: u64| {
             self.snap
                 .node_labels
@@ -1800,7 +1846,7 @@ impl ReadState {
 
         let mut edges: BTreeSet<(u64, u64)> = BTreeSet::new();
         for &u in &keep {
-            for v in query::neighbors(&self.snap, u) {
+            for v in query::neighbors(&facts, u) {
                 if keep.contains(&v) {
                     edges.insert(if u < v { (u, v) } else { (v, u) });
                 }
@@ -1808,9 +1854,9 @@ impl ReadState {
         }
         let nodes: Vec<Value> = keep
             .iter()
-            .map(|&id| json!({ "id": id, "depth": 0, "name": self.display_name(id) }))
+            .map(|&id| json!({ "id": id, "depth": 0, "name": self.display_name(&facts, id) }))
             .collect();
-        let strengths = query::edge_strengths(&self.snap, None);
+        let strengths = query::edge_strengths(&facts, None);
         let edges: Vec<Value> = edges
             .iter()
             .map(|(a, b)| json!([a, b, strengths.get(&(*a, *b)).copied().unwrap_or(1)]))
@@ -1825,10 +1871,8 @@ impl ReadState {
     /// field id (unique within this response); `sample` carries the real node id to drill to.
     fn overview(&self, req: &Value) -> DbResult<Value> {
         const UNTYPED: u32 = u32::MAX;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let visible = |n: u64| {
             self.snap
                 .node_labels
@@ -1860,18 +1904,18 @@ impl ReadState {
                 *ew.entry(key).or_default() += 1;
             }
         };
-        for (&(s, _), v) in self.snap.one.iter() {
+        facts.for_each_one(.., |&(s, _), v| {
             if let Some(ObjKey::Node(o)) = v {
                 bump(s, *o, &mut ew);
             }
-        }
-        for (&(s, _), set) in self.snap.many.iter() {
+        });
+        facts.for_each_many(.., |&(s, _), set| {
             for o in set {
                 if let ObjKey::Node(o) = o {
                     bump(s, *o, &mut ew);
                 }
             }
-        }
+        });
 
         let nodes: Vec<Value> = count
             .iter()
@@ -1905,10 +1949,8 @@ impl ReadState {
             None => None,
         };
         let limit = req["limit"].as_u64().unwrap_or(50) as usize;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let visible = |n: u64| {
             self.snap
                 .node_labels
@@ -1925,7 +1967,7 @@ impl ReadState {
         let nodes: Vec<Value> = members
             .into_iter()
             .take(limit)
-            .map(|id| json!({ "id": id, "name": self.display_name(id) }))
+            .map(|id| json!({ "id": id, "name": self.display_name(&facts, id) }))
             .collect();
         Ok(json!({ "nodes": nodes, "count": count, "truncated": count > limit }))
     }
@@ -1933,13 +1975,16 @@ impl ReadState {
     /// A node's display name — the value of a predicate the schema flags with `display: true`,
     /// falling back to the first `name`/`title`/`display_name`/`full_name` text predicate when no
     /// flagged predicate covers the node. Used to label nodes in graph/neighbourhood results.
-    fn display_name(&self, id: u64) -> Option<String> {
+    /// Read through the caller's fact view: a hidden display value is skipped as if absent, so
+    /// the name falls back to the next visible candidate (or none).
+    fn display_name(&self, facts: &Masked, id: u64) -> Option<String> {
         const NAME_PREDS: [&str; 4] = ["name", "title", "display_name", "full_name"];
+        let mut flagged: Option<String> = None;
         let mut fallback: Option<String> = None;
-        for (&(_, p), v) in self.snap.one.range((id, u32::MIN)..=(id, u32::MAX)) {
-            let Some(ObjKey::Text(s)) = v else { continue };
-            if self.schema.cat.predicate(p).is_some_and(|d| d.display) {
-                return Some(s.clone());
+        facts.for_each_one((id, u32::MIN)..=(id, u32::MAX), |&(_, p), v| {
+            let Some(ObjKey::Text(s)) = v else { return };
+            if flagged.is_none() && self.schema.cat.predicate(p).is_some_and(|d| d.display) {
+                flagged = Some(s.clone());
             }
             if fallback.is_none()
                 && self
@@ -1950,8 +1995,8 @@ impl ReadState {
             {
                 fallback = Some(s.clone());
             }
-        }
-        fallback
+        });
+        flagged.or(fallback)
     }
 
     /// Free-word node search: case-insensitive substring over every text property value (one- and
@@ -1965,10 +2010,8 @@ impl ReadState {
             .filter(|s| !s.is_empty())
             .ok_or("text required")?;
         let limit = req["limit"].as_u64().unwrap_or(20) as usize;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let visible = |n: u64| {
             self.snap
                 .node_labels
@@ -1978,7 +2021,7 @@ impl ReadState {
         // First hit per node (iteration order is deterministic: one values, then many values,
         // ascending (node, predicate)); collected fully, then cut to `limit` in id order.
         let mut hits: BTreeMap<u64, (FieldId, String)> = BTreeMap::new();
-        for (&(n, p), v) in &self.snap.one {
+        facts.for_each_one(.., |&(n, p), v| {
             if let Some(ObjKey::Text(s)) = v
                 && !hits.contains_key(&n)
                 && visible(n)
@@ -1986,10 +2029,10 @@ impl ReadState {
             {
                 hits.insert(n, (p, excerpt(s, &needle)));
             }
-        }
-        for (&(n, p), set) in &self.snap.many {
+        });
+        facts.for_each_many(.., |&(n, p), set| {
             if hits.contains_key(&n) || !visible(n) {
-                continue;
+                return;
             }
             for o in set {
                 if let ObjKey::Text(s) = o
@@ -1999,7 +2042,7 @@ impl ReadState {
                     break;
                 }
             }
-        }
+        });
         let nodes: Vec<Value> = hits
             .iter()
             .take(limit)
@@ -2011,7 +2054,7 @@ impl ReadState {
                     .and_then(|&t| self.schema.cat.name(t));
                 json!({
                     "id": n,
-                    "name": self.display_name(n),
+                    "name": self.display_name(&facts, n),
                     "type": ty,
                     "matched": { "predicate": self.schema.cat.name(*p).unwrap_or("?"), "value": s },
                 })
@@ -2063,35 +2106,30 @@ impl ReadState {
         };
         let limit = req["limit"].as_u64().unwrap_or(10).min(100) as usize;
         let valid_at = req["valid_at"].as_i64();
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let keep = |n: NodeId| {
             label_visible(&self.snap, n, labels)
                 && ty.is_none_or(|t| self.snap.node_types.get(&n) == Some(&t))
         };
         // Both maps are keyed (node, predicate), so each node appears at most once, in id order.
-        let ids: Vec<NodeId> = match valid_at {
-            None => self
-                .snap
-                .one
-                .iter()
-                .filter(|&(&(n, p), v)| p == pid && v.as_ref() == Some(&want) && keep(n))
-                .map(|(&(n, _), _)| n)
-                .collect(),
-            Some(at) => self
-                .snap
-                .one_history
-                .keys()
-                .filter(|&&(n, p)| {
-                    p == pid
-                        && keep(n)
-                        && query::point_one_asof(&self.snap, n, pid, at).as_ref() == Some(&want)
-                })
-                .map(|&(n, _)| n)
-                .collect(),
-        };
+        // Read through the caller's fact view: a hidden value is not matchable.
+        let mut ids: Vec<NodeId> = Vec::new();
+        match valid_at {
+            None => facts.for_each_one(.., |&(n, p), v| {
+                if p == pid && v.as_ref() == Some(&want) && keep(n) {
+                    ids.push(n);
+                }
+            }),
+            Some(at) => facts.for_each_one_key(|&(n, p)| {
+                if p == pid
+                    && keep(n)
+                    && query::point_one_asof(&facts, n, pid, at).as_ref() == Some(&want)
+                {
+                    ids.push(n);
+                }
+            }),
+        }
         let nodes: Vec<Value> = ids
             .iter()
             .take(limit)
@@ -2099,7 +2137,7 @@ impl ReadState {
                 json!({
                     "id": n,
                     "type": self.snap.node_types.get(&n).and_then(|&t| self.schema.cat.name(t)),
-                    "display": self.display_name(n),
+                    "display": self.display_name(&facts, n),
                 })
             })
             .collect();
@@ -2120,10 +2158,8 @@ impl ReadState {
             .field_id(ty)
             .ok_or(format!("unknown type: {ty}"))?;
         let k = req["k"].as_u64().unwrap_or(10) as usize;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let mode = if req["mode"].as_str() == Some("strict") {
             ReadMode::Strict
         } else {
@@ -2161,7 +2197,7 @@ impl ReadState {
         let vw = (self.emb_ids.len() as u64).min(head);
         let vv = VersionVector::new(head, vw);
         Ok(run(
-            &self.snap,
+            &facts,
             idx,
             &pipeline,
             &Principal {
@@ -2177,10 +2213,8 @@ impl ReadState {
     /// `{expand:"pred"}` (follow a predicate) or `{filter_type:"T"}` (keep a type). Authz-scoped.
     /// Returns `{ids, names}`.
     fn pipeline(&self, req: &Value) -> DbResult<Value> {
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         // ---- source ----
         let src = &req["source"];
         let (source, needs_ann) = if let Some(nodes) = src["nodes"].as_array() {
@@ -2270,14 +2304,14 @@ impl ReadState {
         };
         let t = if needs_ann {
             let idx = (*self.index).as_ref().ok_or("no embeddings ingested")?;
-            run(&self.snap, idx, &pipeline, &principal, vv)
+            run(&facts, idx, &pipeline, &principal, vv)
         } else {
-            run(&self.snap, &NoAnn, &pipeline, &principal, vv)
+            run(&facts, &NoAnn, &pipeline, &principal, vv)
         };
         let nodes: Vec<Value> = t
             .ids
             .iter()
-            .map(|&id| json!({ "id": id, "name": self.display_name(id) }))
+            .map(|&id| json!({ "id": id, "name": self.display_name(&facts, id) }))
             .collect();
         Ok(json!({ "ids": t.ids, "nodes": nodes }))
     }
@@ -2330,10 +2364,7 @@ impl ReadState {
             ));
         }
         check_rule_paths(&rule, &self.schema.cat)?;
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
         // `subject` (one id) or `subjects` (a list): evaluate only those.
         let subjects: Option<Vec<NodeId>> =
             if let Some(s) = req.get("subjects").filter(|v| !v.is_null()) {
@@ -2453,12 +2484,10 @@ impl ReadState {
                 missing.join(", ")
             ));
         }
-        let labels = req["allowed_labels"]
-            .as_u64()
-            .map(|m| m as u32)
-            .unwrap_or(u32::MAX);
+        let labels = req_labels(req);
+        let facts = self.facts(labels);
         let incomplete: Vec<Value> =
-            completeness::evaluate(&self.snap, &self.schema.cat, type_name, &required, labels)
+            completeness::evaluate(&facts, &self.schema.cat, type_name, &required, labels)
                 .into_iter()
                 .map(|i| json!({ "node": i.node, "missing": i.missing }))
                 .collect();
@@ -2497,17 +2526,20 @@ impl ReadState {
         };
 
         let t = self.run_hybrid(req)?;
+        // hit content and dates are read through the caller's fact view: a hidden literal is
+        // neither returned nor used in the assembled context
+        let facts = self.facts(req_labels(req));
         // gather (node, score, date, content) — current values (fold LWW resolves supersession)
         let mut rows: Vec<(u64, f32, Option<i64>, String)> = t
             .ids
             .iter()
             .zip(&t.scores)
             .map(|(&n, &sc)| {
-                let content = match query::point_one(&self.snap, n, content_p) {
+                let content = match query::point_one(&facts, n, content_p) {
                     Some(ObjKey::Text(s)) => s,
                     _ => String::new(),
                 };
-                let date = date_p.and_then(|dp| match query::point_one(&self.snap, n, dp) {
+                let date = date_p.and_then(|dp| match query::point_one(&facts, n, dp) {
                     Some(ObjKey::Int(v)) => Some(v),
                     _ => None,
                 });
@@ -2595,14 +2627,13 @@ fn node_ids(snap: &Snapshot) -> Vec<NodeId> {
     s.into_iter().collect()
 }
 
-/// The distinct ABAC sensitivity labels actually assigned to nodes, sorted ascending.
-fn labels_in_use(snap: &Snapshot) -> Vec<u8> {
-    snap.node_labels
-        .values()
-        .copied()
-        .collect::<BTreeSet<u8>>()
-        .into_iter()
-        .collect()
+/// The distinct access labels in use, sorted ascending: on nodes, on stored fact rows, and as
+/// predicate label floors — every label a mask can hide something with.
+fn labels_in_use(snap: &Snapshot, cat: &Catalog) -> Vec<u8> {
+    let mut s: BTreeSet<u8> = snap.node_labels.values().copied().collect();
+    s.extend(snap.fact_label_counts.keys().copied());
+    s.extend(cat.predicates().filter_map(|p| p.label_floor));
+    s.into_iter().collect()
 }
 
 fn read_lines(p: &Path) -> Vec<String> {
@@ -2709,9 +2740,23 @@ fn apply_def(schema: &mut Schema, v: &Value) -> DbResult<()> {
             transitive,
             inverse,
         };
+        // Optional access-label floor. Unlike the presentation fields below it is sticky: a re-sent
+        // def that omits `label_floor` keeps the declared floor (a connector re-sending its schema
+        // must not silently lower it); an explicit `null` clears it.
+        let floor_before = schema
+            .cat
+            .field_id(name)
+            .and_then(|id| schema.cat.predicate(id))
+            .and_then(|d| d.label_floor);
+        let label_floor = match p.get("label_floor") {
+            None => floor_before,
+            Some(Value::Null) => None,
+            Some(l) => Some(parse_label(l, "pred_def.label_floor")?),
+        };
         let pid = schema
             .cat
             .register_predicate(name, c, props, domain_id, range);
+        schema.cat.set_label_floor(pid, label_floor);
         // Optional display flag: this predicate's text value labels its subject node in graph views.
         // Presentation metadata, not a constraint — unlike cardinality, a re-sent def may change it
         // (register_predicate rebuilds the def from this line, so the latest declaration wins).
@@ -3007,6 +3052,46 @@ fn verdict_json(v: &conformance::Verdict) -> Value {
         out["reason"] = json!(reason.as_str());
     }
     out
+}
+
+/// A request's `allowed_labels` bitmask (absent = every label).
+fn req_labels(req: &Value) -> u32 {
+    req["allowed_labels"]
+        .as_u64()
+        .map(|m| m as u32)
+        .unwrap_or(u32::MAX)
+}
+
+/// An access label: an integer in `0..=31` (one bit of the 32-bit `allowed_labels` mask).
+fn parse_label(v: &Value, what: &str) -> DbResult<u8> {
+    v.as_u64()
+        .filter(|&l| l <= mask::MAX_LABEL as u64)
+        .map(|l| l as u8)
+        .ok_or(format!(
+            "{what} must be an integer label 0..={}",
+            mask::MAX_LABEL
+        ))
+}
+
+/// The optional `label` of a fact or close record.
+fn record_label(r: &Value, what: &str) -> DbResult<Option<u8>> {
+    match r.get("label") {
+        None | Some(Value::Null) => Ok(None),
+        Some(l) => parse_label(l, &format!("{what}.label")).map(Some),
+    }
+}
+
+/// The access label stored on the row `ok` of key `(subject, predicate)`, if any.
+fn row_label(
+    snap: &Snapshot,
+    subject: NodeId,
+    predicate: FieldId,
+    ok: &stromadb_core::fold::OrderKey,
+) -> Option<u8> {
+    snap.fact_labels
+        .get(&(subject, predicate))
+        .and_then(|m| m.get(ok))
+        .copied()
 }
 
 /// Whether `node` is visible to a principal with `allowed_labels` (unlabeled = public) — the same

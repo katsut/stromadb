@@ -88,12 +88,30 @@ impl Engine {
         self.changelog.append(source, kind)
     }
 
+    /// Append a write whose row carries an access label (see [`Changelog::append_labeled`]).
+    pub fn write_labeled(
+        &mut self,
+        source: FieldId,
+        kind: WriteKind,
+        label: Option<u8>,
+    ) -> Result<u64, Backpressure> {
+        self.changelog.append_labeled(source, kind, label)
+    }
+
     /// Append a chunk of writes atomically (the ETL chunk receiver). Returns their seqnos.
     pub fn write_batch(
         &mut self,
         writes: Vec<(FieldId, WriteKind)>,
     ) -> Result<Vec<u64>, Backpressure> {
         self.changelog.append_batch(writes)
+    }
+
+    /// [`Engine::write_batch`] where each write carries the access label of its row.
+    pub fn write_batch_labeled(
+        &mut self,
+        writes: Vec<(FieldId, WriteKind, Option<u8>)>,
+    ) -> Result<Vec<u64>, Backpressure> {
+        self.changelog.append_batch_labeled(writes)
     }
 
     /// Retract a cardinality-Many edge by `(subject, predicate, object)`: the DB resolves the
@@ -123,12 +141,14 @@ impl Engine {
     }
 
     /// Whether the materialized base holds cardinality-Many element `(subject, predicate, object)`
-    /// as CURRENTLY PRESENT with a live add row matching `(source, valid_from, valid_to)` — the
-    /// ingest no-op suppression probe. An identical re-assertion changes nothing; a *different*
-    /// source is corroboration, a changed interval is a correction, and a re-grant after a close
-    /// must re-open the element — all of those append. Reads the materialized base only, not the
-    /// un-materialized tail: the ingest path runs it right after a materialize, when the tail can
-    /// hold no cardinality-Many assertions for a key it has not already marked dirty.
+    /// as CURRENTLY PRESENT with a live add row matching `(source, valid_from, valid_to, label)` —
+    /// the ingest no-op suppression probe. An identical re-assertion changes nothing; a *different*
+    /// source is corroboration, a changed interval is a correction, a re-grant after a close must
+    /// re-open the element, and a different label relabels it — all of those append. Reads the
+    /// materialized base only, not the un-materialized tail: the ingest path runs it right after a
+    /// materialize, when the tail can hold no cardinality-Many assertions for a key it has not
+    /// already marked dirty.
+    #[allow(clippy::too_many_arguments)]
     pub fn many_live_asserted(
         &self,
         subject: NodeId,
@@ -137,9 +157,11 @@ impl Engine {
         source: FieldId,
         valid_from: i64,
         valid_to: Option<i64>,
+        label: Option<u8>,
     ) -> bool {
-        self.base
-            .many_live_asserted(subject, predicate, object, source, valid_from, valid_to)
+        self.base.many_live_asserted(
+            subject, predicate, object, source, valid_from, valid_to, label,
+        )
     }
 
     /// Fold the tail `[watermark, head)` into the base and advance the watermark (relieves

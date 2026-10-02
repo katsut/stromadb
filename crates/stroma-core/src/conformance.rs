@@ -22,6 +22,11 @@
 //! actual is judged `ABSENT` / `OK` as usual whatever the required path resolved to, and a resolved
 //! `distinct_from` collision is still `MISMATCH` when the required path is unresolved.
 //!
+//! Judgment is unfiltered by fact labels. A principal's label mask is applied to the finished
+//! verdict instead ([`mask_verdict`]): a verdict whose support set touches a fact the mask hides is
+//! `NOT_APPLICABLE` with `hidden_by_label` and carries no values, so a verdict never rests on, or
+//! leaks, a value the caller cannot read.
+//!
 //! The whole composition is a pure function of the snapshot, so the same snapshot always yields the
 //! same verdicts (sorted by subject id for stable output).
 //!
@@ -88,6 +93,7 @@ use std::cmp::Ordering;
 use crate::catalog::{Cardinality, Catalog, Range};
 use crate::fact::{FieldId, NodeId};
 use crate::fold::{ObjKey, Snapshot};
+use crate::mask::FactMask;
 use crate::query::{point_one, point_one_asof};
 
 /// A condition on a subject's one-cardinality value of `predicate`. With `as_of`, the value is read
@@ -301,16 +307,23 @@ pub enum NotApplicableReason {
     /// by its label. The two are deliberately indistinguishable, so the answer does not reveal that a
     /// hidden node exists.
     UnknownSubject,
+    /// The judgment read at least one fact the principal's label mask hides (a hidden row, or a
+    /// predicate whose label floor is hidden), so the row is withheld: no values, no verdict that
+    /// could rest on what the caller cannot see. Decided at read time over the verdict's support
+    /// set; it takes precedence over every verdict and every other reason except
+    /// `unknown_subject` and `not_subject_type`, which are decided from node attributes first.
+    HiddenByLabel,
 }
 
 impl NotApplicableReason {
     /// Every reason, in wire order.
-    pub const ALL: [NotApplicableReason; 5] = [
+    pub const ALL: [NotApplicableReason; 6] = [
         NotApplicableReason::OutOfScope,
         NotApplicableReason::NoMatchingCase,
         NotApplicableReason::RequiredUnresolved,
         NotApplicableReason::NotSubjectType,
         NotApplicableReason::UnknownSubject,
+        NotApplicableReason::HiddenByLabel,
     ];
 
     /// The stable wire name of this reason.
@@ -321,6 +334,7 @@ impl NotApplicableReason {
             NotApplicableReason::RequiredUnresolved => "required_unresolved",
             NotApplicableReason::NotSubjectType => "not_subject_type",
             NotApplicableReason::UnknownSubject => "unknown_subject",
+            NotApplicableReason::HiddenByLabel => "hidden_by_label",
         }
     }
 }
@@ -431,9 +445,11 @@ pub fn path_errors(rule: &Rule, cat: &Catalog) -> Vec<String> {
 /// Evaluate `rule` over `snap`, one verdict per subject of the rule's type, sorted by subject id.
 ///
 /// Post-authz: a subject whose ABAC label is not permitted by `principal_labels` is skipped (same
-/// bit-test as the other read ops). Names are resolved against `cat`; an unknown subject-type name
-/// yields no subjects, and an unknown predicate name makes its lookup yield nothing (the DB boundary
-/// rejects unknown names up front via [`unresolved_names`], so this is only a defensive fallback).
+/// bit-test as the other read ops), and a subject whose judgment read a fact hidden by the
+/// principal's fact labels answers `NOT_APPLICABLE` with [`NotApplicableReason::HiddenByLabel`]
+/// (see [`mask_verdict`]). Names are resolved against `cat`; an unknown subject-type name yields no
+/// subjects, and an unknown predicate name makes its lookup yield nothing (the DB boundary rejects
+/// unknown names up front via [`unresolved_names`], so this is only a defensive fallback).
 pub fn evaluate(
     snap: &Snapshot,
     cat: &Catalog,
@@ -443,6 +459,8 @@ pub fn evaluate(
     let Some(subject_ty) = cat.field_id(&rule.subject_type) else {
         return Vec::new();
     };
+    let mask = FactMask::new(cat, principal_labels);
+    let masking = mask.hides_any(snap);
     let mut subjects: Vec<NodeId> = snap
         .node_types
         .iter()
@@ -453,8 +471,72 @@ pub fn evaluate(
     subjects.sort_unstable();
     subjects
         .into_iter()
-        .map(|s| judge(snap, cat, rule, s))
+        .map(|s| judge_masked(snap, cat, rule, s, masking.then_some(&mask)))
         .collect()
+}
+
+/// Judge `s`; under a mask that hides something, trace the judgment and withhold the row when its
+/// support set touches a hidden fact.
+fn judge_masked(
+    snap: &Snapshot,
+    cat: &Catalog,
+    rule: &Rule,
+    s: NodeId,
+    mask: Option<&FactMask>,
+) -> Verdict {
+    let Some(mask) = mask else {
+        return judge(snap, cat, rule, s);
+    };
+    let mut keys: Vec<(NodeId, FieldId)> = Vec::new();
+    let v = judge_traced(snap, cat, rule, s, &mut |n, p| keys.push((n, p)));
+    mask_verdict(v, &Support::of(keys, snap), mask)
+}
+
+/// What a judgment read, as far as label masking needs it: every `(node, predicate)` key, and
+/// the union (one bit per label) of the access labels stored on those keys' live rows when the
+/// judgment ran. Keeping the labels with the verdict lets a maintained verdict, and the old side
+/// of a journaled change, be masked as of its own judgment rather than as of a later state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Support {
+    pub keys: Vec<(NodeId, FieldId)>,
+    pub row_labels: u32,
+}
+
+impl Support {
+    /// The support of a judgment that read `keys` over `snap`.
+    pub fn of(keys: Vec<(NodeId, FieldId)>, snap: &Snapshot) -> Self {
+        let row_labels = keys
+            .iter()
+            .filter_map(|k| snap.fact_labels.get(k))
+            .flat_map(|rows| rows.values())
+            .filter(|&&l| l <= crate::mask::MAX_LABEL)
+            .fold(0u32, |bits, &l| bits | (1 << l));
+        Support { keys, row_labels }
+    }
+}
+
+/// Apply a principal's fact-label mask to a verdict judged unfiltered: when its support touches a
+/// fact the mask hides — a stored row label the mask does not allow, or a read predicate whose
+/// label floor it does not allow — the verdict becomes `NOT_APPLICABLE` with
+/// [`NotApplicableReason::HiddenByLabel`] and carries no values. Otherwise it is returned
+/// unchanged. The test is conservative: a hidden row anywhere in a read key's history withholds
+/// the row even if that row did not decide the read, so a verdict never rests on a fact the caller
+/// cannot see. Rows already answering `unknown_subject` / `not_subject_type` (decided from node
+/// attributes) are left as they are.
+pub fn mask_verdict(v: Verdict, support: &Support, mask: &FactMask) -> Verdict {
+    if matches!(
+        v.reason,
+        Some(NotApplicableReason::UnknownSubject | NotApplicableReason::NotSubjectType)
+    ) {
+        return v;
+    }
+    let hidden = support.row_labels & !mask.allowed() != 0
+        || support.keys.iter().any(|k| mask.predicate_hidden(k.1));
+    if hidden {
+        Verdict::not_applicable(v.subject, NotApplicableReason::HiddenByLabel)
+    } else {
+        v
+    }
 }
 
 /// [`evaluate`] restricted to the given `subjects`: exactly one row per distinct listed id, sorted
@@ -472,6 +554,8 @@ pub fn evaluate_subjects(
     subjects: &[NodeId],
 ) -> Vec<Verdict> {
     let subject_ty = cat.field_id(&rule.subject_type);
+    let mask = FactMask::new(cat, principal_labels);
+    let mask = mask.hides_any(snap).then_some(mask);
     let mut picked: Vec<NodeId> = subjects.to_vec();
     picked.sort_unstable();
     picked.dedup();
@@ -481,7 +565,7 @@ pub fn evaluate_subjects(
             Some(_) if !visible(snap, s, principal_labels) => {
                 Verdict::not_applicable(s, NotApplicableReason::UnknownSubject)
             }
-            Some(&ty) if Some(ty) == subject_ty => judge(snap, cat, rule, s),
+            Some(&ty) if Some(ty) == subject_ty => judge_masked(snap, cat, rule, s, mask.as_ref()),
             Some(_) => Verdict::not_applicable(s, NotApplicableReason::NotSubjectType),
             None => Verdict::not_applicable(s, NotApplicableReason::UnknownSubject),
         })

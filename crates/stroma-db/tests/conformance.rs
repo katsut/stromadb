@@ -619,7 +619,7 @@ fn conformance_for_given_subjects() {
     assert_eq!(
         some["reasons"],
         json!({"out_of_scope": 1, "no_matching_case": 0, "required_unresolved": 0,
-               "not_subject_type": 1, "unknown_subject": 1})
+               "not_subject_type": 1, "unknown_subject": 1, "hidden_by_label": 0})
     );
     // `only` filters reason rows like any NOT_APPLICABLE row
     req["only"] = json!(["MISMATCH"]);

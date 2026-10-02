@@ -35,7 +35,8 @@ flowchart TB
   (int, float, text, bool).
 - **Nodes and edges are projections of facts.** A node carries a `type` and an access-control
   `label`; an edge is a `(subject, predicate, object)` fact and may carry its own **edge properties**
-  (a level, a role, an allocation) in a separate store.
+  (a level, a role, an allocation) in a separate store. A fact may carry its own access `label`
+  too, so one fact of a visible node can be hidden (§5).
 - **Predicates are declared** in a bounded catalog. Each predicate fixes a **cardinality**
   (`one` = functional, last-writer-wins; `many` = a set), a **domain** type, a **range** (a node type
   or a literal type), and optional **relationship properties** (`symmetric`, `transitive`, `inverse`).
@@ -73,7 +74,10 @@ Ingest is a batch of **newline-delimited JSON records**, one per line, applied i
   The range is a node type via `range` **or** a literal type via `range_value`
   (`text` | `int` | `float` | `bool`, default `text`). Relationship properties `symmetric` /
   `transitive` (bools) and `inverse` (the name of another predicate; may be a forward reference) are
-  evaluated at query time by `expand` and are never materialized.
+  evaluated at query time by `expand` and are never materialized. `label_floor` (an access label,
+  `0..=31`) is the least label every fact of the predicate carries (§5). It applies to existing
+  facts as soon as it is declared or changed, without rewriting them. A re-sent `pred_def` that
+  omits `label_floor` keeps the declared floor; `"label_floor": null` clears it.
 
 ### Data records
 
@@ -84,6 +88,7 @@ Ingest is a batch of **newline-delimited JSON records**, one per line, applied i
 {"fact": {"subject": 1, "predicate": "reports-to", "object": {"node": 2},
           "valid_from": 1704067200, "source": "hr"}}
 {"fact": {"subject": 1, "predicate": "member-of",  "object": {"node": 10}, "props": {"role": {"text": "lead"}}}}
+{"fact": {"subject": 1, "predicate": "email",      "object": {"text": "ada@example.com"}, "label": 2}}
 {"retract": {"subject": 1, "predicate": "member-of", "object": {"node": 10}}}
 {"close": {"subject": 1, "predicate": "reports-to", "valid_from": 1704067200, "source": "hr"}}
 ```
@@ -91,14 +96,17 @@ Ingest is a batch of **newline-delimited JSON records**, one per line, applied i
 - `node` — `id` (required); optional `type` (a declared type) and `label` (a `u64` ABAC bitmask, §5).
 - `fact` — assert `(subject, predicate, object)`. `object` is a typed value (below). Optional
   `valid_from` / `valid_to` (epoch seconds; the valid-time interval, default `[0, ∞)`), `source` (a
-  provenance name), and `props` (edge properties, a map of name → typed value).
+  provenance name), `props` (edge properties, a map of name → typed value), and `label` (an
+  access label `0..=31` on this fact, §5). Re-sending a fact with a different `label` appends a
+  new version and so relabels it; an identical re-send is a no-op.
 - `retract` — end a `many`-predicate membership (`subject, predicate, object`; optional `source`).
   Retracting an edge that is not present is a no-op (not counted). A `retract` on a `one`-predicate
   is an error: supersede the value by asserting a new one, or end it with `close`.
 - `close` — end a `one`-predicate's value with no successor (`subject, predicate`; optional
   `valid_from`, default `0`, and `source`). The current value becomes absent, and an as-of read at or
   after `valid_from` returns nothing (reads before it still see the prior value) — regardless of
-  arrival order. Errors on a `many`-predicate (use `retract`).
+  arrival order. Errors on a `many`-predicate (use `retract`). A `close` may carry `label` like a
+  fact; the close is then hidden along with the value it ends.
 
 ### Object / literal encoding
 
@@ -141,10 +149,13 @@ Discover what is queryable.
 {"op": "schema"}
 // response
 {"predicates": [{"name": "reports-to", "card": "one",
-                 "domain": "Person", "range": {"type": "Person"}}, …],
+                 "domain": "Person", "range": {"type": "Person"}, "label_floor": null}, …],
  "labels": [1, 2, …],
  "rules": ["manager-name-current", …]}
 ```
+
+`labels` lists every access label in use: on nodes, on stored facts, and as a predicate's
+`label_floor`.
 
 ### `rule`
 
@@ -328,6 +339,9 @@ Evaluate a declared rule into a **deterministic verdict per subject**.
     such a row, carries a `reason`:
     - `out_of_scope` — the subject falls outside `scope`.
     - `no_matching_case` — a banded rule matched no `cases` entry.
+    - `hidden_by_label` — the judgment read a fact the caller's `allowed_labels` hides (a fact
+      whose label, or whose predicate's `label_floor`, is not allowed). The row carries no
+      values. It says only that the verdict depends on facts the caller cannot read.
     - `required_unresolved` — `actual` is present but the required path resolves to no value (a
       hop along it has no value, its as-of anchor is missing, or no value was in effect at the
       anchor because the hop's history starts later or is closed over it), so equality cannot be
@@ -342,6 +356,12 @@ Precedence when the required path is unresolved: a missing `actual` is still `AB
 Otherwise it is `NOT_APPLICABLE` with `required_unresolved`. When the missing fact arrives, a
 watched rule re-judges the subject incrementally, because the read that came up empty is part of
 its support set.
+
+Judgment is unfiltered by fact labels; the caller's mask is applied to each finished verdict. Any
+verdict whose reads touch a fact the mask hides becomes `NOT_APPLICABLE` with `hidden_by_label`,
+taking precedence over every verdict and every other reason except `unknown_subject` and
+`not_subject_type`, which are decided from node attributes first. The check is conservative: a
+hidden version anywhere in a read value's history withholds the row.
 
 `subject: N` or `subjects: [N, …]` evaluates only those ids, in O(listed). The answer holds exactly
 one row per distinct requested id, sorted by id. A visible subject of the rule's type is judged as
@@ -369,7 +389,7 @@ and their rows carry the other reasons.
 //    "total": 3, "returned": 3, "truncated": false,
 //    "counts": {"OK": 0, "ABSENT": 0, "MISMATCH": 1, "NOT_APPLICABLE": 2},
 //    "reasons": {"out_of_scope": 0, "no_matching_case": 0, "required_unresolved": 0,
-//                "not_subject_type": 1, "unknown_subject": 1}}
+//                "not_subject_type": 1, "unknown_subject": 1, "hidden_by_label": 0}}
 ```
 
 Conditions (`scope`, `absent_when`, and a case's `when`) test one `one`-predicate value of the
@@ -434,9 +454,13 @@ the subjects whose paths run through it) — and journals the changes.
 - The change journal is bounded: a cursor that has fallen behind it gets `{"resync": true}` —
   re-watch (or read the full verdicts) instead of trusting a gap.
 - `allowed_labels` filters both surfaces per caller, exactly like `conformance` (maintenance itself
-  is unfiltered; visibility is decided at read time).
+  is unfiltered; visibility is decided at read time). Each side of a change is masked as of its own
+  judgment, so a write that only relabels a fact a verdict read shows up as a change to or from
+  `hidden_by_label` for a caller whose mask hides it.
 - The watch is **in-memory**: re-watch after a process restart. Re-declaring the rule (`rule_def`
-  with the same name) invalidates its watch — re-watch to pick up the new declaration.
+  with the same name) invalidates its watch — re-watch to pick up the new declaration. Changing a
+  predicate's `label_floor` invalidates every watch, since it changes what each caller may see
+  without writing a fact.
 
 ### `completeness`
 
@@ -463,9 +487,13 @@ Read the properties on a specific edge.
 {"props": {"role": "lead"}}
 ```
 
+Post-authz like `point`: a subject outside the caller's node labels answers `denied`, and the
+properties of an edge whose versions are all hidden by fact labels are absent.
+
 ### `stats` / `ingest`
 
-- `{"op": "stats"}` → engine counters: durable changelog head, schema/embedding counts, storage bytes.
+- `{"op": "stats"}` → engine counters: durable changelog head, schema/embedding counts, storage bytes,
+  nodes per node label (`labels`) and stored fact versions per fact label (`fact_labels`).
 - Ingest (§2) is submitted as a JSONL batch and returns
   `{"defs": D, "nodes": N, "facts": F, "retracts": R, "closes": C, "durable_head": H}`, durable on
   return. `retracts` counts only retracts that removed a present edge.
@@ -498,6 +526,18 @@ Read the properties on a specific edge.
   leak the existence of facts the caller can't see).
 - Access is **ABAC label-based**: a node's `label` is a bitmask, and a request's `allowed_labels`
   bitmask scopes what it may read (default: all).
+- **Per-fact labels.** A fact may carry its own `label`, and a predicate may declare a
+  `label_floor`. A fact's effective label is `max(label_floor, label)`; the caller sees the fact
+  when `allowed_labels` allows both the floor and the fact's own label, which for tier masks
+  (every label up to some level) is exactly "the effective label is allowed". Labels are numbered
+  by sensitivity, `0..=31`. The node stays visible under its own node label; only the hidden fact
+  is gone. Every read answers as the same read over a store in which the hidden facts were never
+  written: a hidden current value gives way to the latest visible one, a hidden edge is not
+  traversed by `expand` and drops from graph views, hidden versions drop from `timeline` and as-of
+  reads, `lookup` and `find` cannot match a hidden value, a node's display name falls back past a
+  hidden display predicate, and `retrieve_context` neither returns nor assembles hidden content.
+  The floor is resolved at read time, so declaring or changing it applies to existing facts
+  immediately. Embeddings are per node and follow the node label only.
 - **Namespaces** (the serving layer) sit outside labels: one server can front several databases,
   the `--db` directory as `default` plus ordinary database directories at `<db>/ns/<name>/`,
   addressed by the path prefix `/ns/<name>/`. Namespaces share nothing but the process — no type,

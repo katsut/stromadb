@@ -57,6 +57,10 @@ pub struct PredicateDef {
     /// generated predicate names are otherwise opaque, such as `backlog-cf-900001`). Presentation
     /// metadata, not a constraint: `None` means show the raw name, as before.
     pub label: Option<String>,
+    /// The least access label every fact of this predicate carries (see [`crate::mask`]): a
+    /// fact's effective label is the greater of this floor and the label it was written with.
+    /// Resolved at read time, so changing it re-labels existing facts without rewriting them.
+    pub label_floor: Option<u8>,
 }
 
 /// Errors from minimal constraint validation.
@@ -146,6 +150,7 @@ impl Catalog {
                 range,
                 display: false,
                 label: None,
+                label_floor: None,
             },
         );
         id
@@ -162,6 +167,13 @@ impl Catalog {
     pub fn set_label(&mut self, pred: FieldId, label: Option<String>) {
         if let Some(def) = self.predicates.get_mut(&pred) {
             def.label = label;
+        }
+    }
+
+    /// Set (or clear) a predicate's access-label floor. No-op for unknown ids.
+    pub fn set_label_floor(&mut self, pred: FieldId, floor: Option<u8>) {
+        if let Some(def) = self.predicates.get_mut(&pred) {
+            def.label_floor = floor;
         }
     }
 
