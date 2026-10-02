@@ -543,6 +543,89 @@
   finite `f64` (normal, subnormal, zero, and cent-valued amounts) reads back bit-exact after replay
   and is selected by a one-point `between` band.
 
+### D35. Per-fact access labels: a label on the row, a floor on the predicate, one masked view
+- **Context:** access labels were per node. A read under `allowed_labels` showed or hid a whole
+  node with every fact on it, so a person's name could not be shown while their email stayed
+  hidden: raising the node's label hid the person entirely.
+- **Decision:** a `fact` (and a `close`) may carry `label`, an integer `0..=31`, stored on the
+  version row it writes. A `pred_def` may declare `label_floor`, the least label every fact of the
+  predicate carries. A row's effective label is `max(floor, label)`. A reader sees the row when its
+  `allowed_labels` allows both the floor and the row's own label; under the intended tier masks
+  (every label up to some level) that is exactly "the effective label is allowed", and under an
+  arbitrary mask it is the stricter reading, so labeling a row above a hidden floor never shows
+  it. The node label keeps its meaning: it hides the node itself.
+- **Read semantics:** a read under a mask answers exactly as the same read over a store in which
+  the hidden rows were never written. A hidden head gives way to the latest visible row, a hidden
+  element drops out of its set, a hidden version drops out of every timeline and as-of read, and a
+  key whose rows are all hidden reads as never written. So `expand` does not cross a hidden edge,
+  `lookup` and `find` cannot match a hidden value, a display name falls back past a hidden display
+  predicate, `retrieve_context` neither returns nor assembles hidden content, and confidence
+  counts only visible corroboration. Edge properties follow their edge: on a key the mask affects
+  they are visible only while the edge has a visible row.
+- **One choke point:** `stroma-core::mask::Masked` wraps the pinned snapshot with the caller's
+  mask and implements the `Facts` trait, the only accessor of fact state that the read primitives
+  in `query` (and `ir`, `completeness`) use. `ReadState::facts(allowed_labels)` is the one place a
+  read op obtains it. The unmasked `Snapshot` implements the same trait, so masked and unmasked
+  reads run the same code. Reads stay lock-free (D19): the view borrows the pinned snapshot and
+  allocates nothing per request beyond the floor map.
+- **Cost:** the snapshot keeps the stored labels sparsely, per key by row order key, plus a count
+  per label. When the mask allows every stored label and every declared floor, every access is a
+  direct borrow of the snapshot, the same cost as before. Otherwise only keys with a hidden row or
+  a hidden floor are recomputed, and only when read. `/stats` stays O(1): it reports the label
+  counts the snapshot maintains (`fact_labels`).
+- **Floors are resolved at read time.** The stored row keeps only the label it was written with;
+  the floor comes from the read view's catalog. Changing a floor therefore re-labels every
+  existing fact of the predicate at once, with no write to the changelog and no history rewritten,
+  and lowering it again restores them. Unlike the presentation fields of a `pred_def`, the floor is
+  sticky: a re-sent definition that omits `label_floor` keeps it, so a schema re-send cannot
+  silently lower it, and an explicit `null` clears it.
+- **Storage:** the label is an attribute of the row, beside the write rather than inside it. A
+  WAL record of a row-writing kind (`SetOne`, `CloseOne`, `AddMany`, `CloseMany`) gains an optional
+  trailing `[1][label u8]`, written only when the row has a label. The fold keeps labels in a map
+  keyed by `(subject, predicate)` and the row's order key; since order keys are unique and a
+  row's label never changes, the map is a plain union and the fold stays a join-semilattice (D3).
+  `gc` drops labels at or below a hard-delete floor. The compaction snapshot gains an optional
+  trailing section with the labeled rows. Both additions are absent for unlabeled data, so such a
+  WAL or snapshot is byte-identical to the format before labels, and every old record and snapshot
+  decodes as unlabeled. An older binary meets a labeled record as an undecodable frame or a
+  snapshot it refuses, so it fails closed rather than serving a labeled fact unmasked; downgrading
+  a store that holds labels is not supported.
+- **Ingest:** no-op suppression (D22) compares the label too, so re-sending a value with a new
+  label appends a row and relabels it, while an identical re-send stays suppressed. Labels
+  outside `0..=31` are rejected.
+- **Conformance:** judgment stays unfiltered, both one-shot and maintained (D26). The caller's
+  mask is applied to the finished verdict: when its support set touches a fact the mask hides, the
+  row answers `NOT_APPLICABLE` with reason `hidden_by_label` and no values. Reporting the
+  masked-out store's verdict instead would be misleading: a hidden actual would read as `ABSENT`,
+  a hidden required value as `required_unresolved`, and a hidden scope value as `out_of_scope`.
+  The test is conservative, so a hidden row anywhere in a read key's history withholds the row.
+  Precedence: `unknown_subject` and `not_subject_type` are decided from node attributes first;
+  `hidden_by_label` then wins over every verdict and every other reason. The row reveals only that
+  the verdict depends on facts the caller cannot read, never their values. A floor that hides a
+  read predicate withholds every subject that reads it, which carries no per-fact information.
+  Maintained verdicts keep their support set and the labels on its rows at judgment time, so a
+  watch masks each verdict, and both sides of a journaled change, as of its own judgment. A write
+  that changes only the labels a verdict read is journaled as an unchanged verdict; a reader drops
+  an entry whose two sides look the same through its mask. A floor change writes no fact key, so it
+  invalidates every watch, as re-declaring a rule invalidates its own (re-watch).
+- **Schema:** `schema.labels` lists every label in use on nodes, on stored facts and as a floor,
+  so a client can offer every label a mask can hide something with. Each predicate reports its
+  `label_floor`.
+- **Limits:** embeddings are per node and follow the node label only. A vector computed from a
+  hidden literal still ranks its node in `search`, though the literal itself is never returned.
+  Text a fact label must protect should not be embedded into a visible node. `edge_props` is now
+  also denied for a subject outside the caller's node labels, matching `point`.
+- **Evidence:** `crates/stroma-db/tests/fact_labels.rs` — a node visible with its email hidden
+  (point, node detail, find, edge props), expand not crossing a hidden edge, timeline and as-of
+  hiding hidden versions, lookup not matching hidden values, display-name fallback, a floor
+  applied to existing facts with sticky and null semantics across a reopen, labels across reopen
+  and compaction, relabel and suppression, conformance `hidden_by_label` in the full,
+  subject-scoped and watched forms including a relabel-only change, and MCP tools under a capped
+  scope. A property test (48 random streams of labeled facts, closes and retracts with a random
+  floor and mask) asserts that every read op under the mask equals the same read over a second
+  store into which only the visible writes were ingested, before and after a compaction and
+  reopen. Unit tests cover the WAL label tail, the fold codec section, `gc`, and the mask rules.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |
