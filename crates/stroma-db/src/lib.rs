@@ -496,7 +496,8 @@ impl Db {
     ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
     /// - `{"op":"lookup","predicate":"name","value":V[,"type":"T"][,"limit":L][,"valid_at":T]}` →
     ///   `{"nodes":[{id,type,display}],"truncated":bool}` (exact match on a one-cardinality value;
-    ///   the external key → node id read)
+    ///   the external key → node id read); batched as `"queries":[{"value":V[,"valid_at":T]},..]`
+    ///   or `"values":[V,..]` → `{"results":[..]}`, one single-form answer per item in order
     pub fn query(&self, req: &Value) -> DbResult<Value> {
         // The two live-maintenance ops run against the write-side registry (they mutate / read the
         // maintained state under the write lock); everything else is a lock-free read on the
@@ -2066,13 +2067,18 @@ impl ReadState {
     /// Exact-value node resolution — the "external key → node id" read. Returns the nodes whose
     /// one-cardinality `predicate` currently equals `value` (or, with `valid_at`, equalled it at
     /// that valid-time instant), optionally restricted to a `type`, post-authz scoped (a masked node
-    /// is absent), ascending by id, cut to `limit` (default 10, capped at 100) with a `truncated`
-    /// flag. `value` takes a bare scalar (a string is text) or the ingest object form
-    /// (`{"text": ..}`, `{"int": ..}`, `{"node": N}`); `equals` is accepted as an alias.
+    /// is absent, a hidden fact never matches), ascending by id, cut to `limit` (default 10, capped
+    /// at 100) with a `truncated` flag. `value` takes a bare scalar (a string is text) or the ingest
+    /// object form (`{"text": ..}`, `{"int": ..}`, `{"node": N}`); `equals` is accepted as an alias.
     ///
-    /// Cost: a scan of the predicate's keys in the snapshot — O(one-cardinality keys) for a
-    /// current read, O(history keys) plus one as-of probe per key of that predicate for `valid_at`.
-    /// There is no value index; see DECISIONS D28.
+    /// Batch form: `queries: [{value, valid_at?}, ..]` (each item's `valid_at` defaults to the
+    /// top-level one) or the shorthand `values: [V, ..]`, at most [`LOOKUP_BATCH_MAX`] items,
+    /// answers `{"results": [..]}` with one single-form response per item, in request order, all
+    /// read from one pinned snapshot under one mask.
+    ///
+    /// Cost: O(log n + candidates) per value through the snapshot's reverse value index, where the
+    /// candidates are the subjects with a live row (current or superseded) of that value; see
+    /// DECISIONS D36.
     fn lookup(&self, req: &Value) -> DbResult<Value> {
         let pname = req["predicate"]
             .as_str()
@@ -2085,16 +2091,6 @@ impl ReadState {
         if !matches!(self.schema.cardinality.get(pname), Some(Cardinality::One)) {
             return Err(format!("lookup.predicate must be one-cardinality: {pname}"));
         }
-        let raw = if req["value"].is_null() {
-            &req["equals"]
-        } else {
-            &req["value"]
-        };
-        let want = match raw {
-            Value::Null => return Err("lookup.value missing".into()),
-            Value::Object(_) => obj_key(raw)?,
-            _ => value_key(raw)?,
-        };
         let ty = match req["type"].as_str() {
             Some(t) => Some(
                 self.schema
@@ -2112,40 +2108,55 @@ impl ReadState {
             label_visible(&self.snap, n, labels)
                 && ty.is_none_or(|t| self.snap.node_types.get(&n) == Some(&t))
         };
-        // Both maps are keyed (node, predicate), so each node appears at most once, in id order.
-        // Read through the caller's fact view: a hidden value is not matchable.
-        let mut ids: Vec<NodeId> = Vec::new();
-        match valid_at {
-            None => facts.for_each_one(.., |&(n, p), v| {
-                if p == pid && v.as_ref() == Some(&want) && keep(n) {
-                    ids.push(n);
-                }
-            }),
-            Some(at) => facts.for_each_one_key(|&(n, p)| {
-                if p == pid
-                    && keep(n)
-                    && query::point_one_asof(&facts, n, pid, at).as_ref() == Some(&want)
-                {
-                    ids.push(n);
-                }
-            }),
-        }
-        let nodes: Vec<Value> = ids
-            .iter()
-            .take(limit)
-            .map(|&n| {
-                json!({
-                    "id": n,
-                    "type": self.snap.node_types.get(&n).and_then(|&t| self.schema.cat.name(t)),
-                    "display": self.display_name(&facts, n),
+        let answer = |want: &ObjKey, at: Option<i64>| {
+            let ids = query::lookup_one(&facts, pid, want, at, keep);
+            let nodes: Vec<Value> = ids
+                .iter()
+                .take(limit)
+                .map(|&n| {
+                    json!({
+                        "id": n,
+                        "type": self.snap.node_types.get(&n).and_then(|&t| self.schema.cat.name(t)),
+                        "display": self.display_name(&facts, n),
+                    })
                 })
-            })
-            .collect();
-        let mut resp = json!({ "nodes": nodes, "truncated": ids.len() > limit });
-        if let Some(at) = valid_at {
-            resp["valid_at"] = json!(at);
+                .collect();
+            let mut resp = json!({ "nodes": nodes, "truncated": ids.len() > limit });
+            if let Some(at) = at {
+                resp["valid_at"] = json!(at);
+            }
+            resp
+        };
+        let batch: Option<Vec<(ObjKey, Option<i64>)>> = match (&req["queries"], &req["values"]) {
+            (Value::Null, Value::Null) => None,
+            (Value::Array(qs), Value::Null) => Some(
+                qs.iter()
+                    .map(|q| Ok((lookup_value(q)?, q["valid_at"].as_i64().or(valid_at))))
+                    .collect::<DbResult<_>>()?,
+            ),
+            (Value::Null, Value::Array(vs)) => Some(
+                vs.iter()
+                    .map(|v| Ok((lookup_scalar(v)?, valid_at)))
+                    .collect::<DbResult<_>>()?,
+            ),
+            _ => return Err("lookup takes one of value, queries (array) or values (array)".into()),
+        };
+        match batch {
+            None => Ok(answer(&lookup_value(req)?, valid_at)),
+            Some(items) => {
+                if !req["value"].is_null() || !req["equals"].is_null() {
+                    return Err("lookup takes one of value, queries or values".into());
+                }
+                if items.len() > LOOKUP_BATCH_MAX {
+                    return Err(format!(
+                        "lookup batch too large: {} items (max {LOOKUP_BATCH_MAX})",
+                        items.len()
+                    ));
+                }
+                let results: Vec<Value> = items.iter().map(|(v, at)| answer(v, *at)).collect();
+                Ok(json!({ "results": results }))
+            }
         }
-        Ok(resp)
     }
 
     /// Shared type-aware hybrid search: builds the pipeline from a JSON request (`type`, `vector`,
@@ -2833,6 +2844,27 @@ fn value_key(v: &Value) -> DbResult<ObjKey> {
             "edge-property value must be a literal: a number/string/bool, or {int|float|text|bool}"
                 .into(),
         ),
+    }
+}
+
+/// The most items one batched `lookup` (`queries` / `values`) answers.
+const LOOKUP_BATCH_MAX: usize = 1000;
+
+/// A lookup value: a bare scalar (a string is text) or the ingest object form.
+fn lookup_scalar(raw: &Value) -> DbResult<ObjKey> {
+    match raw {
+        Value::Null => Err("lookup.value missing".into()),
+        Value::Object(_) => obj_key(raw),
+        _ => value_key(raw),
+    }
+}
+
+/// The value a lookup request (or one batch item) asks for: `value`, or its alias `equals`.
+fn lookup_value(req: &Value) -> DbResult<ObjKey> {
+    if req["value"].is_null() {
+        lookup_scalar(&req["equals"])
+    } else {
+        lookup_scalar(&req["value"])
     }
 }
 

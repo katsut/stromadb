@@ -41,6 +41,37 @@ pub fn point_one_asof(
         .and_then(|(_ok, obj, _vf, _vt)| obj.clone())
 }
 
+/// Exact-value reverse read of a cardinality-One `predicate`: the subjects, ascending, whose value
+/// equals `value` — the current value, or with `at` the value in effect at valid-time `at`
+/// ([`point_one_asof`]) — and that `keep` admits. Read through `snap`, so under a label mask a
+/// hidden row never matches and a hidden head gives way to the latest visible row, exactly as
+/// [`point_one`] / [`point_one_asof`] answer for each subject.
+///
+/// Candidates come from the snapshot's reverse value index ([`Snapshot::one_value_subjects`]),
+/// which holds every subject with a live row of `value` (unmasked, by hash: a superset); each is
+/// confirmed by one point read. Cost O(log n + candidates), independent of how many other keys
+/// the snapshot holds.
+///
+/// [`Snapshot::one_value_subjects`]: crate::fold::Snapshot::one_value_subjects
+pub fn lookup_one(
+    snap: &impl Facts,
+    predicate: FieldId,
+    value: &ObjKey,
+    at: Option<i64>,
+    mut keep: impl FnMut(NodeId) -> bool,
+) -> Vec<NodeId> {
+    snap.snapshot()
+        .one_value_subjects(predicate, value)
+        .filter(|&n| {
+            let v = match at {
+                None => point_one(snap, n, predicate),
+                Some(at) => point_one_asof(snap, n, predicate, at),
+            };
+            v.as_ref() == Some(value) && keep(n)
+        })
+        .collect()
+}
+
 /// The winning version row of a cardinality-One `(subject, predicate)` — the greatest-`OrderKey`
 /// live row, which is the last entry of the ascending `one_history`. `None` when the key has no
 /// history. This is the head every current-value read resolves; the ingest boundary also compares
