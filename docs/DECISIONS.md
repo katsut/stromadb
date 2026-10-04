@@ -371,6 +371,9 @@
 - **Revisit when:** lookups become a hot path on large namespaces. The upgrade is a
   `(predicate, value) → nodes` map for predicates declared `key: true` on `pred_def`, maintained on
   the write side next to the node-label map. The op contract stays the same.
+- **Superseded in part by D36:** the scan is replaced by a reverse value index over every
+  one-cardinality predicate, maintained with the snapshot, with no schema flag. The op contract is
+  unchanged.
 
 ### D29. Conformance answers are scoped to subjects and bounded by default over MCP
 - **Context:** `conformance` returned a verdict for every subject of the rule's type, out-of-scope
@@ -625,6 +628,46 @@
   floor and mask) asserts that every read op under the mask equals the same read over a second
   store into which only the visible writes were ingested, before and after a compaction and
   reopen. Unit tests cover the WAL label tail, the fold codec section, `gc`, and the mask rules.
+
+### D36. `lookup` reads a reverse value index maintained with the snapshot, and takes batches
+- **Context:** an as-of `lookup` (D28) walked every one-cardinality history key and probed the
+  predicate's keys, so each call cost O(history keys) whatever the answer. A workload that resolves
+  thousands of keys at given instants, such as re-pointing edges after merging nodes, spent most of
+  its time there: about 0.42 ms per call over 30k one-keys, and one HTTP round trip per value.
+- **Decision:** the snapshot carries `one_values`, a `BTreeSet<(predicate, value_hash, subject)>`
+  with one entry per distinct value that any live row of a One key carries, current or
+  superseded. `lookup` takes the index range for `(predicate, hash(value))` as candidates, in
+  ascending subject order, and confirms each with the same point read the scan used:
+  `point_one` for a current lookup, `point_one_asof` for `valid_at`, through the caller's masked
+  view (`query::lookup_one`). The op also takes a batch, `queries: [{value, valid_at?}]` (an item
+  without `valid_at` uses the top-level one) or `values: [V, ..]`, and answers
+  `{results: [..]}`, one single-form answer per item in request order. All items are read from one
+  pinned snapshot under one mask. A batch holds at most 1000 items.
+- **Why it is sound:** masking only removes rows and the index holds every live row's value, so
+  the candidates are a superset of the subjects that can match under any mask. Every candidate is
+  then decided by the same read that defines the answer. A hash collision or a value that only a
+  hidden row carries yields a candidate that the point read rejects, so a hidden value never
+  matches (D35) and the answers equal the scan's exactly. The node mask and type filter apply per
+  candidate as before. A hash, not the value, keeps an entry at 24 bytes with no copy of the text.
+  A crafted collision can only add candidates to the lookups of that one hash.
+- **Consistency:** the index is derived state, written only by `observe_key_into`, which removes
+  the key's old entries with its old rows and inserts the new ones. Full observation, incremental
+  refresh after a write, `gc`, compaction and reopen all go through it, so the index is rebuilt
+  from the fold. It is never persisted, so the WAL and snapshot formats are unchanged. Reads stay
+  lock-free over the pinned snapshot (D19).
+- **Cost:** a lookup is O(log n + candidates), where candidates are the subjects that ever held
+  the value. Memory is at most one 24-byte entry per live One row, plus B-tree overhead. A
+  refresh is O(rows of each touched key), the cost of re-projecting the key. The index is part of
+  the snapshot that is cloned when a write lands while a reader still pins the previous one, so
+  that clone grows by the same amount.
+- **Evidence:** `crates/stroma-core/tests/lookup_index.rs` is a property test over random
+  histories with sets, closes, hard deletes, row labels, a random floor and a random mask. It
+  asserts that the index answers every value, current and at every instant, exactly as the scan
+  does, that the incrementally maintained index equals a full observation, and that a gc and
+  codec round trip rebuilds the same index. `crates/stroma-db/tests/lookup.rs` covers the batched
+  forms, hidden facts and reopen with compaction. With 6,000 subjects, 3 key versions each and 30k
+  one-keys, `lookup_bench` measures 5,300 single as-of lookups going from 417 µs to 1.4 µs per call,
+  and current lookups from 61 µs to 1.1 µs.
 
 ## Core SLOs (the "unchanging core" bar) — measured
 
