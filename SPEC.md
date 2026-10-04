@@ -181,6 +181,36 @@ names the anchor predicate on the subject. A banded rule has ordered first-match
 `required`. Conditions test `equals` or a numeric range (`gt`/`gte`/`lt`/`lte`, `between`) and may
 carry their own `as_of` anchor.
 
+### `lookup`
+
+Resolve an external key to node ids: the nodes whose `one`-predicate equals a value, now or at a
+valid-time instant.
+
+```jsonc
+// request — value is a bare scalar (a string is text) or {"text"|"int"|"float"|"bool"|"node": ..}
+{"op": "lookup", "predicate": "issue-key", "value": "PROJ-123", "type": "Issue", "limit": 10}
+{"op": "lookup", "predicate": "issue-key", "value": "PROJ-123", "valid_at": 1704067200}
+// response — ascending by id; valid_at echoed for an as-of lookup
+{"nodes": [{"id": 1005, "type": "Issue", "display": "Fix login"}], "truncated": false}
+// batch — each item its own value and instant (valid_at defaults to the top-level one) …
+{"op": "lookup", "predicate": "issue-key", "valid_at": 1704067200,
+ "queries": [{"value": "PROJ-1"}, {"value": "PROJ-2", "valid_at": 1700000000}]}
+// … or many values at one instant
+{"op": "lookup", "predicate": "issue-key", "values": ["PROJ-1", "PROJ-2"]}
+// batch response — one single-form answer per item, in request order
+{"results": [{"nodes": [..], "truncated": false, "valid_at": 1704067200}, …]}
+```
+
+- Exact match on the current value, or with `valid_at` on the value in effect at that instant (as
+  `point … valid_at`). `equals` is an alias of `value`. `limit` defaults to 10 and is capped at
+  100 per answer.
+- Post-authz: a node the mask hides is absent, and a hidden fact never matches. A hidden current
+  row gives way to the latest visible one.
+- A request takes exactly one of `value`, `queries` or `values`. A batch holds at most 1000 items
+  and is answered from one snapshot.
+- Cost: O(log n + candidates) per value through a reverse value index, where candidates are the
+  nodes that ever held the value.
+
 ### `point`
 
 Read the value(s) of a `(subject, predicate)`.

@@ -309,6 +309,47 @@ pub struct Snapshot {
     /// Number of live labeled rows per stored label, over `fact_labels` — maintained with it, so
     /// "does this mask hide any stored row" is answered without a scan.
     pub fact_label_counts: BTreeMap<u8, u64>,
+    /// Reverse value index over `one_history`: one entry `(predicate, value_hash(value), subject)`
+    /// per distinct value carried by any live row of the One key `(subject, predicate)`, whether
+    /// current or superseded. Maintained with `one_history` (see [`Fold::observe_key_into`]), so it
+    /// is derived state: never persisted, rebuilt on every open and compaction. It is unmasked and
+    /// keyed by a hash, so it yields a superset of the subjects that can match a value (current or
+    /// as-of, under any mask); a reader confirms each candidate through its [`crate::mask::Facts`]
+    /// view. See [`Snapshot::one_value_subjects`].
+    pub one_values: BTreeSet<(FieldId, u64, NodeId)>,
+}
+
+/// The hash the [`Snapshot::one_values`] index keys a One value by (FxHash of the [`ObjKey`]:
+/// deterministic across processes). Collisions only add candidates, which a reader filters out.
+pub fn value_hash(v: &ObjKey) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = crate::hash::FxHasher::default();
+    v.hash(&mut h);
+    h.finish()
+}
+
+impl Snapshot {
+    /// The subjects, ascending, whose One key of `predicate` has a live row (current or
+    /// superseded) carrying a value that hashes like `value`: a superset of every subject whose
+    /// current or as-of value of `predicate` equals `value` under any label mask. O(log n +
+    /// matches) over [`Snapshot::one_values`].
+    pub fn one_value_subjects(
+        &self,
+        predicate: FieldId,
+        value: &ObjKey,
+    ) -> impl Iterator<Item = NodeId> + '_ {
+        let h = value_hash(value);
+        self.one_values
+            .range((predicate, h, NodeId::MIN)..=(predicate, h, NodeId::MAX))
+            .map(|&(_, _, n)| n)
+    }
+}
+
+/// The distinct value hashes a One key's rows carry (a close row carries none).
+fn row_value_hashes(rows: &[VersionRow]) -> BTreeSet<u64> {
+    rows.iter()
+        .filter_map(|(_, obj, ..)| obj.as_ref().map(value_hash))
+        .collect()
 }
 
 impl Fold {
@@ -693,7 +734,11 @@ impl Fold {
     /// has no live state (mirrors observe's omission).
     pub fn observe_key_into(&self, k: &(NodeId, FieldId), snap: &mut Snapshot) {
         snap.one.remove(k);
-        snap.one_history.remove(k);
+        if let Some(old) = snap.one_history.remove(k) {
+            for h in row_value_hashes(&old) {
+                snap.one_values.remove(&(k.1, h, k.0));
+            }
+        }
         snap.many.remove(k);
         snap.many_history.remove(k);
         snap.edge_props.remove(k);
@@ -741,12 +786,14 @@ impl Fold {
                     .collect();
                 if let Some((_, top)) = live.last() {
                     snap.one.insert(*k, top.object.clone());
-                    snap.one_history.insert(
-                        *k,
-                        live.iter()
-                            .map(|(ok, v)| (*ok, v.object.clone(), v.valid_from, v.valid_to))
-                            .collect(),
-                    );
+                    let rows: Vec<VersionRow> = live
+                        .iter()
+                        .map(|(ok, v)| (*ok, v.object.clone(), v.valid_from, v.valid_to))
+                        .collect();
+                    for h in row_value_hashes(&rows) {
+                        snap.one_values.insert((k.1, h, k.0));
+                    }
+                    snap.one_history.insert(*k, rows);
                 }
                 for (ok, _) in &live {
                     note(ok);

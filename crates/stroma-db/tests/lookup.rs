@@ -1,5 +1,6 @@
 //! `lookup`: exact-value node resolution (external key → node id) over the query op and the MCP
-//! tool — current vs as-of values, the type filter, the limit, and the ABAC label mask.
+//! tool — current vs as-of values, the type filter, the limit, the ABAC label mask, the batched
+//! forms, per-fact labels, and reopen / compaction.
 
 use serde_json::{Value, json};
 use stromadb_store::{Db, mcp};
@@ -214,5 +215,151 @@ fn lookup_is_an_mcp_tool_under_the_scope_cap() {
     assert!(!err, "{text}");
     let v: Value = serde_json::from_str(&text).unwrap();
     assert!(ids(&v).is_empty(), "{text}");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+fn results(r: &Value) -> Vec<Vec<u64>> {
+    r["results"].as_array().unwrap().iter().map(ids).collect()
+}
+
+#[test]
+fn lookup_batches_values_and_instants_in_request_order() {
+    let (dir, db) = fresh("batch");
+    // `values`: many values under one top-level valid_at (or none = current)
+    let r = db
+        .query(&json!({"op":"lookup","predicate":"issue-key",
+                       "values":["PROJ-9","PROJ-1",{"text":"PROJ-3"},"NOPE-1"]}))
+        .unwrap();
+    assert_eq!(
+        results(&r),
+        vec![vec![10], vec![], vec![12, 20], vec![]],
+        "{r}"
+    );
+    assert!(r["results"][0].get("valid_at").is_none(), "{r}");
+    let r = db
+        .query(&json!({"op":"lookup","predicate":"issue-key","valid_at":50,
+                       "values":["PROJ-9","PROJ-1"]}))
+        .unwrap();
+    assert_eq!(results(&r), vec![vec![], vec![10]], "{r}");
+    assert_eq!(r["results"][1]["valid_at"], json!(50));
+
+    // `queries`: each item its own value and instant; the top-level valid_at is the default
+    let r = db
+        .query(
+            &json!({"op":"lookup","predicate":"issue-key","valid_at":150,"queries":[
+                {"value":"PROJ-1","valid_at":50},
+                {"value":"PROJ-1"},
+                {"equals":"PROJ-9"},
+                {"value":"PROJ-1","valid_at":5},
+            ]}),
+        )
+        .unwrap();
+    assert_eq!(results(&r), vec![vec![10], vec![], vec![10], vec![]], "{r}");
+    assert_eq!(r["results"][1]["valid_at"], json!(150));
+
+    // each item is the single-form answer: type filter, limit and truncation apply per item
+    let r = db
+        .query(
+            &json!({"op":"lookup","predicate":"issue-key","type":"Issue","limit":1,
+                       "values":["PROJ-3","PROJ-9"]}),
+        )
+        .unwrap();
+    assert_eq!(results(&r), vec![vec![12], vec![10]], "{r}");
+    let single = db
+        .query(&json!({"op":"lookup","predicate":"issue-key","type":"Issue","limit":1,"value":"PROJ-3"}))
+        .unwrap();
+    assert_eq!(r["results"][0], single);
+
+    // the node mask applies to every item
+    let r = db
+        .query(
+            &json!({"op":"lookup","predicate":"issue-key","allowed_labels":1,
+                       "values":["PROJ-2","PROJ-9"]}),
+        )
+        .unwrap();
+    assert_eq!(results(&r), vec![vec![], vec![10]], "{r}");
+
+    let too_many: Vec<Value> = (0..1001).map(|i| json!(format!("K-{i}"))).collect();
+    let bad = [
+        json!({"op":"lookup","predicate":"issue-key","value":"PROJ-9","values":["PROJ-9"]}),
+        json!({"op":"lookup","predicate":"issue-key","values":["PROJ-9"],"queries":[]}),
+        json!({"op":"lookup","predicate":"issue-key","values":"PROJ-9"}),
+        json!({"op":"lookup","predicate":"issue-key","queries":[{"valid_at":5}]}),
+        json!({"op":"lookup","predicate":"issue-key","values":too_many}),
+    ];
+    for req in bad {
+        assert!(db.query(&req).is_err(), "expected an error for {req}");
+    }
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn lookup_never_matches_a_hidden_fact_in_either_form() {
+    let (dir, db) = fresh("fact_label");
+    // node 12 is re-keyed PROJ-3 → PROJ-7 at t=200 by a fact labeled 2
+    db.ingest_str(
+        "{\"fact\":{\"subject\":12,\"predicate\":\"issue-key\",\"object\":{\"text\":\"PROJ-7\"},\"valid_from\":200,\"label\":2}}\n",
+    )
+    .unwrap();
+    let public = |req: Value| {
+        let mut req = req;
+        req["allowed_labels"] = json!(1);
+        db.query(&req).unwrap()
+    };
+    // the hidden head gives way to the visible row: PROJ-3 is still current for this reader
+    let r = public(json!({"op":"lookup","predicate":"issue-key","values":["PROJ-7","PROJ-3"]}));
+    assert_eq!(results(&r), vec![vec![], vec![12, 20]], "{r}");
+    let r = public(json!({"op":"lookup","predicate":"issue-key","value":"PROJ-7","valid_at":250}));
+    assert!(ids(&r).is_empty(), "{r}");
+    let r = db
+        .query(&json!({"op":"lookup","predicate":"issue-key","queries":[
+            {"value":"PROJ-7","valid_at":250},{"value":"PROJ-3","valid_at":250},{"value":"PROJ-3","valid_at":150}]}))
+        .unwrap();
+    assert_eq!(results(&r), vec![vec![12], vec![20], vec![12, 20]], "{r}");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn lookup_answers_the_same_across_reopen_and_compaction() {
+    let (dir, db) = fresh("reopen");
+    // more history after the fixture: a re-key and a close
+    db.ingest_str(concat!(
+        "{\"fact\":{\"subject\":11,\"predicate\":\"issue-key\",\"object\":{\"text\":\"PROJ-5\"},\"valid_from\":300}}\n",
+        "{\"close\":{\"subject\":12,\"predicate\":\"issue-key\",\"valid_from\":400}}\n",
+    ))
+    .unwrap();
+    let probe = json!({"op":"lookup","predicate":"issue-key","queries":[
+        {"value":"PROJ-1","valid_at":50}, {"value":"PROJ-9"}, {"value":"PROJ-2"},
+        {"value":"PROJ-2","valid_at":250}, {"value":"PROJ-5"}, {"value":"PROJ-3"},
+        {"value":"PROJ-3","valid_at":350}, {"value":"PROJ-3","valid_at":450},
+    ]});
+    let before = db.query(&probe).unwrap();
+    assert_eq!(
+        results(&before),
+        vec![
+            vec![10],
+            vec![10],
+            vec![],
+            vec![11],
+            vec![11],
+            vec![20],
+            vec![12, 20],
+            vec![20]
+        ],
+        "{before}"
+    );
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(db.query(&probe).unwrap(), before, "reopen (WAL replay)");
+    db.compact().unwrap();
+    assert_eq!(db.query(&probe).unwrap(), before, "after compaction");
+    drop(db);
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(
+        db.query(&probe).unwrap(),
+        before,
+        "reopen from the compaction snapshot"
+    );
+    drop(db);
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
