@@ -61,6 +61,10 @@ use stromadb_core::version::{ReadMode, VersionVector};
 /// Shared MCP tool schemas + JSON-RPC dispatch (used by the stdio binary and the serve endpoint).
 pub mod mcp;
 
+/// The change feed: a bounded journal of what each durable batch touched, read after authz.
+pub mod feed;
+pub use feed::Feed;
+
 pub type DbResult<T> = Result<T, String>;
 
 /// What a compaction did — the covered seqno and the resulting on-disk footprint.
@@ -116,6 +120,9 @@ struct StoredRule {
 pub struct Db {
     write: Mutex<WriteState>,
     read: RwLock<Arc<ReadState>>,
+    /// The change feed journal, shared with the write path that fills it. Its own lock is held
+    /// only to append a batch or copy out a read, so a feed read never waits for a write.
+    feed: Arc<Mutex<feed::Journal>>,
     /// Exclusive advisory lock on `<dir>/LOCK`, held for the lifetime of this handle so a second
     /// process (or a second open in this process) cannot replay/append the same directory. The OS
     /// releases the lock when the handle is dropped or the process exits.
@@ -206,6 +213,9 @@ struct WriteState {
     /// Per-batch default provenance ([`Db::ingest_str_as`]): stamped on fact/retract/close lines
     /// that carry no `source` of their own. Set for the duration of one ingest call, then cleared.
     default_source: Option<String>,
+    /// The change feed journal (shared with [`Db`]) and what this batch noted for it so far.
+    feed: Arc<Mutex<feed::Journal>>,
+    feed_pending: feed::Pending,
     n_max: usize,
 }
 
@@ -324,6 +334,7 @@ impl Db {
         for &l in node_label_w.values() {
             *label_counts.entry(l).or_insert(0) += 1;
         }
+        let journal = Arc::new(Mutex::new(feed::Journal::new(eng.durable_head())));
         let mut w = WriteState {
             dir: dir.to_path_buf(),
             eng,
@@ -341,6 +352,8 @@ impl Db {
             index_retrained: false,
             live_rules: HashMap::new(),
             default_source: None,
+            feed: journal.clone(),
+            feed_pending: feed::Pending::default(),
             n_max,
         };
         w.rebuild_index();
@@ -349,6 +362,7 @@ impl Db {
         Ok(Db {
             write: Mutex::new(w),
             read: RwLock::new(rs),
+            feed: journal,
             _lock: lock,
         })
     }
@@ -413,6 +427,8 @@ impl Db {
         w.index = Arc::new(None);
         w.index_retrained = false;
         w.live_rules.clear();
+        w.feed_pending.clear();
+        w.feed.lock().unwrap_or_else(|e| e.into_inner()).reset();
         w.persist_counts();
         self.publish(&w);
         Ok(())
@@ -628,6 +644,23 @@ impl Db {
             })
             .collect();
         Ok(json!({ "changes": changes, "cursor": head }))
+    }
+
+    /// The change feed after cursor `since` (a durable head) as a principal with `allowed_labels`
+    /// sees it: per batch, the nodes it touched with their type and the visible predicates written
+    /// on them, and whether each node is new. Answers up to the current read view's head, with
+    /// node labels and per-fact labels (D35) applied to that view; never values. A cursor the
+    /// bounded journal cannot answer exactly gets `resync` (see [`Feed`]). Lock-free with respect
+    /// to writes: it pins the read view and holds the journal lock only while copying.
+    pub fn changes_since(&self, since: u64, allowed_labels: u32) -> Feed {
+        let rs = self.read_state();
+        self.feed.lock().unwrap_or_else(|e| e.into_inner()).read(
+            since,
+            rs.durable_head,
+            &rs.snap,
+            &rs.schema.cat,
+            allowed_labels,
+        )
     }
 
     /// Pin and return the current read view (an `Arc<ReadState>`). Cheap — a momentary lock + an
@@ -1037,6 +1070,7 @@ impl WriteState {
                     Some(kind) => {
                         batch.push((source, kind, label));
                         dirty.insert((subject, predicate));
+                        self.feed_pending.note((subject, predicate), label);
                         s.facts += 1; // appended fact writes only — a suppressed no-op is not a fact
                     }
                     None => s.suppressed += 1,
@@ -1066,6 +1100,8 @@ impl WriteState {
                             None,
                         ));
                         dirty.insert((subject, predicate));
+                        // a property follows its edge: visible to whoever sees this fact's row
+                        self.feed_pending.note((subject, predicate), label);
                     }
                 }
                 if batch.len() >= 10_000 {
@@ -1149,6 +1185,7 @@ impl WriteState {
                     Some(kind) => {
                         batch.push((source, kind, label));
                         dirty.insert((subject, predicate));
+                        self.feed_pending.note((subject, predicate), label);
                         s.closes += 1;
                     }
                     None => s.suppressed += 1,
@@ -1181,6 +1218,20 @@ impl WriteState {
                     .map(str::to_string)
                     .or_else(|| self.default_source.clone());
                 let source = self.source_id(src_name.as_deref())?;
+                // the feed shows a retract to whoever could see the element: note the labels of
+                // the element's rows (the state is materialized, flushed just above)
+                let element_labels: Vec<Option<u8>> = {
+                    let snap = self.eng.snapshot_arc();
+                    snap.many_history
+                        .get(&(subject, predicate))
+                        .and_then(|m| m.get(&object))
+                        .map(|rows| {
+                            rows.iter()
+                                .map(|(ok, ..)| row_label(&snap, subject, predicate, ok))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
                 let removed = self
                     .eng
                     .retract_edge(source, subject, predicate, object)
@@ -1188,6 +1239,9 @@ impl WriteState {
                 // count only retracts that removed a present edge (absent edge → no-op, not counted)
                 if removed.is_some() {
                     s.retracts += 1;
+                    for l in element_labels {
+                        self.feed_pending.note((subject, predicate), l);
+                    }
                     // the remove sits in the un-materialized tail until the next flush, so the
                     // materialized state is stale for this key — mark it dirty
                     dirty.insert((subject, predicate));
@@ -1236,6 +1290,7 @@ impl WriteState {
                 self.node_type_w.insert(id, tid);
                 if !counted {
                     self.node_count += 1;
+                    self.feed_pending.note_new(id);
                     counted = true;
                 }
                 wrote = true;
@@ -1258,6 +1313,7 @@ impl WriteState {
                 *self.label_counts.entry(label).or_insert(0) += 1;
                 if !counted {
                     self.node_count += 1;
+                    self.feed_pending.note_new(id);
                 }
                 wrote = true;
             }
@@ -1277,16 +1333,27 @@ impl WriteState {
         Ok(())
     }
 
-    /// Drain the engine tail and keep every watched rule current. Every tail drain on the write
-    /// path MUST go through here — a drain that bypassed the feed would silently detach the
-    /// maintained verdict maps from the graph (their support keys would never fire again).
+    /// Drain the engine tail, journal what it touched for the change feed, and keep every
+    /// watched rule current. Every tail drain on the write path MUST go through here — a drain
+    /// that bypassed it would silently detach the maintained verdict maps from the graph (their
+    /// support keys would never fire again) and leave a gap in the change feed.
     fn materialize_live(&mut self) {
         let (keys, nodes) = self.eng.materialize_tracked_with_nodes();
-        if self.live_rules.is_empty() || (keys.is_empty() && nodes.is_empty()) {
+        if keys.is_empty() && nodes.is_empty() {
+            self.feed_pending.clear();
+            return;
+        }
+        let head = self.eng.durable_head();
+        self.feed.lock().unwrap_or_else(|e| e.into_inner()).record(
+            head,
+            &keys,
+            &nodes,
+            &mut self.feed_pending,
+        );
+        if self.live_rules.is_empty() {
             return;
         }
         let snap = self.eng.snapshot_arc();
-        let head = self.eng.durable_head();
         for lr in self.live_rules.values_mut() {
             let diffs = lr.maintained.apply(&snap, &self.schema.cat, &keys, &nodes);
             if !diffs.is_empty() {

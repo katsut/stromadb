@@ -827,3 +827,92 @@ fn me_has_no_app_url_field() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Read from `stream` until `buf` contains `needle` (or the read times out).
+fn read_until(stream: &mut TcpStream, buf: &mut String, needle: &str) -> bool {
+    let mut chunk = [0u8; 4096];
+    while !buf.contains(needle) {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) => buf.push_str(&String::from_utf8_lossy(&chunk[..n])),
+        }
+    }
+    true
+}
+
+// The change stream over a real connection: an event-stream response, chunked, whose first event
+// announces the head and whose next event carries a write made after it opened, as soon as it
+// lands. `Last-Event-ID` resumes after a given head.
+#[test]
+fn serve_change_stream() {
+    let base = std::env::temp_dir().join(format!("stroma_serve_sse_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    let port = 12100 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let _guard = Kill(
+        Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+            .args(["--db", dir.to_str().unwrap(), "--addr", &addr, "--no-auth"])
+            .spawn()
+            .unwrap(),
+    );
+    wait_up(&addr);
+    let schema = concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"name\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\"}}\n",
+    );
+    assert_eq!(http(&addr, "POST", "/ingest", schema, None).0, 200);
+
+    let open = |extra: &str| {
+        let mut s = TcpStream::connect(&addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let req = format!("GET /events/stream HTTP/1.1\r\nHost: localhost\r\n{extra}\r\n");
+        s.write_all(req.as_bytes()).unwrap();
+        s
+    };
+    let mut s = open("");
+    let mut buf = String::new();
+    assert!(
+        read_until(&mut s, &mut buf, "\r\n\r\n"),
+        "no response head: {buf}"
+    );
+    let head = buf.to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{buf}");
+    assert!(head.contains("content-type: text/event-stream"), "{buf}");
+    assert!(head.contains("transfer-encoding: chunked"), "{buf}");
+    assert!(
+        read_until(&mut s, &mut buf, "\"changes\":[]"),
+        "no opening event: {buf}"
+    );
+    assert!(buf.contains("retry: 2000"), "{buf}");
+
+    let ingest = concat!(
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"name\",\"object\":{\"text\":\"Alice\"}}}\n",
+    );
+    let (st, _, body) = http(&addr, "POST", "/ingest", ingest, None);
+    assert_eq!(st, 200, "{body}");
+    assert!(
+        read_until(&mut s, &mut buf, "\"predicates\":[\"name\"]"),
+        "no change event: {buf}"
+    );
+    assert!(!buf.contains("Alice"), "values never ride the feed: {buf}");
+    // every event is framed as one chunk: `<hex len>\r\n<event>\r\n`
+    let ev = buf.rfind("id: ").unwrap();
+    let size_line = buf[..ev - 2].rsplit("\r\n").next().unwrap();
+    let len = usize::from_str_radix(size_line, 16).unwrap();
+    assert!(buf[ev..ev + len].ends_with("\n\n"), "{buf}");
+    drop(s);
+
+    // resume after the schema-only head: the node write arrives again as the first event
+    let v: serde_json::Value =
+        serde_json::from_str(&http(&addr, "GET", "/stats", "", None).2).unwrap();
+    let h = v["facts"]["durable_head"].as_u64().unwrap();
+    let mut s = open(&format!("Last-Event-ID: {}\r\n", h - 2));
+    let mut buf = String::new();
+    assert!(
+        read_until(&mut s, &mut buf, "\"predicates\":[\"name\"]"),
+        "resume missed the change: {buf}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
