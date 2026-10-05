@@ -669,6 +669,55 @@
   one-keys, `lookup_bench` measures 5,300 single as-of lookups going from 417 µs to 1.4 µs per call,
   and current lookups from 61 µs to 1.1 µs.
 
+### D37. A bounded change journal behind `/events`, fed by the write-path choke point
+- **Context:** `GET /events?since=<head>` answered only the new durable head. A client could tell
+  that something changed but not what, so the console re-queried its whole slice on every head
+  move, at most once per 2.5 s, and redrew it. A view of a few nodes paid for the whole slice, and
+  the viewer could not see which nodes had changed.
+- **Decision:** every tail drain on the write path already goes through `materialize_live`, which
+  feeds the conformance watches (D26). The same call now journals the drained batch: the touched
+  `(node, predicate)` keys, the nodes whose type or label it wrote, which of those joined the node
+  set, and the batch's durable head. Ingest notes, for each key, the access labels of the rows it
+  wrote. For a retract it notes the labels of the removed element's rows. One journal per database
+  directory, so one per namespace (D27). `Db::changes_since(since, allowed_labels)` reads it.
+  `GET /events?since=N&changes=1` long-polls it and answers the batches merged per node.
+  `GET /events/stream` serves one server-sent event per batch. Plain `/events` is unchanged.
+- **Authz at read time:** the journal is unfiltered, and the caller's mask is applied when it is
+  read, against the read view the answer is pinned to. A node outside the caller's node labels
+  drops out. A predicate is listed only if a row the batch wrote on it is visible to the caller,
+  with the floor resolved at read time as in D35. Judging by the rows written, not by the key's
+  current rows, keeps a hidden write on a key that also holds visible rows from showing up. A
+  change with no visible predicate and no node attribute is dropped. The feed carries ids, type
+  names and predicate names, never values, so it says no more than a `node` read of the same node
+  would.
+- **Bounds and resync:** a ring of at most 4,096 node changes, oldest batch dropped first. A batch
+  touching more than 1,024 nodes is kept as a marker and not as its changes, since past that size
+  re-reading the view is cheaper than applying the changes. A reader gets `resync` instead of a
+  gap when its cursor is older than the retained window, older than the process start (the journal
+  is in memory), crosses a marker, or is ahead of the head (after a reset, which clears the
+  journal). The answer never goes past the reader's pinned view head, so a batch is never
+  reported before a read can see it.
+- **Concurrency:** the journal has its own mutex, held only to append a batch or copy out a read,
+  so a feed read never waits for a write (D19). Each stream gets its own thread and watches the
+  durable head every 250 ms, so a stream never holds a request worker. At most 64 streams are
+  open at once, and more answer 503. A stream ends after 5 minutes, which bounds how long it can
+  outlive the session or token that opened it. The client resumes with `Last-Event-ID`. Events
+  are written as HTTP chunks and flushed one by one, so none waits in a buffer.
+- **Console:** a neighbourhood or whole-graph view applies a change set of up to 12 nodes in
+  place. A 1-hop `neighborhood` probe per touched node, with the view's predicate and scope,
+  replaces that node's edges. New nodes linked to the slice join next to their neighbour within
+  the view's hop bound, and existing positions are kept. New nodes get a growing ring and changed
+  nodes a flash. A resync, a larger change set, an overview map or any other view re-queries the
+  slice as before. A ticker lists the last six changes. All of it follows the LIVE pill: paused,
+  nothing is applied, and resuming re-queries once.
+- **Evidence:** `crates/stroma-db/tests/change_feed.rs` covers new nodes and predicates per batch,
+  suppressed re-sends journaling nothing, retracts and closes, no values in the feed, node labels,
+  fact labels, floors, hidden and visible retracts, relabeling, and resync after an oversized
+  batch, a reset and a reopen. The unit tests in `stroma-db/src/feed.rs` cover the ring bound and
+  merging. `stroma-serve` unit tests cover the long-poll with `changes=1`, the token cap and the
+  event framing. `tests/serve.rs` reads a stream over a real connection: the chunked
+  `text/event-stream` response, a write arriving as an event, and `Last-Event-ID` resume.
+
 ## Core SLOs (the "unchanging core" bar) — measured
 
 | leg | target | measured |

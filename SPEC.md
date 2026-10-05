@@ -528,6 +528,39 @@ properties of an edge whose versions are all hidden by fact labels are absent.
   `{"defs": D, "nodes": N, "facts": F, "retracts": R, "closes": C, "durable_head": H}`, durable on
   return. `retracts` counts only retracts that removed a present edge.
 
+### Change feed
+
+What each durable batch touched, for a client that keeps a view current without re-reading it.
+Served over HTTP only; the cursor is a durable head.
+
+```jsonc
+// long-poll: waits up to ~20 s for the head to pass `since`
+GET /events?since=41&changes=1[&allowed_labels=3]
+// → {"head": 44, "changes": [{"node": 7, "type": "Person", "predicates": ["name", "member-of"], "new": true}]}
+
+// server-sent events: one event per batch, same JSON; `id:` is the batch head
+GET /events/stream?since=41[&allowed_labels=3]
+// id: 44
+// data: {"head": 44, "changes": [ … ]}
+```
+
+- A change names a node, its type and the predicates the batch wrote on it (facts, closes,
+  retracts, edge properties); `new` marks a node that got its first type or label. Values are
+  never included. `GET /events?since=N` without `changes` still answers only `{"head"}`.
+- The long-poll merges every batch after the cursor into one entry per node. The stream sends
+  one event per batch, starts from the current head when `since` is absent (announced by a first
+  event with no changes), resumes from `Last-Event-ID`, sends a comment line after 15 s of silence
+  and ends after 5 minutes so the client reconnects under its current credentials.
+- Post-authz at read time, like every read: `allowed_labels` (capped by a token's labels) hides
+  the changes of a node outside the caller's node labels. A predicate is listed only when a row the
+  batch wrote on it is visible under the predicate's floor and the row's label; a retract counts
+  the rows of the element it removed. A change with nothing visible left is dropped.
+- The journal is in memory and bounded (4,096 node changes; a batch touching more than 1,024
+  nodes is not journaled). A cursor it cannot answer exactly gets `{"resync": true}` with the
+  current head: one older than the retained window or than the process start, one whose window
+  holds an unjournaled batch, or one ahead of the head after a reset. Re-read the view and continue
+  from `head`.
+
 ---
 
 ## 4. Time & consistency

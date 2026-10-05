@@ -12,6 +12,11 @@
 //!                 "auth", "token_name", "labels"} plus server info {"version", "db_path",
 //!                 "workers", "mcp_url"} (the console's settings panel)
 //!   GET  /events?since=N  → long-poll; returns {"head": M} when the durable head advances (or ~20s)
+//!   GET  /events?since=N&changes=1[&allowed_labels=M] → the same long-poll answering what changed:
+//!                 {"head", "changes":[{"node","type","predicates":[..],"new"}], "resync"?} — ids,
+//!                 type and predicate names only, never values; filtered by node and fact labels
+//!   GET  /events/stream?since=N[&allowed_labels=M] → `text/event-stream`, one event per durable
+//!                 batch with the same JSON (`id:` = the batch head; `Last-Event-ID` resumes)
 //!   GET  /stats           → engine/schema/embedding/storage counters
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,durable_head}
@@ -61,8 +66,11 @@
 //! var overrides the default.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::process::exit;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use stromadb_store::Db;
@@ -441,6 +449,141 @@ enum Reply {
     Json(u16, Value),
     Page,
     Accepted,
+    /// A change stream (`GET /events/stream`): the worker hands the connection to its own thread.
+    Stream {
+        db: SharedDb,
+        since: Option<u64>,
+        labels: u32,
+    },
+}
+
+/// The value of query parameter `name` in a request URL, if present.
+fn query_param<'a>(url: &'a str, name: &str) -> Option<&'a str> {
+    url.split_once('?')?
+        .1
+        .split('&')
+        .find_map(|kv| match kv.split_once('=') {
+            Some((k, v)) if k == name => Some(v),
+            None if kv == name => Some(""),
+            _ => None,
+        })
+}
+
+/// The label mask a change-feed read runs under: the request's `allowed_labels` parameter (absent
+/// = every label), capped by the caller's token scope exactly like a `/query` body.
+fn feed_labels(url: &str, scope: &mcp::Scope) -> u32 {
+    let mut v = json!({});
+    if let Some(m) = query_param(url, "allowed_labels").and_then(|m| m.parse::<u64>().ok()) {
+        v["allowed_labels"] = json!(m);
+    }
+    scope.cap_labels(&mut v);
+    v["allowed_labels"].as_u64().map_or(u32::MAX, |m| m as u32)
+}
+
+/// Concurrent change streams one server holds open; each owns a thread, so they are capped.
+const MAX_STREAMS: usize = 64;
+/// A stream ends after this long and the client reconnects with `Last-Event-ID`, so a stream
+/// never outlives the session (or token) that opened it by more than this.
+const STREAM_LIFETIME: Duration = Duration::from_secs(300);
+/// How often a stream checks the durable head, and how long it stays silent before a comment
+/// line keeps intermediaries from timing it out (and notices a client that went away).
+const STREAM_POLL: Duration = Duration::from_millis(250);
+const STREAM_HEARTBEAT: Duration = Duration::from_secs(15);
+
+static STREAMS: AtomicUsize = AtomicUsize::new(0);
+
+/// One of the [`MAX_STREAMS`] stream slots, released on drop.
+struct StreamSlot;
+
+impl StreamSlot {
+    fn acquire() -> Option<StreamSlot> {
+        // take a slot, and give it back at once when that went past the cap
+        if STREAMS.fetch_add(1, Ordering::AcqRel) >= MAX_STREAMS {
+            STREAMS.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(StreamSlot)
+    }
+}
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        STREAMS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// One server-sent event: `id:` is the head a client resumes from, `data:` the JSON on one line.
+fn sse_event(head: u64, body: &Value) -> String {
+    format!("id: {head}\ndata: {body}\n\n")
+}
+
+/// Stream the change feed after `since` (absent = from the current head, announced first) as
+/// server-sent events into `send`, one event per durable batch with visible changes, a `resync`
+/// event when the journal cannot answer the cursor, and a comment line after `heartbeat` of
+/// silence. Returns when `lifetime` has passed or `send` fails (the client went away).
+fn stream_changes(
+    db: &Db,
+    since: Option<u64>,
+    labels: u32,
+    timing: (Duration, Duration, Duration),
+    send: &mut dyn FnMut(&str) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let (lifetime, poll, heartbeat) = timing;
+    let start = Instant::now();
+    send("retry: 2000\n\n")?;
+    let mut since = match since {
+        Some(s) => s,
+        None => {
+            let head = db.durable_head();
+            send(&sse_event(head, &json!({ "head": head, "changes": [] })))?;
+            head
+        }
+    };
+    let mut quiet = Instant::now();
+    while start.elapsed() < lifetime {
+        if db.durable_head() != since {
+            let feed = db.changes_since(since, labels);
+            if feed.resync {
+                send(&sse_event(feed.head, &feed.to_json()))?;
+            } else {
+                for (head, changes) in &feed.batches {
+                    send(&sse_event(
+                        *head,
+                        &json!({ "head": head, "changes": changes }),
+                    ))?;
+                }
+            }
+            since = feed.head;
+            quiet = Instant::now();
+        } else if quiet.elapsed() >= heartbeat {
+            send(": keepalive\n\n")?;
+            quiet = Instant::now();
+        }
+        std::thread::sleep(poll);
+    }
+    Ok(())
+}
+
+/// Serve one change stream on the raw connection: the response head, then each piece of the
+/// event stream as one HTTP chunk, flushed at once (a buffered chunk would delay the event),
+/// then the terminating chunk so the client sees a clean end and reconnects.
+fn serve_stream(req: Request, db: &Db, since: Option<u64>, labels: u32) {
+    let mut w = req.into_writer();
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nTransfer-Encoding: chunked\r\n\r\n";
+    if w.write_all(head.as_bytes())
+        .and_then(|()| w.flush())
+        .is_err()
+    {
+        return;
+    }
+    let mut send = |s: &str| -> std::io::Result<()> {
+        write!(w, "{:x}\r\n{s}\r\n", s.len())?;
+        w.flush()
+    };
+    let timing = (STREAM_LIFETIME, STREAM_POLL, STREAM_HEARTBEAT);
+    if stream_changes(db, since, labels, timing, &mut send).is_ok() {
+        let _ = w.write_all(b"0\r\n\r\n").and_then(|()| w.flush());
+    }
 }
 
 /// Serve one authenticated request against the namespace its path addresses: parse the
@@ -559,15 +702,13 @@ fn handle(
             }
         }
         (Method::Get, "/events") => {
-            // long-poll: block until the durable head advances past `since` (or ~20s), so the
-            // console can re-query its current slice the moment the database changes.
-            let since = req
-                .url()
-                .split("since=")
-                .nth(1)
-                .and_then(|s| s.split('&').next())
+            // long-poll: block until the durable head advances past `since` (or ~20s). Plain, it
+            // answers only the new head; with `changes=1` it also answers what changed since.
+            let url = req.url();
+            let since = query_param(url, "since")
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0);
+            let with_changes = query_param(url, "changes").is_some_and(|v| v == "1" || v == "true");
             let mut head = db.durable_head();
             let mut waited = 0u32;
             while head == since && waited < 20_000 {
@@ -575,7 +716,23 @@ fn handle(
                 waited += 250;
                 head = db.durable_head();
             }
-            Reply::Json(200, json!({ "head": head }))
+            if with_changes {
+                Reply::Json(
+                    200,
+                    db.changes_since(since, feed_labels(url, scope)).to_json(),
+                )
+            } else {
+                Reply::Json(200, json!({ "head": head }))
+            }
+        }
+        (Method::Get, "/events/stream") => {
+            let url = req.url();
+            let resume = header_value(req, "last-event-id").and_then(|s| s.trim().parse().ok());
+            Reply::Stream {
+                db: db.clone(),
+                since: resume.or_else(|| query_param(url, "since").and_then(|s| s.parse().ok())),
+                labels: feed_labels(url, scope),
+            }
         }
         // MCP streamable HTTP transport, stateless: one JSON-RPC message per POST, no session
         // ids, no server-initiated stream. Same auth as the other endpoints (the worker's gate).
@@ -942,6 +1099,21 @@ pub fn run(args: &[String]) {
                         Reply::Accepted => {
                             let _ = req.respond(Response::empty(202));
                         }
+                        Reply::Stream { db, since, labels } => match StreamSlot::acquire() {
+                            // its own thread, so a long-lived stream never holds a worker
+                            Some(slot) => {
+                                std::thread::spawn(move || {
+                                    let _slot = slot;
+                                    serve_stream(req, &db, since, labels);
+                                });
+                            }
+                            None => {
+                                let _ = req.respond(json_response(
+                                    503,
+                                    &json!({ "error": "too many open change streams" }),
+                                ));
+                            }
+                        },
                     }
                 }
             }
@@ -954,10 +1126,216 @@ pub fn run(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Namespaces, Reply, dispatch, new_token, parse_tokens, route, valid_ns_name};
+    use super::{
+        Namespaces, Reply, dispatch, new_token, parse_tokens, query_param, route, stream_changes,
+        valid_ns_name,
+    };
+    use serde_json::Value;
     use std::sync::Arc;
+    use std::time::Duration;
     use stromadb_store::{DEFAULT_N_MAX, Db, mcp};
     use tiny_http::{Method, TestRequest};
+
+    #[test]
+    fn query_params() {
+        let u = "/events?since=12&changes=1&flag&allowed_labels=3";
+        assert_eq!(query_param(u, "since"), Some("12"));
+        assert_eq!(query_param(u, "changes"), Some("1"));
+        assert_eq!(query_param(u, "flag"), Some(""));
+        assert_eq!(query_param(u, "allowed_labels"), Some("3"));
+        // a name is matched whole, never as a suffix of another
+        assert_eq!(query_param("/events?xsince=4", "since"), None);
+        assert_eq!(query_param("/events", "since"), None);
+    }
+
+    const FEED_GRAPH: &str = concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"name\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\"}}\n",
+        "{\"pred_def\":{\"name\":\"email\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\"}}\n",
+    );
+
+    /// A GET with a query string through the dispatcher under `scope`; the body as JSON.
+    fn get(nss: &Namespaces, url: &str, scope: &mcp::Scope) -> Value {
+        let mut req = TestRequest::new()
+            .with_method(Method::Get)
+            .with_path(url)
+            .into();
+        let path = url.split('?').next().unwrap();
+        match dispatch(nss, true, &mut req, path, scope) {
+            Reply::Json(200, v) => v,
+            Reply::Json(st, v) => panic!("{url}: {st} {v}"),
+            _ => panic!("{url}: not json"),
+        }
+    }
+
+    // `changes=1` answers what changed after the cursor, filtered by the request's labels and
+    // capped by the token's; the plain form still answers only the head.
+    #[test]
+    fn long_poll_with_changes() {
+        let root = std::env::temp_dir().join(format!("stroma_feed_poll_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nss = open_root(&root);
+        nss.default.ingest_str(FEED_GRAPH).unwrap();
+        let h0 = nss.default.durable_head();
+        nss.default
+            .ingest_str(concat!(
+                "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+                "{\"fact\":{\"subject\":1,\"predicate\":\"name\",\"object\":{\"text\":\"Alice\"}}}\n",
+                "{\"fact\":{\"subject\":1,\"predicate\":\"email\",\"object\":{\"text\":\"a@example.com\"},\"label\":2}}\n",
+            ))
+            .unwrap();
+        let h1 = nss.default.durable_head();
+        let open = mcp::Scope::default();
+
+        let v = get(&nss, &format!("/events?since={h0}"), &open);
+        assert_eq!(v, serde_json::json!({ "head": h1 }));
+
+        let v = get(&nss, &format!("/events?since={h0}&changes=1"), &open);
+        assert_eq!(v["head"], h1);
+        assert_eq!(
+            v["changes"],
+            serde_json::json!([{"node": 1, "type": "Person", "predicates": ["name", "email"], "new": true}])
+        );
+        assert!(v.get("resync").is_none());
+        assert!(
+            !v.to_string().contains("Alice"),
+            "values never ride the feed: {v}"
+        );
+
+        // the request's mask hides the labeled fact
+        let v = get(
+            &nss,
+            &format!("/events?since={h0}&changes=1&allowed_labels=3"),
+            &open,
+        );
+        assert_eq!(v["changes"][0]["predicates"], serde_json::json!(["name"]));
+        // a token's cap applies even when the request asks for every label
+        let capped = mcp::Scope {
+            allowed_labels: Some(3),
+            ..mcp::Scope::default()
+        };
+        let v = get(&nss, &format!("/events?since={h0}&changes=1"), &capped);
+        assert_eq!(v["changes"][0]["predicates"], serde_json::json!(["name"]));
+
+        // a cursor ahead of the head (after a reset) resyncs at once
+        let v = get(
+            &nss,
+            &format!("/events?since={}&changes=1", h1 + 100),
+            &open,
+        );
+        assert_eq!(v["resync"], true);
+        assert_eq!(v["head"], h1);
+
+        // the stream endpoint resolves to a stream reply carrying the same capped mask
+        let mut req = TestRequest::new()
+            .with_method(Method::Get)
+            .with_path("/events/stream?since=5&allowed_labels=7")
+            .into();
+        match dispatch(&nss, true, &mut req, "/events/stream", &capped) {
+            Reply::Stream { since, labels, .. } => {
+                assert_eq!(since, Some(5));
+                assert_eq!(labels, 3);
+            }
+            _ => panic!("expected a stream"),
+        }
+        drop(nss);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // The event stream: a retry hint, one `id:`/`data:` event per batch with visible changes, a
+    // comment line on silence, and a resync event when the cursor is ahead of the head.
+    #[test]
+    fn sse_framing() {
+        let root = std::env::temp_dir().join(format!("stroma_feed_sse_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let db = Arc::new(Db::open_or_init_with(&root, DEFAULT_N_MAX).unwrap());
+        db.ingest_str(FEED_GRAPH).unwrap();
+        let h0 = db.durable_head();
+        let writer = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(150));
+                db.ingest_str("{\"node\":{\"id\":1,\"type\":\"Person\"}}\n")
+                    .unwrap();
+                db.ingest_str("{\"fact\":{\"subject\":1,\"predicate\":\"name\",\"object\":{\"text\":\"Alice\"}}}\n")
+                    .unwrap();
+            })
+        };
+        let timing = (
+            Duration::from_millis(900),
+            Duration::from_millis(10),
+            Duration::from_millis(400),
+        );
+        let mut out: Vec<String> = Vec::new();
+        stream_changes(&db, Some(h0), u32::MAX, timing, &mut |s| {
+            out.push(s.to_string());
+            Ok(())
+        })
+        .unwrap();
+        writer.join().unwrap();
+        let h = db.durable_head();
+        assert_eq!(out[0], "retry: 2000\n\n");
+        let events: Vec<&String> = out.iter().filter(|s| s.starts_with("id: ")).collect();
+        // the two ingests may land in one poll or two; either way every change arrives once, in
+        // order, each event framed as `id: <head>\ndata: <json>\n\n`
+        let mut nodes = Vec::new();
+        for e in &events {
+            let (id, rest) = e.strip_prefix("id: ").unwrap().split_once('\n').unwrap();
+            let data = rest
+                .strip_prefix("data: ")
+                .unwrap()
+                .strip_suffix("\n\n")
+                .unwrap();
+            assert!(!data.contains('\n'));
+            let v: Value = serde_json::from_str(data).unwrap();
+            assert_eq!(v["head"].as_u64().unwrap().to_string(), id);
+            for c in v["changes"].as_array().unwrap() {
+                nodes.push((c["node"].as_u64().unwrap(), c["predicates"].clone()));
+            }
+        }
+        assert!(!events.is_empty());
+        assert!(events.last().unwrap().starts_with(&format!("id: {h}\n")));
+        assert_eq!(nodes[0].0, 1);
+        assert!(nodes.iter().any(|(_, p)| p == &serde_json::json!(["name"])));
+        assert!(out.iter().any(|s| s == ": keepalive\n\n"), "{out:?}");
+
+        // no cursor: the stream announces the current head first; a cursor ahead resyncs
+        let mut out: Vec<String> = Vec::new();
+        let short = (
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+            Duration::from_secs(9),
+        );
+        stream_changes(&db, None, u32::MAX, short, &mut |s| {
+            out.push(s.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            out[1],
+            format!("id: {h}\ndata: {{\"changes\":[],\"head\":{h}}}\n\n")
+        );
+        let mut out: Vec<String> = Vec::new();
+        stream_changes(&db, Some(h + 50), u32::MAX, short, &mut |s| {
+            out.push(s.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert!(out[1].contains("\"resync\":true"), "{out:?}");
+
+        // a client that went away ends the stream
+        let mut n = 0;
+        let r = stream_changes(&db, Some(h0), u32::MAX, timing, &mut |_| {
+            n += 1;
+            match n {
+                1 => Ok(()),
+                _ => Err(std::io::Error::other("gone")),
+            }
+        });
+        assert!(r.is_err());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn namespace_names_and_routing() {
@@ -994,6 +1372,7 @@ mod tests {
             Reply::Json(status, v) => (status, v.to_string()),
             Reply::Page => (200, "<page>".into()),
             Reply::Accepted => (202, String::new()),
+            Reply::Stream { .. } => (200, "<stream>".into()),
         }
     }
 
