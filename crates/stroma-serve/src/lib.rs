@@ -497,12 +497,12 @@ struct StreamSlot;
 
 impl StreamSlot {
     fn acquire() -> Option<StreamSlot> {
-        STREAMS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < MAX_STREAMS).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| StreamSlot)
+        // take a slot, and give it back at once when that went past the cap
+        if STREAMS.fetch_add(1, Ordering::AcqRel) >= MAX_STREAMS {
+            STREAMS.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(StreamSlot)
     }
 }
 
