@@ -144,6 +144,18 @@
   .toast.err { color:#ff7a90; border-color:color-mix(in oklab,#ff7a90 40%,var(--line-2)); }
   .hud button:disabled { opacity:.38; cursor:default; } .hud button:disabled:hover { color:var(--fg-dim); border-color:var(--line-2); }
   .hud button.active { color:var(--accent); border-color:var(--accent); }
+  /* recent-changes ticker: under the HUD, paused with the LIVE pill */
+  .ticker { position:absolute; right:14px; top:54px; z-index:2; width:270px; max-width:calc(100% - 28px); background:color-mix(in oklab,var(--panel-2) 90%,transparent); border:1px solid var(--line-2); border-radius:var(--r-sm); padding:8px 10px; font:11px/1.45 var(--mono); color:var(--fg-dim); box-shadow:var(--shadow); backdrop-filter:blur(8px); }
+  .ticker .tk-h { display:flex; justify-content:space-between; gap:8px; margin-bottom:4px; font:600 10.5px var(--sans); letter-spacing:.06em; text-transform:uppercase; color:var(--mut); }
+  .ticker .tk-state { text-transform:none; letter-spacing:0; }
+  .ticker.paused .tk-list { opacity:.45; }
+  .tk-r { display:flex; gap:8px; padding:1px 4px; margin:0 -4px; border-radius:4px; cursor:pointer; white-space:nowrap; }
+  .tk-r:hover .tk-n { color:var(--accent); }
+  .tk-t { color:var(--mut); flex:0 0 auto; } .tk-n { color:var(--fg); flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .tk-p { flex:1 1 0; min-width:0; overflow:hidden; text-overflow:ellipsis; text-align:right; }
+  .tk-r.new .tk-n::before { content:"+ "; color:var(--accent); }
+  .tk-r.fresh { animation:tkin .9s ease-out; } @keyframes tkin { from { background:color-mix(in oklab,var(--accent) 24%,transparent); } to { background:transparent; } }
+  .tk-empty { color:var(--mut); }
   .help-pop { position:absolute; right:14px; top:54px; z-index:3; max-width:300px; background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r-sm); padding:10px 12px; font:12px/1.5 var(--sans); color:var(--fg-dim); box-shadow:var(--shadow); }
   .hidden { display:none !important; }
   .inspect { position:absolute; right:14px; bottom:14px; width:296px; max-width:calc(100% - 28px); background:var(--panel-2); border:1px solid var(--line-2); border-radius:var(--r); padding:12px 14px; font:12px var(--mono); color:var(--fg-dim); box-shadow:var(--shadow); }
@@ -382,6 +394,7 @@
   <div class="stage-note" id="note" data-i18n="note">Draw a neighbourhood to explore the graph.</div>
   <div class="inspect hidden" id="inspect"></div>
   <div class="toast hidden" id="toast"></div>
+  <div class="ticker hidden" id="ticker"><div class="tk-h"><span data-i18n="tkTitle">recent changes</span><span class="tk-state" id="tkState"></span></div><div class="tk-list" id="tkList"></div></div>
 
 </div>
 <datalist id="nodeList"></datalist>
@@ -397,7 +410,7 @@ const api = (p,b) => fetch(BASE+p, b?{method:'POST',body:JSON.stringify(b)}:{}).
 const I18N = {
   en: { explore:"Explore", focusNode:"focus node", predicate:"predicate (blank = all)", distance:"distance (hops)", viewAs:"view as", maxNodes:"max nodes", draw:"Draw neighbourhood", showAll:"Show all nodes", overviewMap:"Overview map", tipMain:"Drag the background to pan · scroll to zoom · drag a node to move it · click for details · double-click to focus.", accessRoles:"Access roles", viewAsTag:"view-as", roleName:"name", roleLabels:"labels (blank = all)", saveRole:"+ save role", tipRoles:"A role is a preset of visible authz labels. “view as” re-runs queries with that label set — a console convenience for exploring post-authz visibility, not authentication. Click a row to edit it.", note:"Draw a neighbourhood to explore the graph.", queryTitle:"Query", queryOp:"what do you want to find?", queryNode:"node", queryK:"results", qopPoint:"a property value", qopExpand:"linked neighbours", qopNode:"everything about a node", qopSimilar:"similar nodes (by vector)", qopTimeline:"a value over time (timeline)", qopConformance:"rule verdicts (conformance)", queryAsOf:"as of (blank = now)", queryHops:"hop chain (one-cardinality predicates, walked left→right)", queryRule:"stored rule", needHops:"enter at least one predicate for the hop chain.", noRules:"no stored rules — declare one with a rule_def ingest line.", nSegments:"{n} segment(s) — hover a bar for its interval", noSegments:"no segments — nothing was in effect on that path.", nVerdicts:"{n} subject(s) evaluated", noVerdicts:"no subjects in scope for this rule.", tlOpen:"now", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · {na} not applicable", cfAbsent:"missing — required: {req}", cfMismatch:"actual {act} ≠ required {req}", importTitle:"Import", importIntro:"Load a CSV: pick each column's role, map date columns onto valid time, and the rows become typed facts.", importType:"node type", importSource:"source (optional)", importRun:"Import", impRoleLiteral:"property", impRoleId:"row id", impRoleEdge:"edge →", impRoleSkip:"skip", impTargetPh:"TargetType", impPredPh:"predicate", impNotUtf8:"not UTF-8 — convert the file first (e.g. from Excel, save as CSV UTF-8).", impBadQuote:"unterminated quoted field.", impEmpty:"empty file.", impNeedType:"enter a node type.", impNeedId:"exactly one column must be the row id.", impNeedEdge:"edge columns need a target type and a predicate.", impEmptyId:"row {n}: empty id cell.", impBadDate:"row {n}: bad date in {c}.", impCardConflict:"\"{p}\" already exists with a different cardinality — the engine will reject it.", impRangeConflict:"\"{p}\" already exists with a different range — the engine will reject it.", impDone:"imported <b>{rows}</b> rows → {facts} facts, {nodes} nodes ({sup} no-ops skipped)", impDoneToast:"{n} facts imported", run:"Run", rolesIntro:"Each node has a sensitivity label. A role is a set of labels you're allowed to see; switch “view as” to explore the graph as someone with that access — nodes outside the role vanish. (Exploration aid, not authentication.)", labelsInUse:"labels in this data", noLabels:"no sensitivity labels in this data — every node is public.", roleSees:"“{role}” sees {n} of {m} nodes", scope:"scope", scopeTitle:"Visibility scope", scopeIntro:"Nodes and individual facts carry sensitivity labels. Toggle which labels are visible — hidden nodes (and edges to them) and hidden facts drop from every view. Exploration aid, not authentication.", scopeAll:"all", scopeNone:"none", scopeSees:"showing {n} of {m} nodes", restrictedScope:"hidden under the current scope.", nHidden:"{n} value(s) hidden under the current scope", cfHidden:"{n} hidden by label", embedding:"embedding", noVector:"this node has no embedding to search by.", noValue:"no value — this node has nothing for that property.", valuesW:"values", nLinked:"{n} linked node(s) — click to open", noLinked:"no linked nodes for that predicate.", nodeSummary:"a {type} with {n} propertie(s)", nSimilar:"{n} similar node(s) — click to open", noSimilar:"no similar nodes found.", rawJson:"raw JSON", nChips:"{n} node(s) referenced", nsFilter:"filter namespaces…", nsNone:"no namespaces match.", provTip:"provenance — the source this value was ingested from", confTip:"confidence — how well-corroborated this value is (distinct agreeing sources)", findNode:"find node", findPh:"free-word search…", findNone:"no matches.", focusPh:"node id", emptyDb:"This database is empty — ingest some data to get started.", tTypeMembers:"{n} {type} node(s) — pick one to draw its neighbourhood", untypedLabel:"untyped", composeTitle:"Compose", composeIntro:"Chain steps into one query. Edit the example — each step shows how many nodes remain.", addStep:"+ add step", cStartNodes:"start from node", cStartSimilar:"start from nodes similar to", cFollow:"follow", cKeep:"keep only", cStart:"start", cStep:"step",
        theme:"Toggle light / dark", signOut:"Sign out", collapseSidebar:"collapse sidebar", expandSidebar:"expand sidebar", back:"back to previous focus", liveOn:"live updates on (click to pause)", livePaused:"paused (click to resume)", disconnected:"disconnected — retrying…", labels:"toggle labels", zoomIn:"zoom in", zoomOut:"zoom out", fit:"fit", help:"controls", allEdges:"all edges", egAnalyst:"e.g. analyst",
-       connecting:"connecting…", live:"LIVE", paused:"paused", offline:"offline", nodes:"nodes", vec:"vec", head:"head", signedIn:"signed in", viewAsPill:"view as",
+       tkTitle:"recent changes", tkNew:"new node", tkEmpty:"waiting for changes…", connecting:"connecting…", live:"LIVE", paused:"paused", offline:"offline", nodes:"nodes", vec:"vec", head:"head", signedIn:"signed in", viewAsPill:"view as",
        lgFocus:"focus", lgDeep:"deep", hop:"hop",
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”",
@@ -409,7 +422,7 @@ const I18N = {
        resetIntro:"Remove everything stored in this database and start empty.", resetDb:"Reset database…", resetTitle:"Reset database", resetBody:"This removes all facts, schema, rules and embeddings, and cannot be undone. A server started with --demo does not re-seed the sample graph until it is restarted.", resetType:"type RESET to confirm", cancel:"Cancel", resetConfirm:"Reset", resetting:"resetting…", resetFailed:"reset failed: {e}", resetDone:"database reset — it is now empty" },
   ja: { explore:"エクスプローラ", focusNode:"起点ノード", predicate:"述語（空＝全て）", distance:"距離（ホップ）", viewAs:"表示ロール", maxNodes:"最大ノード数", draw:"近傍を描画", showAll:"全ノード表示", overviewMap:"概観マップ", tipMain:"背景ドラッグで移動 · スクロールでズーム · ノードをドラッグで移動 · クリックで詳細 · ダブルクリックでフォーカス。", accessRoles:"アクセスロール", viewAsTag:"表示切替", roleName:"名前", roleLabels:"ラベル（空＝全て）", saveRole:"＋ロール保存", tipRoles:"ロールは可視 authz ラベルのプリセット。「表示ロール」でそのラベル集合で再クエリします（認証ではなく post-authz 可視性の探索用）。行をクリックで編集。", note:"近傍を描画してグラフを探索。", queryTitle:"クエリ", queryOp:"何を調べる？", queryNode:"ノード", queryK:"件数", qopPoint:"プロパティの値", qopExpand:"つながっている隣接ノード", qopNode:"ノードの全情報", qopSimilar:"似ているノード（ベクトル）", qopTimeline:"値の変遷（タイムライン）", qopConformance:"ルール判定（conformance）", queryAsOf:"時点指定（空＝現在）", queryHops:"ホップ連鎖（one-cardinality 述語を左→右に辿る）", queryRule:"保存済みルール", needHops:"ホップ連鎖に述語を1つ以上入力してください。", noRules:"保存済みルールなし — rule_def の ingest 行で宣言できます。", nSegments:"{n} 区間 — バーにホバーで期間表示", noSegments:"区間なし — そのパスで有効だった値はありません。", nVerdicts:"{n} 件を判定", noVerdicts:"このルールの対象がありません。", tlOpen:"現在", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · 対象外 {na}", cfAbsent:"欠落 — 要求値: {req}", cfMismatch:"実際 {act} ≠ 要求 {req}", importTitle:"インポート", importIntro:"CSV を読み込み、各列の役割を選ぶだけ。日付列を valid time に割り付ければ、行が型付きファクトになります。", importType:"ノード型", importSource:"ソース（任意）", importRun:"インポート", impRoleLiteral:"プロパティ", impRoleId:"行 ID", impRoleEdge:"エッジ →", impRoleSkip:"無視", impTargetPh:"相手の型", impPredPh:"述語", impNotUtf8:"UTF-8 ではありません — 先に変換してください（Excel なら「CSV UTF-8」で保存）。", impBadQuote:"引用符が閉じていません。", impEmpty:"空のファイルです。", impNeedType:"ノード型を入力してください。", impNeedId:"行 ID の列をちょうど1つ選んでください。", impNeedEdge:"エッジ列には相手の型と述語が必要です。", impEmptyId:"{n} 行目: ID セルが空です。", impBadDate:"{n} 行目: {c} の日付が不正です。", impCardConflict:"「{p}」は別の cardinality で定義済み — エンジンが拒否します。", impRangeConflict:"「{p}」は別の range で定義済み — エンジンが拒否します。", impDone:"<b>{rows}</b> 行を取り込み → ファクト {facts}・ノード {nodes}（no-op {sup} 件スキップ）", impDoneToast:"ファクト {n} 件を取り込みました", run:"実行", rolesIntro:"各ノードには機密度ラベルが付きます。ロールは「見てよいラベルの集合」。「表示ロール」を切り替えると、その権限を持つ人の視点でグラフを探索でき、ロール外のノードは消えます。（探索補助であり認証ではありません）", labelsInUse:"このデータのラベル", noLabels:"このデータに機密度ラベルはありません — 全ノードが公開です。", roleSees:"「{role}」は {m} 中 {n} ノードを閲覧可", scope:"表示範囲", scopeTitle:"表示範囲（可視ラベル）", scopeIntro:"ノードと個々のファクトには機密度ラベルが付きます。表示するラベルをトグルで切替 — 隠したラベルのノード（とそこへの辺）やファクトは全ビューから消えます。探索補助であり認証ではありません。", scopeAll:"全て", scopeNone:"なし", scopeSees:"{m} 中 {n} ノードを表示", restrictedScope:"現在の表示範囲では非表示。", nHidden:"現在の表示範囲で {n} 件の値を非表示", cfHidden:"ラベルで非表示 {n}", embedding:"埋め込み", noVector:"このノードには検索に使う埋め込みがありません。", noValue:"値なし — このノードにそのプロパティはありません。", valuesW:"件の値", nLinked:"{n} 個の隣接ノード — クリックで開く", noLinked:"その述語での隣接ノードはありません。", nodeSummary:"{type}（プロパティ {n} 件）", nSimilar:"似ているノード {n} 件 — クリックで開く", noSimilar:"似ているノードは見つかりませんでした。", rawJson:"生 JSON", nChips:"{n} 件のノードを参照", nsFilter:"ネームスペースを絞り込み…", nsNone:"該当するネームスペースがありません。", provTip:"来歴 — この値を取り込んだソース", confTip:"確信度 — この値の裏付けの強さ（合意する独立ソース数）", findNode:"ノード検索", findPh:"フリーワード検索…", findNone:"該当なし。", focusPh:"ノード ID", emptyDb:"このデータベースは空です — データを取り込んで始めましょう。", tTypeMembers:"{type} が {n} 件 — クリックして近傍を描画", untypedLabel:"型なし", composeTitle:"合成", composeIntro:"ステップを鎖にして1本のクエリに。例を編集してみて — 各段で残るノード数が出ます。", addStep:"＋ステップ追加", cStartNodes:"このノードから始める", cStartSimilar:"似たノードから始める", cFollow:"辿る", cKeep:"型で絞る", cStart:"起点", cStep:"段",
        theme:"ライト/ダーク切替", signOut:"サインアウト", collapseSidebar:"サイドバーを閉じる", expandSidebar:"サイドバーを開く", back:"前の焦点に戻る", liveOn:"ライブ更新中（クリックで一時停止）", livePaused:"一時停止中（クリックで再開）", disconnected:"切断されました — 再接続中…", labels:"ラベル表示切替", zoomIn:"拡大", zoomOut:"縮小", fit:"全体表示", help:"操作説明", allEdges:"全ての辺", egAnalyst:"例: analyst",
-       connecting:"接続中…", live:"ライブ", paused:"一時停止", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
+       tkTitle:"最近の変更", tkNew:"新しいノード", tkEmpty:"変更を待っています…", connecting:"接続中…", live:"ライブ", paused:"一時停止", offline:"オフライン", nodes:"ノード", vec:"ベクトル", head:"head", signedIn:"サインイン", viewAsPill:"表示",
        lgFocus:"焦点", lgDeep:"遠方", hop:"ホップ",
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用",
@@ -421,7 +434,7 @@ const I18N = {
        resetIntro:"このデータベースの内容をすべて削除し、空の状態に戻します。", resetDb:"データベースをリセット…", resetTitle:"データベースをリセット", resetBody:"すべてのファクト・スキーマ・ルール・埋め込みを削除します。元には戻せません。--demo で起動したサーバーは、再起動するまでサンプルグラフを再投入しません。", resetType:"確認のため RESET と入力", cancel:"キャンセル", resetConfirm:"リセット", resetting:"リセット中…", resetFailed:"リセットに失敗しました: {e}", resetDone:"データベースをリセットしました。現在は空です" },
   zh: { explore:"浏览", focusNode:"焦点节点", predicate:"谓词（留空=全部）", distance:"距离（跳数）", viewAs:"查看身份", maxNodes:"最大节点数", draw:"绘制邻域", showAll:"显示全部节点", overviewMap:"概览图", tipMain:"拖动背景平移 · 滚轮缩放 · 拖动节点移动 · 单击查看详情 · 双击聚焦。", accessRoles:"访问角色", viewAsTag:"查看", roleName:"名称", roleLabels:"标签（留空=全部）", saveRole:"+ 保存角色", tipRoles:"角色是可见 authz 标签的预设。“查看身份”会用该标签集重新查询（用于探索 post-authz 可见性，非身份验证）。点击行可编辑。", note:"绘制邻域以浏览图。", queryTitle:"查询", queryOp:"想查找什么？", queryNode:"节点", queryK:"结果数", qopPoint:"属性值", qopExpand:"相连的邻居", qopNode:"节点的全部信息", qopSimilar:"相似节点（向量）", qopTimeline:"值的变迁（时间线）", qopConformance:"规则判定（conformance）", queryAsOf:"截至时点（留空=当前）", queryHops:"跳链（one-cardinality 谓词，从左到右）", queryRule:"已存规则", needHops:"请为跳链输入至少一个谓词。", noRules:"没有已存规则 — 可通过 rule_def ingest 行声明。", nSegments:"{n} 个区间 — 悬停查看时段", noSegments:"无区间 — 该路径上没有生效过的值。", nVerdicts:"已判定 {n} 个主体", noVerdicts:"该规则没有适用主体。", tlOpen:"现在", cfSummary:"<b>{ok}</b> OK · <b>{mm}</b> MISMATCH · <b>{ab}</b> ABSENT · 不适用 {na}", cfAbsent:"缺失 — 要求值: {req}", cfMismatch:"实际 {act} ≠ 要求 {req}", importTitle:"导入", importIntro:"载入 CSV：为每列选择角色，把日期列映射到 valid time，行即成为类型化事实。", importType:"节点类型", importSource:"来源（可选）", importRun:"导入", impRoleLiteral:"属性", impRoleId:"行 ID", impRoleEdge:"边 →", impRoleSkip:"忽略", impTargetPh:"目标类型", impPredPh:"谓词", impNotUtf8:"不是 UTF-8 — 请先转换（Excel 请另存为 CSV UTF-8）。", impBadQuote:"引号未闭合。", impEmpty:"文件为空。", impNeedType:"请输入节点类型。", impNeedId:"必须且只能选择一列作为行 ID。", impNeedEdge:"边列需要目标类型和谓词。", impEmptyId:"第 {n} 行：ID 单元格为空。", impBadDate:"第 {n} 行：{c} 的日期无效。", impCardConflict:"“{p}” 已以不同 cardinality 定义 — 引擎会拒绝。", impRangeConflict:"“{p}” 已以不同 range 定义 — 引擎会拒绝。", impDone:"已导入 <b>{rows}</b> 行 → {facts} 事实、{nodes} 节点（跳过 {sup} 个 no-op）", impDoneToast:"已导入 {n} 条事实", run:"运行", rolesIntro:"每个节点带有敏感度标签。角色是你被允许看到的标签集合；切换“查看身份”即可以该权限者的视角浏览图，角色之外的节点会隐藏。（探索辅助，非身份验证）", labelsInUse:"本数据中的标签", noLabels:"本数据没有敏感度标签 — 所有节点均公开。", roleSees:"“{role}”可见 {m} 中的 {n} 个节点", scope:"可见范围", scopeTitle:"可见范围（标签）", scopeIntro:"节点和单个事实都带有敏感度标签。切换要显示的标签 — 隐藏标签的节点（及其边）和事实会从所有视图中移除。探索辅助，非身份验证。", scopeAll:"全部", scopeNone:"无", scopeSees:"显示 {m} 中的 {n} 个节点", restrictedScope:"在当前可见范围下已隐藏。", nHidden:"当前可见范围下隐藏了 {n} 个值", cfHidden:"因标签隐藏 {n}", embedding:"嵌入向量", noVector:"该节点没有可用于搜索的嵌入向量。", noValue:"无值 — 该节点没有该属性。", valuesW:"个值", nLinked:"{n} 个相连节点 — 点击打开", noLinked:"该谓词下没有相连节点。", nodeSummary:"一个 {type}，含 {n} 个属性", nSimilar:"{n} 个相似节点 — 点击打开", noSimilar:"未找到相似节点。", rawJson:"原始 JSON", nChips:"引用了 {n} 个节点", nsFilter:"筛选命名空间…", nsNone:"没有匹配的命名空间。", provTip:"来源 — 该值摄取自的数据源", confTip:"置信度 — 该值的佐证程度（独立一致来源数）", findNode:"查找节点", findPh:"自由词搜索…", findNone:"无匹配。", focusPh:"节点 ID", emptyDb:"该数据库为空 — 导入一些数据以开始。", tTypeMembers:"{type} 共 {n} 个节点 — 选择一个以绘制其邻域", untypedLabel:"无类型", composeTitle:"合成", composeIntro:"把步骤连成一条查询。编辑示例 — 每步显示剩余节点数。", addStep:"+ 添加步骤", cStartNodes:"从该节点开始", cStartSimilar:"从相似节点开始", cFollow:"沿着", cKeep:"仅保留类型", cStart:"起点", cStep:"步",
        theme:"切换明暗", signOut:"退出登录", collapseSidebar:"收起侧边栏", expandSidebar:"展开侧边栏", back:"返回上一焦点", liveOn:"实时更新中（点击暂停）", livePaused:"已暂停（点击恢复）", disconnected:"连接已断开 — 正在重试…", labels:"切换标签", zoomIn:"放大", zoomOut:"缩小", fit:"适配", help:"操作说明", allEdges:"所有边", egAnalyst:"例: analyst",
-       connecting:"连接中…", live:"实时", paused:"暂停", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
+       tkTitle:"最近变更", tkNew:"新节点", tkEmpty:"等待变更…", connecting:"连接中…", live:"实时", paused:"暂停", offline:"离线", nodes:"节点", vec:"向量", head:"head", signedIn:"已登录", viewAsPill:"查看",
        lgFocus:"焦点", lgDeep:"更远", hop:"跳",
        detNode:"节点", detType:"类型", detLabel:"标签", untyped:"无类型", recentre:"以此为中心 ›", noProps:"无存储属性。", loading:"加载中…", restricted:"角色“{r}”下受限。",
        tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”",
@@ -438,7 +451,7 @@ function applyLang(l){ lang = I18N[l] ? l : 'en'; localStorage.setItem('stroma_l
   document.querySelectorAll('[data-i18n]').forEach(e=>e.textContent=t(e.dataset.i18n));
   document.querySelectorAll('[data-i18n-ph]').forEach(e=>e.placeholder=t(e.dataset.i18nPh));
   document.querySelectorAll('[data-i18n-title]').forEach(e=>e.title=t(e.dataset.i18nTitle));
-  legend(); renderSettings(); renderStats(); setLivePill(); renderNamespaces(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); renderCompose(); } }
+  legend(); renderSettings(); renderStats(); setLivePill(); renderTicker(); renderNamespaces(); if(typeof _schema!=='undefined'&&_schema){ renderScope(); fillPredSelects(); renderCompose(); } }
 const DEPTH = [[0.22,0.84,0.66],[0.35,0.66,1.0],[0.72,0.55,1.0],[0.95,0.76,0.30],[1.0,0.48,0.56],[0.55,0.6,0.72]];
 const hex = c => `rgb(${c.map(x=>(x*255)|0).join(',')})`;
 
@@ -650,6 +663,7 @@ function resize(){ W=cv.clientWidth; H=cv.clientHeight; cv.width=W*dpr; cv.heigh
 function drawLabels(){
   if(!lctx) return;
   lctx.setTransform(dpr,0,0,dpr,0,0); lctx.clearRect(0,0,W,H);
+  if(N) drawHighlights();
   if(!N || N>80 || !labelsOn) return;
   const light = document.documentElement.dataset.theme==='light';
   lctx.font='500 11px ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif'; lctx.textBaseline='middle';
@@ -854,12 +868,19 @@ async function overviewDraw(){ pushView(snap('ov')); const btn=$('map'); btn.dis
   }catch(x){ toast(''+x,true); } finally{ btn.disabled=false; } }
 $('map').onclick=overviewDraw;
 
-// ---------- live updates: long-poll /events, re-query the current slice on change ----------
-// Head ticks are coalesced: the slice is re-queried at most every LIVE_MIN_MS (trailing refresh),
-// so a bulk load neither hammers the query endpoint once per group-commit nor re-settles the layout
-// faster than it can rest.
-const LIVE_MIN_MS = 2500;
-let liveLastQ = 0, liveQueued = false;
+// ---------- live updates: the change feed (/events/stream), applied to the view incrementally ----------
+// Each event names the nodes a durable batch touched (type, predicate names, new or not; never
+// values). A neighbourhood or whole-graph view probes the touched nodes' edges with a small 1-hop
+// query and merges them in place: existing nodes keep their positions, new nodes linked to the
+// slice join next to their neighbour with a ring that grows and fades, changed nodes flash. A
+// resync, a change set larger than LIVE_INCR_MAX, an overview map or any other view falls back to
+// re-querying the whole slice, coalesced to at most one re-query every LIVE_MIN_MS. The LIVE pill
+// gates all of it: paused, nothing is applied and the ticker says so; resuming re-queries once.
+const LIVE_MIN_MS = 2500, LIVE_INCR_MAX = 12, PROBE_NODES = 500, TICKER_N = 6;
+let liveLastQ = 0, liveQueued = false, liveEs = null, liveMask = null, liveStatsT = 0;
+let recent = [];               // ticker rows, newest first: {at, node, name, pred, kind, fresh}
+const hl = new Map();          // node id -> {t0, kind:'new'|'changed'} (drawn on the label overlay)
+const flashTypes = new Set();  // overview: type names to flash once the re-query lands
 async function liveRefresh(){
   if(liveQueued) return; liveQueued = true;
   const wait = liveLastQ + LIVE_MIN_MS - performance.now();
@@ -869,27 +890,132 @@ async function liveRefresh(){
   try{ const res=await api('/query', lastReq); if(!res.error){
     let nodes=res.nodes;
     if(lastReq.op==='overview'){ overviewSamples=new Map(res.nodes.map(n=>[n.id,n.sample])); overviewTypeNames=new Map(res.nodes.map(n=>[n.id,n.name])); nodes=res.nodes.map(n=>({id:n.id,depth:0,name:`${n.name} ×${n.count}`,count:n.count})); }
-    loadGraph(nodes, res.edges, true); toast(t('tLive')); } }catch(x){}
+    loadGraph(nodes, res.edges, true); toast(t('tLive'));
+    if(lastReq.op==='overview' && flashTypes.size){ const now=performance.now();
+      for(const [id,nm] of overviewTypeNames) if(flashTypes.has(nm)) hl.set(id,{t0:now,kind:'changed'}); }
+    flashTypes.clear(); } }catch(x){ console.warn('live refresh failed', x); }
 }
-async function startPoll(){ if(pollStarted) return; pollStarted=true;
-  try{ const s=await api('/stats'); liveHead = s.facts?.durable_head ?? 0; wsConnected=true; }catch(x){ wsConnected=false; setLivePill(); }
-  while(true){
-    let head;
-    try{ const r=await fetch(BASE+'/events?since='+liveHead); if(!r.ok){ wsConnected=false; setLivePill(); await new Promise(z=>setTimeout(z,2000)); continue; } head=(await r.json()).head; wsConnected=true; }
-    catch(x){ wsConnected=false; setLivePill(); await new Promise(z=>setTimeout(z,2000)); continue; }
-    setLivePill();
-    if(head===liveHead) continue;      // timeout tick, no change
-    liveHead=head; stats();   // refresh header counters too
-    if(liveOn && lastReq) liveRefresh();
+function startPoll(){ if(pollStarted) return; pollStarted=true;
+  (async()=>{ try{ const s=await api('/stats'); liveHead = s.facts?.durable_head ?? 0; wsConnected=true; }catch(x){ wsConnected=false; }
+    setLivePill(); renderTicker(); liveConnect(); })(); }
+// (re)open the stream from the current cursor under the current visibility scope
+function liveConnect(){
+  if(liveEs){ liveEs.close(); liveEs=null; }
+  liveMask = scopeMask();
+  const q = 'since='+liveHead+(liveMask!==null ? '&allowed_labels='+liveMask : '');
+  if(!window.EventSource){ livePoll(); return; }
+  const es = new EventSource(BASE+'/events/stream?'+q); liveEs = es;
+  es.onopen = ()=>{ wsConnected=true; setLivePill(); };
+  es.onmessage = e=>{ let m; try{ m=JSON.parse(e.data); }catch(x){ return; } wsConnected=true; setLivePill(); onFeed(m); };
+  // the browser reconnects on its own and resumes with Last-Event-ID; a refused reconnect (an
+  // expired session, a restart) closes the source, so retry it from here
+  es.onerror = ()=>{ wsConnected=false; setLivePill(); if(es.readyState===EventSource.CLOSED && liveEs===es){ liveEs=null; setTimeout(liveConnect, 3000); } };
+}
+// long-poll form of the same feed, for a browser without EventSource
+async function livePoll(){ while(!liveEs){
+  const mask=scopeMask(); const q='since='+liveHead+'&changes=1'+(mask!==null ? '&allowed_labels='+mask : '');
+  try{ const r=await fetch(BASE+'/events?'+q); if(!r.ok) throw new Error('HTTP '+r.status); const m=await r.json(); wsConnected=true; setLivePill(); onFeed(m); }
+  catch(x){ wsConnected=false; setLivePill(); await new Promise(z=>setTimeout(z,2000)); } } }
+function onFeed(m){
+  if(typeof m.head!=='number') return;
+  if(m.head!==liveHead){ liveHead=m.head; const now=performance.now(); if(now-liveStatsT>1000){ liveStatsT=now; stats(); } }
+  const ch = m.changes||[];
+  if(!liveOn) return;                       // paused: nothing applied; resuming re-queries the slice
+  if(!m.resync) pushRecent(ch);
+  if(!lastReq) return;
+  if(m.resync){ liveRefresh(); return; }
+  if(!ch.length) return;
+  if(lastReq.op==='overview'){ ch.forEach(c=>flashTypes.add(c.type||UNTYPED_LABEL)); liveRefresh(); return; }
+  if((lastReq.op!=='neighborhood' && lastReq.op!=='graph') || ch.length>LIVE_INCR_MAX){ liveRefresh(); return; }
+  applyChanges(ch);
+}
+// probe each touched node's 1-hop edges (same predicate filter and scope as the view), then merge
+async function applyChanges(ch){
+  const req=lastReq, now=performance.now();
+  ch.forEach(c=>{ if(idx.has(c.node)) hl.set(c.node,{t0:now,kind:'changed'}); });
+  const res = await Promise.all(ch.map(c=>{ const q={op:'neighborhood', subject:c.node, hops:1, max_nodes:PROBE_NODES};
+    if(req.predicate) q.predicate=req.predicate; if(req.allowed_labels!==undefined) q.allowed_labels=req.allowed_labels;
+    return api('/query', q).catch(()=>null); }));
+  if(lastReq!==req || !liveOn) return;      // the view changed (or was paused) while probing
+  if(res.some(r=>!r || r.error || !r.nodes || r.nodes.length>=PROBE_NODES)){ liveRefresh(); return; }
+  const grew = mergeChanges(ch, res, req.op==='neighborhood' ? +req.hops : Infinity, +req.max_nodes||3000);
+  const t1=performance.now(); for(const id of grew) hl.set(id,{t0:t1,kind:'new'});
+  // the ticker names the nodes as the probes now see them (a renamed node, a new one)
+  recent.forEach(r=>{ const i=idx.get(r.node); if(i!==undefined && names[i]) r.name=names[i]; }); renderTicker();
+}
+// Merge probe results into the current slice without moving anything already drawn. Returns the
+// ids added. Pure over the graph model (ids/idx/depth/names, ePairs/eW), so it is testable alone.
+function mergeChanges(ch, res, maxDepth, cap){
+  const add = new Map();                    // id -> {depth, anchor}
+  const inView = id => idx.has(id) || add.has(id);
+  const dOf = id => idx.has(id) ? depth[idx.get(id)] : add.get(id).depth;
+  const room = () => N + add.size < cap;
+  const nameOf = new Map(), probed = new Map();
+  ch.forEach((c,k)=>{ const r=res[k]; probed.set(c.node, r.edges||[]); r.nodes.forEach(n=>nameOf.set(n.id, n.name||null)); });
+  const join = (id, via) => { if(room()) add.set(id, {depth: maxDepth===Infinity ? 0 : dOf(via)+1, anchor:via}); };
+  // the whole-graph view shows every node, linked or not
+  if(maxDepth===Infinity) ch.forEach(c=>{ if(c.new && !inView(c.node) && nameOf.has(c.node) && room()) add.set(c.node,{depth:0, anchor:null}); });
+  for(let pass=0; pass<2; pass++) for(const [u, es] of probed) for(const [a,b] of es){ const v = a===u ? b : a;
+    if(inView(u) && !inView(v) && dOf(u) < maxDepth) join(v, u);
+    else if(!inView(u) && inView(v) && dOf(v) < maxDepth) join(u, v); }
+  // edges: a probed node's incident edges are replaced by what the probe saw (adds and removals)
+  const key = (a,b) => a<b ? a+':'+b : b+':'+a;
+  const edges = new Map(); for(let e=0;e<ePairs.length;e+=2){ const a=ids[ePairs[e]], b=ids[ePairs[e+1]]; edges.set(key(a,b), [a,b,eW[e/2]]); }
+  for(const [u, es] of probed){ if(!inView(u)) continue;
+    for(const [k,[a,b]] of edges) if(a===u||b===u) edges.delete(k);
+    for(const [a,b,w] of es) if(inView(a) && inView(b)) edges.set(key(a,b), [a,b,w||1]); }
+  // existing nodes keep everything; names refresh from the probes
+  for(const [id,nm] of nameOf) if(idx.has(id)) names[idx.get(id)] = nm;
+  if(add.size){
+    const n2 = N + add.size, grow = a => { const b=new Float32Array(n2); b.set(a); return b; };
+    px=grow(px); py=grow(py); vx=grow(vx); vy=grow(vy);
+    let i=N; for(const [id,a] of add){ ids[i]=id; idx.set(id,i); depth[i]=a.depth; names[i]=nameOf.get(id)??null; counts[i]=null;
+      const j = a.anchor!==null ? idx.get(a.anchor) : undefined, ang=Math.random()*6.283;
+      px[i]=(j!==undefined ? px[j] : 0)+Math.cos(ang)*34; py[i]=(j!==undefined ? py[j] : 0)+Math.sin(ang)*34; vx[i]=0; vy[i]=0; i++; }
+    N = n2; settle = Math.max(settle, 60); autoFit = false;
+    $('note').style.display = 'none'; $('legend').style.display = '';
   }
+  ePairs=[]; eW=[]; for(const [a,b,w] of edges.values()){ ePairs.push(idx.get(a), idx.get(b)); eW.push(w); }
+  updateNodeCandidates(); buildBuffers();
+  return [...add.keys()];
 }
-// green + pulsing dot only while the long-poll is up and the viewer hasn't paused it; otherwise
+// ---------- recent-changes ticker ----------
+function pushRecent(ch){
+  const at=Date.now();
+  for(const c of ch.slice(-TICKER_N)){
+    const i=idx.get(c.node), row={ at, node:c.node, name:(i!==undefined && names[i]) || _cand.get(c.node) || ('#'+c.node),
+      pred: c.predicates.length ? c.predicates.join(', ') : (c.new ? t('tkNew') : (c.type||'')), kind: c.new ? 'new' : 'changed', fresh:true };
+    recent.unshift(row);
+    if(row.name[0]==='#') resolveName(c.node).then(nm=>{ if(nm){ row.name=nm; renderTicker(); } });
+  }
+  recent = recent.slice(0, TICKER_N); renderTicker();
+}
+function renderTicker(){ const el=$('ticker'); if(!el) return;
+  el.classList.toggle('hidden', !pollStarted); el.classList.toggle('paused', !liveOn);
+  $('tkState').textContent = liveOn ? '' : t('paused');
+  const tm = at => new Date(at).toLocaleTimeString(lang, {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  $('tkList').innerHTML = recent.length ? recent.map((r,k)=>`<div class="tk-r ${r.kind}${r.fresh?' fresh':''}" data-k="${k}"><span class="tk-t">${tm(r.at)}</span><span class="tk-n">${esc(r.name)}</span><span class="tk-p">${esc(r.pred)}</span></div>`).join('')
+    : `<div class="tk-empty">${t('tkEmpty')}</div>`;
+  recent.forEach(r=>r.fresh=false); }
+$('tkList').onclick=e=>{ const r=e.target.closest('.tk-r'); if(r) recenter(recent[+r.dataset.k].node); };
+// change rings on the label overlay: a new node's ring grows and fades, a changed node's flashes
+function drawHighlights(){ if(!hl.size) return; const now=performance.now();
+  const light = document.documentElement.dataset.theme==='light';
+  const rgb = { new: light?'18,180,136':'55,214,168', changed: light?'206,128,10':'255,186,82' };
+  for(const [id,h] of hl){ const dur = h.kind==='new' ? 2400 : 1600, k=(now-h.t0)/dur;
+    if(k>=1){ hl.delete(id); continue; } const i=idx.get(id); if(i===undefined) continue;
+    const sx=(px[i]+cam.x)*cam.z + W/2, sy=(py[i]+cam.y)*cam.z + H/2, z=Math.max(.6, Math.min(cam.z, 2));
+    const r = (h.kind==='new' ? 5+k*20 : 9+Math.sin(k*Math.PI*4)*2.5) * z;
+    lctx.beginPath(); lctx.arc(sx, sy, r, 0, 6.283);
+    if(h.kind==='new'){ lctx.fillStyle=`rgba(${rgb.new},${(1-k)*.22})`; lctx.fill(); }
+    lctx.strokeStyle=`rgba(${rgb[h.kind]},${(1-k)*.95})`; lctx.lineWidth=2; lctx.stroke(); } }
+// green + pulsing dot only while the stream is up and the viewer hasn't paused it; otherwise
 // a calm grey dot (paused or disconnected — neither reads as "something is wrong", unlike red).
 function setLivePill(){ const b=$('livePill'); if(!b) return; const live = liveOn && wsConnected;
   b.classList.toggle('on', live);
   b.title = !wsConnected ? t('disconnected') : (liveOn ? t('liveOn') : t('livePaused'));
   b.innerHTML = `<span class="dot"></span>${!wsConnected ? t('offline') : (liveOn ? t('live') : t('paused'))}`; }
-$('livePill').onclick=()=>{ liveOn=!liveOn; setLivePill(); if(liveOn && lastReq){ (async()=>{ try{ const res=await api('/query',lastReq); if(!res.error) loadGraph(res.nodes,res.edges,true); }catch(x){} })(); } };
+$('livePill').onclick=()=>{ liveOn=!liveOn; setLivePill(); renderTicker(); if(liveOn && lastReq){ liveLastQ=0; liveRefresh(); } };
 // Explore | Query are peers — two tabs of one "ask the graph" panel
 // Explore | Query | Compose are peer tabs of one "ask the graph" panel
 const PANES={explore:'paneExplore', query:'paneQuery', compose:'paneCompose', import:'paneImport'};
@@ -1230,7 +1356,7 @@ async function renderScopeEffect(){ const el=$('scopeEffect'); if(!el) return; c
   }catch(x){ el.textContent=''; } }
 $('scopeBtn').onclick=()=>{ const p=$('scopePop'); p.classList.toggle('hidden'); if(!p.classList.contains('hidden')) renderScope(); };
 $('scopeChips').onclick=e=>{ const c=e.target.closest('.scope-chip'); if(!c) return; const l=+c.dataset.l;
-  if(hidden.has(l)) hidden.delete(l); else hidden.add(l); renderScope(); if(lastReq) rerun(); };
+  if(hidden.has(l)) hidden.delete(l); else hidden.add(l); renderScope(); if(lastReq) rerun(); if(pollStarted) liveConnect(); };
 
 // ---------- theme ----------
 function applyTheme(t){ document.documentElement.dataset.theme=t; localStorage.setItem('stroma_theme',t);
