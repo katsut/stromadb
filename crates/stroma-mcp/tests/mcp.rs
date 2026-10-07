@@ -182,6 +182,9 @@ fn mcp_conformance() {
         "{\"fact\":{\"subject\":1003,\"predicate\":\"assigned-to\",\"object\":{\"node\":12}}}\n",
         "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-at\",\"object\":{\"int\":1200}}}\n",
         "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+        // 1004 is pending: assigned, not approved, no approval time yet
+        "{\"node\":{\"id\":1004,\"type\":\"Issue\"}}\n",
+        "{\"fact\":{\"subject\":1004,\"predicate\":\"assigned-to\",\"object\":{\"node\":201}}}\n",
     ))
     .unwrap();
     drop(db);
@@ -323,6 +326,65 @@ fn mcp_conformance() {
     let r = mcp.call(json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
         "params":{"name":"rule","arguments":{"rule_name":"nope"}}}));
     assert_eq!(r["result"]["isError"], json!(true), "unknown rule: {r}");
+
+    // Missing information: the tool contract advertises `subject`/`assume` and tells the client
+    // not to fill gaps by inference, on conformance and on the tools whose answer may be empty.
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":10,"method":"tools/list"}));
+    let tools = r["result"]["tools"].as_array().unwrap();
+    let tool = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap().clone();
+    let conf = tool("conformance");
+    assert!(conf["inputSchema"]["properties"]["assume"].is_object());
+    assert!(conf["inputSchema"]["properties"]["subject"].is_object());
+    let conf_desc = conf["description"].as_str().unwrap();
+    assert!(conf_desc.contains("cannot judge yet"), "{conf_desc}");
+    assert!(
+        conf_desc.contains("not \"the rule does not apply\""),
+        "{conf_desc}"
+    );
+    for name in ["conformance", "lookup", "point", "expand"] {
+        let t = tool(name);
+        let d = t["description"].as_str().unwrap();
+        assert!(d.contains("do not"), "{name}: {d}");
+        assert!(d.contains("ask the user"), "{name}: {d}");
+    }
+    let call = |id: u64, args: Value| {
+        json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+            "params":{"name":"conformance","arguments":args}})
+    };
+    let parse = |r: Value| -> Value {
+        serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    // 1004 is pending: `subject` alone runs the stored rule and names the missing anchor …
+    let out = parse(mcp.call(call(11, json!({"subject":1004}))));
+    let v = &out["verdicts"][0];
+    assert_eq!(v["rule"], "approval", "{out}");
+    assert_eq!(v["required"], json!(null));
+    assert_eq!(
+        v["missing"],
+        json!([{"kind":"anchor","node":1004,"predicate":"approved-at"}])
+    );
+    // … and the user's answer ("as if approved now") resolves it to the current manager Carol.
+    let out = parse(mcp.call(call(
+        12,
+        json!({"subject":1004,"assume":{"approved-at":7000}}),
+    )));
+    let v = &out["verdicts"][0];
+    assert_eq!(v["required"], json!({ "node": 12 }), "{out}");
+    assert_eq!(v["assumed"], json!(["approved-at"]));
+    assert_eq!(v["missing"], json!([]));
+    // 1003's path breaks at its assignee's missing department.
+    let out = parse(mcp.call(call(13, json!({"subject":1003}))));
+    assert_eq!(
+        out["verdicts"][0]["missing"],
+        json!([{"kind":"hop","node":12,"predicate":"member-of"}])
+    );
+    // a Person is covered by no rule.
+    let out = parse(mcp.call(call(14, json!({"subject":10}))));
+    assert_eq!(out["verdicts"], json!([]));
+    assert_eq!(
+        out["missing"],
+        json!([{"kind":"no_rule","node":10,"type":"Person"}])
+    );
 
     let _ = std::fs::remove_dir_all(&base);
 }

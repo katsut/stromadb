@@ -652,7 +652,7 @@ fn conformance_for_given_subjects() {
         json!({
             "subject": 10, "verdict": "NOT_APPLICABLE", "kind": null, "required": null,
             "distinct": null, "actual": null, "as_of": null, "case": null,
-            "reason": "unknown_subject"
+            "reason": "unknown_subject", "missing": [], "assumed": []
         })
     );
     assert_eq!(rows[2]["reason"], json!("out_of_scope"), "{masked}");
@@ -747,7 +747,8 @@ fn required_unresolved_is_not_a_mismatch() {
         json!({
             "subject": 1010, "verdict": "NOT_APPLICABLE", "kind": null, "required": null,
             "distinct": null, "actual": {"node": 10}, "as_of": null, "case": null,
-            "reason": "required_unresolved"
+            "reason": "required_unresolved",
+            "missing": [{"kind": "hop", "node": 103, "predicate": "member-of"}], "assumed": []
         })
     );
     let full = db.query(&rule()).unwrap();
@@ -1334,5 +1335,277 @@ fn literal_terminal_via_json_rule() {
         );
     }
 
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+fn verdict_of(r: &serde_json::Value, subject: u64) -> serde_json::Value {
+    r["verdicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["subject"] == subject)
+        .unwrap()
+        .clone()
+}
+
+// Two subjects whose judgment stops short: 1010 is approved by Alice but carries no approval time,
+// and 1011 is assigned to Heidi(103), who belongs to no department.
+const GAPS: &str = concat!(
+    "{\"node\":{\"id\":1010,\"type\":\"Issue\",\"label\":0}}\n",
+    "{\"fact\":{\"subject\":1010,\"predicate\":\"assigned-to\",\"object\":{\"node\":101}}}\n",
+    "{\"fact\":{\"subject\":1010,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+    "{\"fact\":{\"subject\":1010,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+    "{\"node\":{\"id\":103,\"type\":\"Person\",\"label\":0}}\n",
+    "{\"node\":{\"id\":1011,\"type\":\"Issue\",\"label\":0}}\n",
+    "{\"fact\":{\"subject\":1011,\"predicate\":\"assigned-to\",\"object\":{\"node\":103}}}\n",
+    "{\"fact\":{\"subject\":1011,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+    "{\"fact\":{\"subject\":1011,\"predicate\":\"approved-at\",\"object\":{\"int\":1200}}}\n",
+    "{\"fact\":{\"subject\":1011,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+);
+
+// Missing information is reported instead of an empty answer, and a caller-supplied anchor instant
+// evaluates a pending subject without ever overriding a value the graph holds.
+#[test]
+fn missing_information_and_assumptions() {
+    let (dir, db) = fixture_db("missing");
+    db.ingest_str(GAPS).unwrap();
+
+    // pending subject (1003: released, no approval, no approved-at): ABSENT, the anchor is named.
+    let r = db.query(&rule()).unwrap();
+    let v = verdict_of(&r, 1003);
+    assert_eq!(v["verdict"], json!("ABSENT"));
+    assert_eq!(v["required"], json!(null));
+    assert_eq!(
+        v["missing"],
+        json!([{ "kind": "anchor", "node": 1003, "predicate": "approved-at" }])
+    );
+    assert_eq!(v["assumed"], json!([]));
+    // fully derived verdicts carry empty lists (the fields are always present).
+    assert_eq!(verdict_of(&r, 1001)["missing"], json!([]));
+    assert_eq!(r["missing"], json!([]));
+
+    // with assume = now (after the 5000 transfer): required resolves to the current manager Carol.
+    let mut q = rule();
+    q["assume"] = json!({ "approved-at": 7000 });
+    let ra = db.query(&q).unwrap();
+    let v = verdict_of(&ra, 1003);
+    assert_eq!(v["verdict"], json!("ABSENT"));
+    assert_eq!(v["required"], json!({ "node": 12 }));
+    assert_eq!(v["as_of"], json!(7000));
+    assert_eq!(v["assumed"], json!(["approved-at"]));
+    assert_eq!(v["missing"], json!([]));
+
+    // graph value present + assume given: the graph value is used and nothing is reported assumed.
+    let v = verdict_of(&ra, 1001);
+    assert_eq!(v["as_of"], json!(1200));
+    assert_eq!(v["required"], json!({ "node": 10 }));
+    assert_eq!(v["verdict"], json!("OK"));
+    assert_eq!(v["assumed"], json!([]));
+    // `{"int": N}` is accepted as well as a bare integer.
+    q["assume"] = json!({ "approved-at": { "int": 7000 } });
+    assert_eq!(
+        verdict_of(&db.query(&q).unwrap(), 1003)["required"],
+        json!({ "node": 12 })
+    );
+
+    // actual present, anchor missing, no assume: no mismatch is derived; the anchor is named.
+    let v = verdict_of(&r, 1010);
+    assert_eq!(v["verdict"], json!("NOT_APPLICABLE"));
+    assert_eq!(v["reason"], json!("required_unresolved"));
+    assert_eq!(v["actual"], json!({ "node": 10 }));
+    assert_eq!(
+        v["missing"],
+        json!([{ "kind": "anchor", "node": 1010, "predicate": "approved-at" }])
+    );
+    // only an explicit assumption re-derives it, and Alice past the transfer is stale, not wrong.
+    let v = verdict_of(&ra, 1010);
+    assert_eq!(v["verdict"], json!("MISMATCH"));
+    assert_eq!(v["kind"], json!("stale"));
+
+    // broken hop: the path ends at Heidi's missing member-of.
+    assert_eq!(
+        verdict_of(&r, 1011)["missing"],
+        json!([{ "kind": "hop", "node": 103, "predicate": "member-of" }])
+    );
+
+    // subject alone, of an uncovered type: no_rule (a rule is stored for Issue only).
+    let rule_def = json!({ "rule_def": { "name": "release-approval", "rule": rule_body() } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+    let r = db
+        .query(&json!({ "op": "conformance", "subject": 10 }))
+        .unwrap();
+    assert_eq!(r["verdicts"], json!([]));
+    assert_eq!(
+        r["missing"],
+        json!([{ "kind": "no_rule", "node": 10, "type": "Person" }])
+    );
+    // an id with no node answers no_rule with no type.
+    let r = db
+        .query(&json!({ "op": "conformance", "subject": 999_999 }))
+        .unwrap();
+    assert_eq!(
+        r["missing"],
+        json!([{ "kind": "no_rule", "node": 999_999, "type": null }])
+    );
+    // a covered subject alone: every stored rule for its type, each row naming its rule.
+    let r = db
+        .query(&json!({ "op": "conformance", "subject": 1003, "assume": { "approved-at": 7000 } }))
+        .unwrap();
+    assert_eq!(r["missing"], json!([]));
+    assert_eq!(subjects_of(&r), vec![1003]);
+    assert_eq!(r["verdicts"][0]["rule"], json!("release-approval"));
+    assert_eq!(r["verdicts"][0]["required"], json!({ "node": 12 }));
+
+    // malformed assumptions are clear errors.
+    let mut bad = rule();
+    bad["assume"] = json!({ "no-such-predicate": 1 });
+    let err = db.query(&bad).unwrap_err();
+    assert!(err.contains("no-such-predicate"), "unexpected: {err}");
+    bad["assume"] = json!({ "approved-at": "yesterday" });
+    let err = db.query(&bad).unwrap_err();
+    assert!(err.contains("approved-at"), "unexpected: {err}");
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+// IVM: an evaluation under `assume` is computed on demand and never becomes the maintained verdict;
+// the real anchor fact re-derives the stored verdict exactly as before.
+#[test]
+fn assume_is_not_stored_by_the_watch() {
+    let (dir, db) = fixture_db("assume_ivm");
+    let rule_def = json!({ "rule_def": { "name": "release-approval", "rule": rule_body() } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+    let watch = json!({"op":"conformance_watch","rule_name":"release-approval"});
+    let w = db.query(&watch).unwrap();
+    let cursor = w["cursor"].as_u64().unwrap();
+    let stored = verdict_of(&w, 1003);
+    assert_eq!(stored["required"], json!(null));
+
+    // the watch itself refuses assumptions: it only ever holds graph-only verdicts.
+    let mut wa = watch.clone();
+    wa["assume"] = json!({ "approved-at": 7000 });
+    assert!(db.query(&wa).is_err());
+
+    // an on-demand evaluation under an assumption …
+    let a = db
+        .query(
+            &json!({ "op": "conformance", "rule_name": "release-approval",
+                        "assume": { "approved-at": 7000 } }),
+        )
+        .unwrap();
+    assert_eq!(verdict_of(&a, 1003)["required"], json!({ "node": 12 }));
+    // … leaves the maintained map and its journal untouched.
+    let changes =
+        json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor});
+    assert_eq!(db.query(&changes).unwrap()["changes"], json!([]));
+    assert_eq!(verdict_of(&db.query(&watch).unwrap(), 1003), stored);
+
+    // the anchor fact lands: the stored verdict is re-derived from the graph (Alice as-of 1200).
+    db.ingest_str(concat!(
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-at\",\"object\":{\"int\":1200}}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+    ))
+    .unwrap();
+    let c = db.query(&changes).unwrap();
+    let changes = c["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["subject"], json!(1003));
+    assert_eq!(changes[0]["old"], stored);
+    assert_eq!(changes[0]["new"]["verdict"], json!("OK"));
+    assert_eq!(changes[0]["new"]["required"], json!({ "node": 10 }));
+    assert_eq!(changes[0]["new"]["missing"], json!([]));
+    assert_eq!(changes[0]["new"]["assumed"], json!([]));
+    assert_eq!(
+        verdict_map(&db.query(&watch).unwrap()),
+        verdict_map(&db.query(&rule()).unwrap())
+    );
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+// Under a label-restricted token, `missing` / `assumed` never name a predicate value or a node the
+// token cannot read: a judgment that read a hidden fact or a hidden node is withheld
+// (`hidden_by_label`, no values), and an assumption cannot probe a hidden anchor.
+#[test]
+fn missing_respects_access_labels() {
+    let (dir, db) = fixture_db("missing_labels");
+    db.ingest_str(GAPS).unwrap();
+    db.ingest_str(concat!(
+        // 1012: approved by Alice; its approval time exists but is labeled 2.
+        "{\"node\":{\"id\":1012,\"type\":\"Issue\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"assigned-to\",\"object\":{\"node\":101}}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"approved-at\",\"object\":{\"int\":1200},\"label\":2}}\n",
+        "{\"fact\":{\"subject\":1012,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+        // Heidi (1011's department-less assignee) is a label-2 node.
+        "{\"node\":{\"id\":103,\"label\":2}}\n",
+    ))
+    .unwrap();
+    let rule_def = json!({ "rule_def": { "name": "release-approval", "rule": rule_body() } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+
+    let scope = mcp::Scope {
+        allowed_labels: Some(1),
+        ..Default::default()
+    };
+    let call = |args: serde_json::Value| {
+        let msg = json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                         "params":{"name":"conformance","arguments":args}});
+        let r = mcp::handle_message_scoped(&db, &msg, &scope).unwrap();
+        assert_ne!(r["result"]["isError"], json!(true), "{r}");
+        serde_json::from_str::<serde_json::Value>(
+            r["result"]["content"][0]["text"].as_str().unwrap(),
+        )
+        .unwrap()
+    };
+    let withheld = |v: &serde_json::Value| {
+        assert_eq!(v["reason"], json!("hidden_by_label"), "{v}");
+        assert_eq!(v["missing"], json!([]), "{v}");
+        assert_eq!(v["assumed"], json!([]), "{v}");
+        assert_eq!(v["actual"], json!(null), "{v}");
+    };
+    let ids = json!([1003, 1011, 1012]);
+
+    // the hidden approval time is neither reported missing nor replaceable by an assumption.
+    let r = call(json!({ "rule_name": "release-approval", "subjects": ids }));
+    withheld(&verdict_of(&r, 1012));
+    let r = call(json!({ "rule_name": "release-approval", "subjects": ids,
+                         "assume": { "approved-at": 7000 } }));
+    withheld(&verdict_of(&r, 1012));
+    // the hop that ends on a hidden node does not name it.
+    withheld(&verdict_of(&r, 1011));
+    // a fact the token can read is still reported (and assumable) as usual.
+    let v = verdict_of(&r, 1003);
+    assert_eq!(v["assumed"], json!(["approved-at"]));
+    assert_eq!(v["required"], json!({ "node": 12 }));
+
+    // a hidden node alone answers exactly like an id with no node: no_rule with no type.
+    let r = call(json!({ "subject": 103 }));
+    assert_eq!(
+        r["missing"],
+        json!([{ "kind": "no_rule", "node": 103, "type": null }])
+    );
+
+    // the unrestricted reader sees the real gaps.
+    let full = db
+        .query(
+            &json!({ "op": "conformance", "rule_name": "release-approval",
+                        "subjects": ids }),
+        )
+        .unwrap();
+    assert_eq!(verdict_of(&full, 1012)["verdict"], json!("OK"));
+    assert_eq!(
+        verdict_of(&full, 1011)["missing"],
+        json!([{ "kind": "hop", "node": 103, "predicate": "member-of" }])
+    );
+
+    // the maintained watch applies the same rules on read.
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval","allowed_labels":1}))
+        .unwrap();
+    withheld(&verdict_of(&w, 1011));
+    withheld(&verdict_of(&w, 1012));
+
+    drop(db);
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }

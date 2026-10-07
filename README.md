@@ -66,7 +66,9 @@ Agents start from what they are handed, usually an external key rather than a no
 `conformance` takes `subjects: [id]` to return just the verdicts for the items being decided. A
 full `conformance` evaluation over MCP is paged (50 rows by default, `NOT_APPLICABLE` rows counted
 but omitted), while the HTTP op still returns every verdict. The server's MCP instructions spell
-out the call order: `schema`, `lookup`, `point`/`expand`/`timeline`, then `conformance`.
+out the call order: `schema`, `lookup`, `point`/`expand`/`timeline`, then `conformance`. They also
+tell the client not to fill gaps by inference: when an answer is empty or a verdict reports
+`missing`, the client asks the user for that one item and re-runs `conformance` with `assume`.
 
 For a single-process/offline setup, `stroma-mcp --db ./mydb` speaks MCP over stdio against the
 directory directly (one process at a time — the directory is locked while a server runs).
@@ -139,8 +141,13 @@ and idle tenants can scale to zero.
   corrupting it.
 - **Declared rules, live verdicts** — declare a rule once (*an issue's approver must be its
   department's manager as of the approval instant, and must differ from its author*) and read
-  deterministic per-subject verdicts (`OK` / `MISMATCH` stale|wrong / `ABSENT`), maintained
-  **incrementally** as writes land (measured 100–1800× cheaper than re-evaluation).
+  deterministic per-subject verdicts (`OK` / `MISMATCH` stale|wrong / `ABSENT` /
+  `NOT_APPLICABLE` with a reason), maintained **incrementally** as writes land (measured
+  100–1800× cheaper than re-evaluation). A judgment that stops short says what is `missing` (an
+  as-of anchor, a hop, or no rule for the subject) instead of answering empty. An approval with no
+  approval time is `NOT_APPLICABLE` / `required_unresolved` with the anchor named, never a
+  mismatch. `assume: {"approved-at": <now>}` evaluates it on demand under a caller-supplied
+  anchor; graph values win, and the maintained verdict is never replaced.
 - **Provenance & confidence** — facts name their source; reads surface it with a coarse confidence
   tier (corroboration, freshness), and multi-hop answers carry a **weakest-link** tier naming the
   bottleneck hop.

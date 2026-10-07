@@ -72,6 +72,9 @@ AGENTS.local.md
 .codeium/
 .aiderignore
 
+# --- Local git worktrees ---
+.worktrees/
+
 # --- Local notes ---
 /scratch/
 TODO.local.md

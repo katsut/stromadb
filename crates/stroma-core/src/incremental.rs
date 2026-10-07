@@ -216,11 +216,20 @@ impl MaintainedConformance {
         diffs
     }
 
-    /// Judge `s` traced, replace its support set, store and return the verdict.
+    /// Judge `s` traced, replace its support set, store and return the verdict. The maintained map
+    /// holds graph-only verdicts: it is always judged with no assumptions, so an on-demand
+    /// [`conformance::evaluate_assuming`] can never become the stored verdict.
     fn judge_into(&mut self, snap: &Snapshot, cat: &Catalog, s: NodeId) -> Verdict {
         self.clear_supports(s);
         let mut deps: Vec<(NodeId, FieldId)> = Vec::new();
-        let v = conformance::judge_traced(snap, cat, &self.rule, s, &mut |n, p| deps.push((n, p)));
+        let v = conformance::judge_traced(
+            snap,
+            cat,
+            &self.rule,
+            s,
+            &conformance::Assumptions::new(),
+            &mut |n, p| deps.push((n, p)),
+        );
         for &key in &deps {
             self.dependents.entry(key).or_default().insert(s);
         }
@@ -363,6 +372,99 @@ mod tests {
             // the invariant: keyed-incremental maintenance == full recompute, after every event
             assert_eq!(maintained.gaps(), &oracle.seed(&snap));
         }
+    }
+
+    #[test]
+    fn assume_evaluation_never_replaces_the_maintained_verdict() {
+        use crate::catalog::{Cardinality, Range, RelProps, ValueType};
+
+        let mut cat = Catalog::new();
+        let issue = cat.register_type("Issue");
+        let person = cat.register_type("Person");
+        let d = RelProps::default();
+        let owner =
+            cat.register_predicate("owner", Cardinality::One, d, issue, Range::Type(person));
+        let approved_at = cat.register_predicate(
+            "approved-at",
+            Cardinality::One,
+            d,
+            issue,
+            Range::Value(ValueType::Int),
+        );
+        let approved_by = cat.register_predicate(
+            "approved-by",
+            Cardinality::One,
+            d,
+            issue,
+            Range::Type(person),
+        );
+        // the approver must be the owner as-of the approval instant (owner changes at 5000).
+        let rule = Rule {
+            subject_type: "Issue".into(),
+            scope: None,
+            required: vec![conformance::Hop {
+                predicate: "owner".into(),
+                as_of: Some("approved-at".into()),
+            }],
+            cases: Vec::new(),
+            distinct_from: Vec::new(),
+            actual: "approved-by".into(),
+            absent_when: None,
+        };
+        let set_one = |s: NodeId, p: FieldId, o: ObjKey, vf: i64| WriteKind::SetOne {
+            subject: s,
+            predicate: p,
+            object: o,
+            valid_from: vf,
+            valid_to: None,
+        };
+        let mut eng = Engine::new(1 << 20);
+        for (node, type_id) in [(1, issue), (10, person), (12, person)] {
+            eng.write(0, WriteKind::SetNodeType { node, type_id })
+                .unwrap();
+        }
+        eng.write(0, set_one(1, owner, ObjKey::Node(10), 1000))
+            .unwrap();
+        eng.write(0, set_one(1, owner, ObjKey::Node(12), 5000))
+            .unwrap();
+        eng.materialize();
+        let snap = eng.snapshot();
+        let mut maintained = MaintainedConformance::new(rule.clone(), &snap, &cat);
+        let stored = maintained.verdicts()[&1].clone();
+        assert_eq!(stored.required, None);
+        assert_eq!(
+            stored.missing,
+            vec![conformance::Missing::Anchor {
+                node: 1,
+                predicate: "approved-at".into()
+            }]
+        );
+
+        // an on-demand evaluation under an assumption derives a value …
+        let assume = conformance::Assumptions::from([("approved-at".to_string(), 6000)]);
+        let assumed = conformance::evaluate_assuming(&snap, &cat, &rule, u32::MAX, &assume);
+        assert_eq!(assumed[0].required, Some(ObjKey::Node(12)));
+        assert_eq!(assumed[0].assumed, vec!["approved-at".to_string()]);
+        // … that never becomes the stored verdict.
+        assert_eq!(maintained.verdicts()[&1], stored);
+
+        // the real anchor fact lands: the stored verdict is re-derived from the graph as before.
+        eng.write(0, set_one(1, approved_at, ObjKey::Int(1200), 0))
+            .unwrap();
+        eng.write(0, set_one(1, approved_by, ObjKey::Node(10), 0))
+            .unwrap();
+        let (keys, nodes) = eng.materialize_tracked_with_nodes();
+        let snap = eng.snapshot();
+        let diffs = maintained.apply(&snap, &cat, &keys, &nodes);
+        assert_eq!(diffs.len(), 1);
+        let now = &maintained.verdicts()[&1];
+        assert_eq!(now.required, Some(ObjKey::Node(10)));
+        assert_eq!(now.as_of, Some(1200));
+        assert!(now.missing.is_empty() && now.assumed.is_empty());
+        assert_eq!(
+            Some(now),
+            conformance::evaluate(&snap, &cat, &rule, u32::MAX).first()
+        );
     }
 
     #[test]
