@@ -388,3 +388,90 @@ fn mcp_conformance() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn mcp_find_matches_http_op_and_respects_labels() {
+    let base = std::env::temp_dir().join(format!("stroma_mcp_find_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Provision\"}}\n",
+        "{\"pred_def\":{\"name\":\"title\",\"cardinality\":\"one\",\"domain\":\"Provision\",\"range_value\":\"text\",\"display\":true}}\n",
+        "{\"pred_def\":{\"name\":\"body\",\"cardinality\":\"one\",\"domain\":\"Provision\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Provision\",\"label\":0}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Provision\",\"label\":3}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"title\",\"object\":{\"text\":\"Expense limits\"}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"body\",\"object\":{\"text\":\"Travel must be approved in advance\"},\"valid_from\":100}}\n",
+        "{\"fact\":{\"subject\":2,\"predicate\":\"body\",\"object\":{\"text\":\"Travel exceptions for executives\"}}}\n",
+    ))
+    .unwrap();
+    let want = db
+        .query(&json!({"op":"find","text":"TRAVEL","allowed_labels":1}))
+        .unwrap();
+    let want_all = db.query(&json!({"op":"find","text":"TRAVEL"})).unwrap();
+    drop(db);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stroma-mcp"))
+        .args(["--db", dir.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut mcp = Mcp {
+        child,
+        stdin,
+        stdout,
+    };
+    mcp.call(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
+    mcp.notify(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+
+    // listed, with a description that says a match is not current truth
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+    let tools = r["result"]["tools"].as_array().unwrap();
+    let find = tools.iter().find(|t| t["name"] == "find").unwrap();
+    assert!(find["inputSchema"]["properties"]["text"].is_object());
+    let desc = find["description"].as_str().unwrap();
+    assert!(desc.contains("not current-truth"), "{desc}");
+    assert!(desc.contains("`point`"), "{desc}");
+
+    // the server instructions mention it next to lookup and search
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}));
+    let instr = r["result"]["instructions"].as_str().unwrap();
+    assert!(instr.contains("`find`"), "{instr}");
+
+    let mut find_call = |id: u64, args: Value| -> Value {
+        let r = mcp.call(json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+            "params":{"name":"find","arguments":args}}));
+        assert_ne!(r["result"]["isError"], json!(true), "find: {r}");
+        serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+
+    // same nodes as the HTTP operation, unrestricted and label-restricted
+    assert_eq!(find_call(4, json!({"text":"TRAVEL"})), want_all);
+    assert_eq!(want_all["nodes"].as_array().unwrap().len(), 2);
+    let restricted = find_call(5, json!({"text":"TRAVEL","allowed_labels":1}));
+    assert_eq!(restricted, want);
+    let ids: Vec<&Value> = restricted["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| &n["id"])
+        .collect();
+    assert_eq!(
+        ids,
+        [&json!(1)],
+        "label-3 node must be hidden: {restricted}"
+    );
+
+    // empty text is an error, as over HTTP
+    let r = mcp.call(json!({"jsonrpc":"2.0","id":6,"method":"tools/call",
+        "params":{"name":"find","arguments":{"text":"  "}}}));
+    assert_eq!(r["result"]["isError"], json!(true), "empty text: {r}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
