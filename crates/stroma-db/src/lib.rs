@@ -80,6 +80,11 @@ pub struct CompactionStats {
 /// only retracts that removed a present edge (an absent-edge retract is a no-op); `closes` counts
 /// `close` records appended (a duplicate close is suppressed); `suppressed` counts incoming writes
 /// (facts, closes, edge-prop sets) skipped as no-ops.
+///
+/// `head_before` is the durable head when the batch took the write lock and `durable_head` the
+/// head after it. Batches are serialized, so `(head_before, durable_head]` is exactly the range of
+/// heads this batch wrote — the range a client bounds `conformance_changes` with to attribute
+/// verdict changes to this batch.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IngestStats {
     pub defs: u64,
@@ -88,6 +93,7 @@ pub struct IngestStats {
     pub retracts: u64,
     pub closes: u64,
     pub suppressed: u64,
+    pub head_before: u64,
     pub durable_head: u64,
 }
 
@@ -598,24 +604,58 @@ impl Db {
     /// or a previous call), plus the new cursor. When the cursor has fallen behind the bounded
     /// journal, answers `{"resync": true}` — re-watch (or take the full verdicts) instead of
     /// trusting a gap.
+    ///
+    /// Every change carries the `head` of the batch that caused it. An optional `until` (inclusive)
+    /// bounds the answer to `cursor < head <= until` and becomes the returned cursor (capped at the
+    /// current head), so a client can read exactly one ingest's changes with
+    /// `cursor = head_before, until = durable_head`. Without `rule_name` the answer covers every
+    /// watched rule, ordered by head then rule name, and each change names its `rule`; it resyncs
+    /// when the cursor is behind any of their journals.
     fn conformance_changes(&self, req: &Value) -> DbResult<Value> {
-        let name = req["rule_name"]
-            .as_str()
-            .ok_or("conformance_changes.rule_name missing")?;
+        let name = req["rule_name"].as_str();
         let cursor = req["cursor"]
             .as_u64()
             .ok_or("conformance_changes.cursor missing")?;
+        let until = match &req["until"] {
+            Value::Null => None,
+            v => Some(
+                v.as_u64()
+                    .ok_or("conformance_changes.until must be a head (unsigned integer)")?,
+            ),
+        };
+        if let Some(u) = until
+            && u < cursor
+        {
+            return Err(format!(
+                "conformance_changes.until ({u}) is below cursor ({cursor})"
+            ));
+        }
         let labels = req_labels(req);
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         w.materialize_live(); // usually a no-op: ingest drains on return
         let head = w.eng.durable_head();
+        let upper = until.map_or(head, |u| u.min(head));
         let snap = w.eng.snapshot_arc();
-        let Some(lr) = w.live_rules.get(name) else {
-            return Err(format!(
-                "rule not watched: {name} — call conformance_watch first"
-            ));
+        let rules: Vec<(&str, &LiveRule)> = match name {
+            Some(name) => {
+                let Some(lr) = w.live_rules.get(name) else {
+                    return Err(format!(
+                        "rule not watched: {name} — call conformance_watch first"
+                    ));
+                };
+                vec![(name, lr)]
+            }
+            None => {
+                let mut all: Vec<(&str, &LiveRule)> = w
+                    .live_rules
+                    .iter()
+                    .map(|(n, lr)| (n.as_str(), lr))
+                    .collect();
+                all.sort_unstable_by_key(|(n, _)| *n);
+                all
+            }
         };
-        if cursor < lr.truncated_to {
+        if rules.iter().any(|(_, lr)| cursor < lr.truncated_to) {
             return Ok(json!({ "resync": true, "cursor": head }));
         }
         // Each side of a change is masked with the support it was judged from, labels as of that
@@ -634,24 +674,37 @@ impl Db {
                 conformance::mask_missing_nodes(v, &snap, labels)
             })
         };
-        let changes: Vec<Value> = lr
-            .log
+        let mut entries: Vec<(u64, &str, &VerdictDiff)> = rules
             .iter()
-            .filter(|(h, _)| *h > cursor)
-            .flat_map(|(_, diffs)| diffs.iter())
-            .filter(|d| label_visible(&snap, d.subject, labels))
-            .filter_map(|d| {
+            .flat_map(|(rule, lr)| {
+                lr.log
+                    .iter()
+                    .filter(|(h, _)| *h > cursor && *h <= upper)
+                    .flat_map(move |(h, diffs)| diffs.iter().map(move |d| (*h, *rule, d)))
+            })
+            .collect();
+        // stable: within one head, rules stay in name order and a rule's diffs in journal order
+        entries.sort_by_key(|(h, _, _)| *h);
+        let changes: Vec<Value> = entries
+            .into_iter()
+            .filter(|(_, _, d)| label_visible(&snap, d.subject, labels))
+            .filter_map(|(h, rule, d)| {
                 let (old, new) = (seen(&d.old, &d.old_support), seen(&d.new, &d.new_support));
                 (old != new).then(|| {
-                    json!({
+                    let mut c = json!({
                         "subject": d.subject,
                         "old": old.as_ref().map(verdict_json),
                         "new": new.as_ref().map(verdict_json),
-                    })
+                        "head": h,
+                    });
+                    if name.is_none() {
+                        c["rule"] = json!(rule);
+                    }
+                    c
                 })
             })
             .collect();
-        Ok(json!({ "changes": changes, "cursor": head }))
+        Ok(json!({ "changes": changes, "cursor": upper }))
     }
 
     /// The change feed after cursor `since` (a durable head) as a principal with `allowed_labels`
@@ -946,7 +999,10 @@ impl WriteState {
     /// materialize. Node type/label lines emit `SetNodeType`/`SetNodeLabel` ops through the engine so
     /// the snapshot carries them, and mirror the label into `node_label_w` for the index build.
     fn ingest(&mut self, jsonl: &str) -> DbResult<IngestStats> {
-        let mut s = IngestStats::default();
+        let mut s = IngestStats {
+            head_before: self.eng.durable_head(),
+            ..IngestStats::default()
+        };
         let mut batch: Vec<(u32, WriteKind, Option<u8>)> = Vec::new();
         let mut touched_nodes = false;
         // Keys this call has written (pending batch entries + un-materialized retracts). The no-op

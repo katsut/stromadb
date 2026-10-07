@@ -19,7 +19,7 @@
 //!                 batch with the same JSON (`id:` = the batch head; `Last-Event-ID` resumes)
 //!   GET  /stats           → engine/schema/embedding/storage counters
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
-//!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,durable_head}
+//!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,head_before,durable_head}
 //!   POST /embed   <jsonl> → {embedded: N}
 //!   POST /compact         → {compacted_upto, wal_bytes, snapshot_bytes}  (snapshot + truncate)
 //!   POST /mcp     <json-rpc> → MCP streamable HTTP transport: one JSON-RPC message per request;
@@ -655,7 +655,7 @@ fn handle(
             match db.ingest_str_as(&body, scope.default_source.as_deref()) {
                 Ok(s) => Reply::Json(
                     200,
-                    json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "suppressed": s.suppressed, "durable_head": s.durable_head }),
+                    json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "suppressed": s.suppressed, "head_before": s.head_before, "durable_head": s.durable_head }),
                 ),
                 Err(e) => Reply::Json(400, json!({ "error": e })),
             }
