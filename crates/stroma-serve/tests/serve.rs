@@ -916,3 +916,113 @@ fn serve_change_stream() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn console_conformance_missing_and_assume() {
+    let base = std::env::temp_dir().join(format!("stroma_serve_cf_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Department\"}}\n",
+        "{\"type_def\":{\"name\":\"Issue\"}}\n",
+        "{\"pred_def\":{\"name\":\"assigned-to\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"member-of\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range\":\"Department\"}}\n",
+        "{\"pred_def\":{\"name\":\"manager-of\",\"cardinality\":\"one\",\"domain\":\"Department\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"approved-by\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"approved-at\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range_value\":\"int\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Department\"}}\n",
+        "{\"node\":{\"id\":10,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":11,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1003,\"type\":\"Issue\"}}\n",
+        "{\"fact\":{\"subject\":10,\"predicate\":\"member-of\",\"object\":{\"node\":1}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"manager-of\",\"object\":{\"node\":11},\"valid_from\":1000}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"assigned-to\",\"object\":{\"node\":10}}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-by\",\"object\":{\"node\":11}}}\n",
+        "{\"rule_def\":{\"name\":\"release-approval\",\"rule\":{\"subject_type\":\"Issue\",\"required\":{\"hops\":[{\"predicate\":\"assigned-to\"},{\"predicate\":\"member-of\"},{\"predicate\":\"manager-of\",\"as_of\":\"approved-at\"}]},\"actual\":\"approved-by\"}}}\n",
+    ))
+    .unwrap();
+    drop(db);
+
+    let port = 12300 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+        .args(["--db", dir.to_str().unwrap(), "--addr", &addr])
+        .spawn()
+        .unwrap();
+    let _guard = Kill(child);
+    wait_up(&addr);
+    let (st, cookie, _) = http(
+        &addr,
+        "POST",
+        "/login",
+        "{\"user\":\"admin\",\"password\":\"password\"}",
+        None,
+    );
+    assert_eq!(st, 200, "login must succeed");
+    let tok = cookie.expect("login must set a session cookie");
+
+    // the console carries the rendering hooks for missing / assumed / no_rule
+    let (st, _, ui) = http(&addr, "GET", "/", "", Some(&tok));
+    assert_eq!(st, 200);
+    for hook in [
+        "id=\"qassumePred\"",
+        "id=\"qassumeAt\"",
+        "id=\"qcfsubj\"",
+        "cfCannotJudge",
+        "cfNoRule",
+        "cf-assumed",
+        "required_unresolved",
+        "req.assume",
+        "kind==='no_rule'",
+    ] {
+        assert!(ui.contains(hook), "console missing hook {hook}");
+    }
+
+    // without assume: the anchor is missing, so the row cannot be judged
+    let (st, _, body) = http(
+        &addr,
+        "POST",
+        "/query",
+        "{\"op\":\"conformance\",\"rule_name\":\"release-approval\"}",
+        Some(&tok),
+    );
+    assert_eq!(st, 200, "{body}");
+    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let row = &r["verdicts"][0];
+    assert_eq!(row["subject"], 1003, "{body}");
+    assert_eq!(row["missing"][0]["kind"], "anchor", "{body}");
+    assert_eq!(row["missing"][0]["predicate"], "approved-at", "{body}");
+    assert_eq!(row["assumed"], serde_json::json!([]), "{body}");
+
+    // with assume, exactly as the console sends it: assumed lists the anchor
+    let (st, _, body) = http(
+        &addr,
+        "POST",
+        "/query",
+        "{\"op\":\"conformance\",\"rule_name\":\"release-approval\",\"assume\":{\"approved-at\":7000}}",
+        Some(&tok),
+    );
+    assert_eq!(st, 200, "{body}");
+    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let row = &r["verdicts"][0];
+    assert_eq!(row["assumed"], serde_json::json!(["approved-at"]), "{body}");
+    assert_eq!(row["missing"], serde_json::json!([]), "{body}");
+    assert_eq!(row["verdict"], "OK", "{body}");
+
+    // a subject no rule covers yields a top-level no_rule entry
+    let (st, _, body) = http(
+        &addr,
+        "POST",
+        "/query",
+        "{\"op\":\"conformance\",\"subject\":10}",
+        Some(&tok),
+    );
+    assert_eq!(st, 200, "{body}");
+    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(r["missing"][0]["kind"], "no_rule", "{body}");
+    assert_eq!(r["missing"][0]["type"], "Person", "{body}");
+    let _ = std::fs::remove_dir_all(&base);
+}
