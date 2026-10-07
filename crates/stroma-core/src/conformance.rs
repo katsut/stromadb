@@ -89,6 +89,7 @@
 //! holds the name-based rule types and the evaluator, and resolves names via the [`Catalog`].)
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 use crate::catalog::{Cardinality, Catalog, Range};
 use crate::fact::{FieldId, NodeId};
@@ -339,12 +340,40 @@ impl NotApplicableReason {
     }
 }
 
+/// Information the graph does not hold that stopped a judgment short, reported instead of an
+/// empty answer. Only reads the judgment performed are reported, so the list is part of the verdict
+/// as a pure function of its support set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Missing {
+    /// An as-of hop or condition whose anchor `predicate` has no value on the subject `node`.
+    Anchor { node: NodeId, predicate: String },
+    /// A path hop whose `predicate` has no value on `node` (in effect at the anchor, for an as-of
+    /// hop), so the path ends early.
+    Hop { node: NodeId, predicate: String },
+}
+
+impl Missing {
+    /// The stable wire name of this kind.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Missing::Anchor { .. } => "anchor",
+            Missing::Hop { .. } => "hop",
+        }
+    }
+}
+
+/// Caller-supplied anchor instants, keyed by the anchor predicate's name. An assumed instant is
+/// used only for a subject with no value for that anchor; a value in the graph always wins.
+pub type Assumptions = BTreeMap<String, i64>;
+
 /// A per-subject verdict. `required`/`distinct`/`actual` are the derived and observed values (a
 /// node, or a literal when the path's last hop reads one); `as_of` is the valid-time instant an as-of hop was read at, if a
 /// path used one (the required path's anchor wins when both do).
 /// `mismatch_kind` is `Some` only when `verdict == Mismatch`, and `reason` only when
 /// `verdict == NotApplicable`. `case` is the index of the matched [`Case`] for a banded rule (`None`
-/// for a rule without cases, or when no case matched).
+/// for a rule without cases, or when no case matched). `missing` lists what stopped the judgment
+/// short (deduplicated, in read order); `assumed` the anchor predicates whose instant came from the
+/// caller's [`Assumptions`] rather than the graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub subject: NodeId,
@@ -356,6 +385,8 @@ pub struct Verdict {
     pub actual: Option<ObjKey>,
     pub as_of: Option<i64>,
     pub case: Option<usize>,
+    pub missing: Vec<Missing>,
+    pub assumed: Vec<String>,
 }
 
 impl Verdict {
@@ -371,6 +402,8 @@ impl Verdict {
             actual: None,
             as_of: None,
             case: None,
+            missing: Vec::new(),
+            assumed: Vec::new(),
         }
     }
 }
@@ -456,6 +489,20 @@ pub fn evaluate(
     rule: &Rule,
     principal_labels: u32,
 ) -> Vec<Verdict> {
+    evaluate_assuming(snap, cat, rule, principal_labels, &Assumptions::new())
+}
+
+/// [`evaluate`] under caller-supplied anchor instants: a subject with no value for an anchor named
+/// in `assume` is judged as if it held the assumed instant, and the verdict lists that anchor in
+/// [`Verdict::assumed`]. An empty `assume` is exactly [`evaluate`]. Computed on demand from the
+/// snapshot; nothing is retained.
+pub fn evaluate_assuming(
+    snap: &Snapshot,
+    cat: &Catalog,
+    rule: &Rule,
+    principal_labels: u32,
+    assume: &Assumptions,
+) -> Vec<Verdict> {
     let Some(subject_ty) = cat.field_id(&rule.subject_type) else {
         return Vec::new();
     };
@@ -471,7 +518,10 @@ pub fn evaluate(
     subjects.sort_unstable();
     subjects
         .into_iter()
-        .map(|s| judge_masked(snap, cat, rule, s, masking.then_some(&mask)))
+        .map(|s| {
+            let v = judge_masked(snap, cat, rule, s, masking.then_some(&mask), assume);
+            mask_missing_nodes(v, snap, principal_labels)
+        })
         .collect()
 }
 
@@ -483,12 +533,13 @@ fn judge_masked(
     rule: &Rule,
     s: NodeId,
     mask: Option<&FactMask>,
+    assume: &Assumptions,
 ) -> Verdict {
     let Some(mask) = mask else {
-        return judge(snap, cat, rule, s);
+        return judge_traced(snap, cat, rule, s, assume, &mut |_, _| {});
     };
     let mut keys: Vec<(NodeId, FieldId)> = Vec::new();
-    let v = judge_traced(snap, cat, rule, s, &mut |n, p| keys.push((n, p)));
+    let v = judge_traced(snap, cat, rule, s, assume, &mut |n, p| keys.push((n, p)));
     mask_verdict(v, &Support::of(keys, snap), mask)
 }
 
@@ -539,6 +590,23 @@ pub fn mask_verdict(v: Verdict, support: &Support, mask: &FactMask) -> Verdict {
     }
 }
 
+/// Withhold a verdict whose `missing` names a node the principal's node labels hide: the judgment
+/// read a predicate of that node, so the row is `NOT_APPLICABLE` with
+/// [`NotApplicableReason::HiddenByLabel`] and carries no values, as under [`mask_verdict`].
+/// Otherwise the verdict is returned unchanged.
+pub fn mask_missing_nodes(v: Verdict, snap: &Snapshot, principal_labels: u32) -> Verdict {
+    let hidden = v.missing.iter().any(|m| match m {
+        Missing::Anchor { node, .. } | Missing::Hop { node, .. } => {
+            !visible(snap, *node, principal_labels)
+        }
+    });
+    if hidden {
+        Verdict::not_applicable(v.subject, NotApplicableReason::HiddenByLabel)
+    } else {
+        v
+    }
+}
+
 /// [`evaluate`] restricted to the given `subjects`: exactly one row per distinct listed id, sorted
 /// by id. A visible subject of the rule's type is judged exactly as [`evaluate`] judges it. Any
 /// other id answers `NOT_APPLICABLE` with no values and a reason only this function produces:
@@ -553,6 +621,25 @@ pub fn evaluate_subjects(
     principal_labels: u32,
     subjects: &[NodeId],
 ) -> Vec<Verdict> {
+    evaluate_subjects_assuming(
+        snap,
+        cat,
+        rule,
+        principal_labels,
+        subjects,
+        &Assumptions::new(),
+    )
+}
+
+/// [`evaluate_subjects`] under caller-supplied anchor instants, as [`evaluate_assuming`].
+pub fn evaluate_subjects_assuming(
+    snap: &Snapshot,
+    cat: &Catalog,
+    rule: &Rule,
+    principal_labels: u32,
+    subjects: &[NodeId],
+    assume: &Assumptions,
+) -> Vec<Verdict> {
     let subject_ty = cat.field_id(&rule.subject_type);
     let mask = FactMask::new(cat, principal_labels);
     let mask = mask.hides_any(snap).then_some(mask);
@@ -565,7 +652,10 @@ pub fn evaluate_subjects(
             Some(_) if !visible(snap, s, principal_labels) => {
                 Verdict::not_applicable(s, NotApplicableReason::UnknownSubject)
             }
-            Some(&ty) if Some(ty) == subject_ty => judge_masked(snap, cat, rule, s, mask.as_ref()),
+            Some(&ty) if Some(ty) == subject_ty => {
+                let v = judge_masked(snap, cat, rule, s, mask.as_ref(), assume);
+                mask_missing_nodes(v, snap, principal_labels)
+            }
             Some(_) => Verdict::not_applicable(s, NotApplicableReason::NotSubjectType),
             None => Verdict::not_applicable(s, NotApplicableReason::UnknownSubject),
         })
@@ -588,17 +678,69 @@ struct Walk {
     final_asof_hop: Option<(NodeId, FieldId)>,
 }
 
+/// What a judgment found missing and which assumptions it used, in read order, deduplicated.
+#[derive(Default)]
+struct Gaps {
+    missing: Vec<Missing>,
+    assumed: Vec<String>,
+}
+
+impl Gaps {
+    fn miss(&mut self, m: Missing) {
+        if !self.missing.contains(&m) {
+            self.missing.push(m);
+        }
+    }
+
+    /// The instant of anchor predicate `anchor` on subject `s`: the graph's value, else the
+    /// caller's assumption (recorded as used), else `None` (recorded as a missing anchor). The
+    /// anchor key is reported to `rec` either way.
+    fn anchor(
+        &mut self,
+        snap: &Snapshot,
+        cat: &Catalog,
+        s: NodeId,
+        anchor: &str,
+        assume: &Assumptions,
+        rec: &mut impl FnMut(NodeId, FieldId),
+    ) -> Option<i64> {
+        let ap = cat.field_id(anchor)?;
+        rec(s, ap);
+        if let Some(t) = int_of(point_one(snap, s, ap)) {
+            return Some(t);
+        }
+        match assume.get(anchor) {
+            Some(&t) => {
+                if !self.assumed.iter().any(|a| a == anchor) {
+                    self.assumed.push(anchor.to_string());
+                }
+                Some(t)
+            }
+            None => {
+                self.miss(Missing::Anchor {
+                    node: s,
+                    predicate: anchor.to_string(),
+                });
+                None
+            }
+        }
+    }
+}
+
 /// Walk a derived path of one-cardinality hops left→right from `s`, reporting every
 /// `(node, predicate)` read to `rec` — the read's support set, for incremental maintenance. A hop
 /// with an as-of anchor reads the valid-time value of that hop at the anchor's integer value on
-/// the ORIGINAL subject `s`. Every hop but the last must reach a node to continue from; the last
-/// hop's value is the path's value as read, a node or a literal. An empty path derives nothing (no
-/// expectation), same as a broken one.
+/// the ORIGINAL subject `s` (or the caller's assumed instant when `s` has none). Every hop but the
+/// last must reach a node to continue from; the last hop's value is the path's value as read, a
+/// node or a literal. An empty path derives nothing (no expectation), same as a broken one. Where
+/// the path stops short is recorded in `gaps`.
 fn walk(
     snap: &Snapshot,
     cat: &Catalog,
     s: NodeId,
     hops: &[Hop],
+    assume: &Assumptions,
+    gaps: &mut Gaps,
     rec: &mut impl FnMut(NodeId, FieldId),
 ) -> Walk {
     let mut cur = Some(s);
@@ -609,6 +751,7 @@ fn walk(
         let Some(node) = cur else { break };
         let pid = cat.field_id(&hop.predicate);
         final_asof_hop = None;
+        let mut anchor_missing = false;
         let value = match (&hop.as_of, pid) {
             (_, None) => None,
             (None, Some(p)) => {
@@ -616,10 +759,8 @@ fn walk(
                 point_one(snap, node, p)
             }
             (Some(anchor), Some(p)) => {
-                let t = cat.field_id(anchor).and_then(|ap| {
-                    rec(s, ap);
-                    int_of(point_one(snap, s, ap))
-                });
+                let t = gaps.anchor(snap, cat, s, anchor, assume, rec);
+                anchor_missing = t.is_none();
                 as_of = t;
                 final_asof_hop = Some((node, p));
                 // recorded whether or not the anchor resolved: once it does, this is the read that
@@ -628,6 +769,12 @@ fn walk(
                 t.and_then(|at| point_one_asof(snap, node, p, at))
             }
         };
+        if value.is_none() && !anchor_missing {
+            gaps.miss(Missing::Hop {
+                node,
+                predicate: hop.predicate.clone(),
+            });
+        }
         if i + 1 == hops.len() {
             end = value;
         } else {
@@ -641,26 +788,38 @@ fn walk(
     }
 }
 
-/// The verdict for a single subject `s`.
-fn judge(snap: &Snapshot, cat: &Catalog, rule: &Rule, s: NodeId) -> Verdict {
-    judge_traced(snap, cat, rule, s, &mut |_, _| {})
-}
-
-/// [`judge`], additionally reporting every `(node, predicate)` the judgment read to `rec` — the
-/// verdict's **support set**. Any write that could change this subject's verdict must change at
-/// least one reported key (reads are recorded exactly as performed: a branch the judgment did not
-/// consult cannot have influenced it, and the write that makes it consultable touches a recorded
-/// key first). This is what keyed-incremental maintenance re-judges on.
+/// The verdict for subject `s` under `assume`, reporting every `(node, predicate)` the judgment
+/// read to `rec` — the verdict's **support set**. Any write that could change this subject's
+/// verdict must change at least one reported key (reads are recorded exactly as performed: a branch
+/// the judgment did not consult cannot have influenced it, and the write that makes it consultable
+/// touches a recorded key first). This is what keyed-incremental maintenance re-judges on.
 pub(crate) fn judge_traced(
     snap: &Snapshot,
     cat: &Catalog,
     rule: &Rule,
     s: NodeId,
+    assume: &Assumptions,
+    rec: &mut impl FnMut(NodeId, FieldId),
+) -> Verdict {
+    let mut gaps = Gaps::default();
+    let mut v = judge_gaps(snap, cat, rule, s, assume, &mut gaps, rec);
+    v.missing = gaps.missing;
+    v.assumed = gaps.assumed;
+    v
+}
+
+fn judge_gaps(
+    snap: &Snapshot,
+    cat: &Catalog,
+    rule: &Rule,
+    s: NodeId,
+    assume: &Assumptions,
+    gaps: &mut Gaps,
     rec: &mut impl FnMut(NodeId, FieldId),
 ) -> Verdict {
     // scope: out-of-scope subjects are not judged.
     if let Some(scope) = &rule.scope
-        && !cond_holds_traced(snap, cat, s, scope, rec)
+        && !cond_holds_traced(snap, cat, s, scope, assume, gaps, rec)
     {
         return Verdict::not_applicable(s, NotApplicableReason::OutOfScope);
     }
@@ -674,7 +833,7 @@ pub(crate) fn judge_traced(
         for (i, c) in rule.cases.iter().enumerate() {
             if c.when
                 .as_ref()
-                .is_none_or(|w| cond_holds_traced(snap, cat, s, w, rec))
+                .is_none_or(|w| cond_holds_traced(snap, cat, s, w, assume, gaps, rec))
             {
                 matched = Some(i);
                 break;
@@ -689,8 +848,8 @@ pub(crate) fn judge_traced(
     // The two derived paths: `required` = the value the actual must equal, `distinct_from` = the
     // value it must NOT equal. When both carry an as-of anchor, the required path's instant is the
     // one reported.
-    let req = walk(snap, cat, s, required_hops, rec);
-    let dis = walk(snap, cat, s, &rule.distinct_from, rec);
+    let req = walk(snap, cat, s, required_hops, assume, gaps, rec);
+    let dis = walk(snap, cat, s, &rule.distinct_from, assume, gaps, rec);
     let required = req.end;
     let distinct = dis.end;
     let as_of = req.as_of.or(dis.as_of);
@@ -714,7 +873,7 @@ pub(crate) fn judge_traced(
             if rule
                 .absent_when
                 .as_ref()
-                .is_some_and(|c| cond_holds_traced(snap, cat, s, c, rec))
+                .is_some_and(|c| cond_holds_traced(snap, cat, s, c, assume, gaps, rec))
             {
                 (Outcome::Absent, None, None)
             } else {
@@ -764,6 +923,8 @@ pub(crate) fn judge_traced(
         actual,
         as_of,
         case,
+        missing: Vec::new(),
+        assumed: Vec::new(),
     }
 }
 
@@ -780,7 +941,8 @@ fn ever_held(snap: &Snapshot, node: NodeId, predicate: FieldId, value: &ObjKey) 
 }
 
 /// Whether `cond` holds on subject `s`, reporting its reads to `rec`. An as-of condition reads the
-/// anchor on `s` first, then the predicate's value in effect at that instant; the predicate key is
+/// anchor on `s` first (or the caller's assumed instant when `s` has none, recorded in `gaps`, as
+/// is a missing anchor), then the predicate's value in effect at that instant; the predicate key is
 /// recorded even when the anchor is missing, so the write that supplies the anchor and any later
 /// revision of the value both re-judge the subject.
 fn cond_holds_traced(
@@ -788,6 +950,8 @@ fn cond_holds_traced(
     cat: &Catalog,
     s: NodeId,
     cond: &Cond,
+    assume: &Assumptions,
+    gaps: &mut Gaps,
     rec: &mut impl FnMut(NodeId, FieldId),
 ) -> bool {
     let Some(p) = cat.field_id(&cond.predicate) else {
@@ -799,10 +963,7 @@ fn cond_holds_traced(
             point_one(snap, s, p)
         }
         Some(anchor) => {
-            let t = cat.field_id(anchor).and_then(|ap| {
-                rec(s, ap);
-                int_of(point_one(snap, s, ap))
-            });
+            let t = gaps.anchor(snap, cat, s, anchor, assume, rec);
             rec(s, p);
             t.and_then(|at| point_one_asof(snap, s, p, at))
         }
@@ -906,6 +1067,10 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_with(false)
+    }
+
+    fn fixture_with(with_gaps: bool) -> Fixture {
         let mut cat = Catalog::new();
         let issue = cat.register_type("Issue");
         let person = cat.register_type("Person");
@@ -1009,10 +1174,160 @@ mod tests {
         set_one(&mut ops, &mut seq, 6, approved_by, ObjKey::Node(10), 0);
         set_one(&mut ops, &mut seq, 6, status, text("released"), 0);
 
+        if with_gaps {
+            set_type(&mut ops, &mut seq, 7, issue);
+            set_type(&mut ops, &mut seq, 8, issue);
+            // Issue 7: approved by Alice, but the approval time was never recorded.
+            set_one(&mut ops, &mut seq, 7, issue_type, text("release"), 0);
+            set_one(&mut ops, &mut seq, 7, assigned_to, ObjKey::Node(202), 0);
+            set_one(&mut ops, &mut seq, 7, approved_by, ObjKey::Node(10), 0);
+            // Issue 8: assigned to Dave(20), who belongs to no department.
+            set_one(&mut ops, &mut seq, 8, issue_type, text("release"), 0);
+            set_one(&mut ops, &mut seq, 8, assigned_to, ObjKey::Node(20), 0);
+            set_one(&mut ops, &mut seq, 8, approved_at, ObjKey::Int(1200), 0);
+            set_one(&mut ops, &mut seq, 8, approved_by, ObjKey::Node(10), 0);
+        }
+
         Fixture {
             snap: fold(&ops).observe(),
             cat,
         }
+    }
+
+    // `fixture()` plus two subjects whose judgment stops short: issue 7 (actual present, approval
+    // time missing) and issue 8 (assignee in no department).
+    fn gap_fixture() -> Fixture {
+        fixture_with(true)
+    }
+
+    fn anchor(node: NodeId) -> Missing {
+        Missing::Anchor {
+            node,
+            predicate: "approved-at".into(),
+        }
+    }
+
+    fn assume_at(t: i64) -> Assumptions {
+        Assumptions::from([("approved-at".to_string(), t)])
+    }
+
+    fn one(f: &Fixture, r: &Rule, s: NodeId, labels: u32, assume: &Assumptions) -> Verdict {
+        evaluate_subjects_assuming(&f.snap, &f.cat, r, labels, &[s], assume)
+            .pop()
+            .unwrap()
+    }
+
+    #[test]
+    fn pending_subject_reports_missing_anchor_and_resolves_under_assume() {
+        let f = gap_fixture();
+        let r = rule();
+        // Issue 2 has no approval time: nothing derived, and the anchor is named as missing.
+        let v = one(&f, &r, 2, u32::MAX, &Assumptions::new());
+        assert_eq!(v.verdict, Outcome::Absent);
+        assert_eq!(v.required, None);
+        assert_eq!(v.missing, vec![anchor(2)]);
+        assert!(v.assumed.is_empty());
+        // "as if approved now" (6000, after the transfer): required = the current manager Carol(12).
+        let v = one(&f, &r, 2, u32::MAX, &assume_at(6000));
+        assert_eq!(v.verdict, Outcome::Absent);
+        assert_eq!(v.required, Some(ObjKey::Node(12)));
+        assert_eq!(v.as_of, Some(6000));
+        assert!(v.missing.is_empty());
+        assert_eq!(v.assumed, vec!["approved-at".to_string()]);
+    }
+
+    #[test]
+    fn graph_value_wins_over_assumption() {
+        let f = gap_fixture();
+        let plain = evaluate(&f.snap, &f.cat, &rule(), u32::MAX);
+        let assumed = evaluate_assuming(&f.snap, &f.cat, &rule(), u32::MAX, &assume_at(6000));
+        let by = verdicts_by_subject(&assumed);
+        // Issue 1 carries approved-at = 1200: the assumption is ignored and not reported.
+        assert_eq!(by[&1].as_of, Some(1200));
+        assert_eq!(by[&1].required, Some(ObjKey::Node(10)));
+        assert_eq!(by[&1].verdict, Outcome::Ok);
+        assert!(by[&1].assumed.is_empty());
+        // every subject that holds its anchor judges identically with or without the assumption.
+        let plain_by = verdicts_by_subject(&plain);
+        for s in [1, 3, 4, 5, 6, 8] {
+            assert_eq!(by[&s], plain_by[&s], "issue {s}");
+        }
+        // fully derived verdicts report nothing missing and nothing assumed.
+        for s in [1, 3, 5, 6] {
+            assert!(plain_by[&s].missing.is_empty(), "issue {s}");
+            assert!(plain_by[&s].assumed.is_empty(), "issue {s}");
+        }
+    }
+
+    #[test]
+    fn actual_without_anchor_names_the_anchor_and_derives_no_mismatch() {
+        let f = gap_fixture();
+        let r = rule();
+        // Issue 7: approved by Alice with no approval time — required_unresolved, not a mismatch.
+        let v = one(&f, &r, 7, u32::MAX, &Assumptions::new());
+        assert_eq!(v.verdict, Outcome::NotApplicable);
+        assert_eq!(v.reason, Some(NotApplicableReason::RequiredUnresolved));
+        assert_eq!(v.mismatch_kind, None);
+        assert_eq!(v.actual, Some(ObjKey::Node(10)));
+        assert_eq!(v.missing, vec![anchor(7)]);
+        // only an explicit assumption re-derives it: before the transfer Alice is the manager …
+        let v = one(&f, &r, 7, u32::MAX, &assume_at(1200));
+        assert_eq!(v.verdict, Outcome::Ok);
+        assert_eq!(v.assumed, vec!["approved-at".to_string()]);
+        // … after it she is stale authority (stale, never silently wrong).
+        let v = one(&f, &r, 7, u32::MAX, &assume_at(6000));
+        assert_eq!(v.verdict, Outcome::Mismatch);
+        assert_eq!(v.mismatch_kind, Some(MismatchKind::Stale));
+    }
+
+    #[test]
+    fn broken_hop_is_reported_with_node_and_predicate() {
+        let f = gap_fixture();
+        let v = one(&f, &rule(), 8, u32::MAX, &Assumptions::new());
+        // the assignee Dave(20) has no department: the path ends at the member-of hop.
+        let hop = Missing::Hop {
+            node: 20,
+            predicate: "member-of".into(),
+        };
+        assert_eq!(v.missing, vec![hop.clone()]);
+        assert_eq!(hop.kind(), "hop");
+        assert_eq!(v.reason, Some(NotApplicableReason::RequiredUnresolved));
+    }
+
+    #[test]
+    fn condition_anchor_is_reported_and_assumable() {
+        let f = gap_fixture();
+        // a scope read as-of the approval time: issue 2 has none, so it is out of scope with the
+        // anchor named; assuming one brings it into scope.
+        let mut r = rule();
+        r.scope = Some(Cond::equals("issue-type", text("release")).as_of("approved-at"));
+        let v = one(&f, &r, 2, u32::MAX, &Assumptions::new());
+        assert_eq!(v.reason, Some(NotApplicableReason::OutOfScope));
+        assert_eq!(v.missing, vec![anchor(2)]);
+        let v = one(&f, &r, 2, u32::MAX, &assume_at(6000));
+        assert_eq!(v.verdict, Outcome::Absent);
+        assert_eq!(v.assumed, vec!["approved-at".to_string()]);
+        assert!(v.missing.is_empty());
+    }
+
+    #[test]
+    fn missing_never_names_a_node_hidden_from_the_caller() {
+        let mut f = gap_fixture();
+        // hide Dave(20), the department-less assignee of issue 8, behind node label 1.
+        std::sync::Arc::make_mut(&mut f.snap.node_labels).insert(20, 1);
+        let v = one(&f, &rule(), 8, 0b1, &Assumptions::new());
+        assert_eq!(v.reason, Some(NotApplicableReason::HiddenByLabel));
+        assert!(v.missing.is_empty() && v.required.is_none() && v.actual.is_none());
+        let full = evaluate(&f.snap, &f.cat, &rule(), 0b1);
+        let by = verdicts_by_subject(&full);
+        assert_eq!(by[&8].reason, Some(NotApplicableReason::HiddenByLabel));
+        // the full mask still sees it.
+        assert_eq!(
+            one(&f, &rule(), 8, u32::MAX, &Assumptions::new())
+                .missing
+                .len(),
+            1
+        );
     }
 
     fn verdicts_by_subject(vs: &[Verdict]) -> BTreeMap<NodeId, &Verdict> {
