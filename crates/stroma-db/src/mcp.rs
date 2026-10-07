@@ -6,7 +6,7 @@
 //! response — a request (a message with an `id`) yields `Some(response)`, a notification yields
 //! `None`. Framing (newline-delimited stdio, HTTP request/response) is the caller's concern.
 //!
-//! Tools: `schema`, `lookup` (exact-value key → node id), `point`, `expand`, `search` (authz-scoped hybrid), `retrieve_context`,
+//! Tools: `schema`, `lookup` (exact-value key → node id), `find` (free-word text match), `point`, `expand`, `search` (authz-scoped hybrid), `retrieve_context`,
 //! `conformance` (declared-rule per-subject verdicts), `rule` (read back a stored rule's
 //! declaration), `stats`, `ingest`. Read tools map to
 //! [`Db::query`]; `ingest` writes facts (serialized on the database's internal write mutex).
@@ -38,6 +38,18 @@ fn tools() -> Value {
                     "valid_at": { "type": "integer", "description": "as-of valid-time: match the value in effect at instant T instead of the current one" }
                 },
                 "required": ["predicate", "value"]
+            }
+        },
+        {
+            "name": "find",
+            "description": "Locate nodes by words that appear in their text values: a case-insensitive substring match over every text value of every node (e.g. a phrase from a document body), for when you have words but no exact key (`lookup`) and no query embedding (`search`). Returns `{nodes:[{id, name, type, matched:{predicate, value}}], truncated}` in ascending id order, one entry per node with its first match. Results are matches, not current-truth judgments: the matched value may be a superseded one, so read the node's current value with `point` (and its history with `timeline`) before answering. An empty answer means no visible text contains the words: do not guess an id; say what is unknown and ask the user for that one item.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "the words to find (case-insensitive substring, trimmed; must not be empty)" },
+                    "limit": { "type": "integer", "default": 20, "description": "maximum nodes returned; `truncated` reports more matches" }
+                },
+                "required": ["text"]
             }
         },
         {
@@ -208,8 +220,8 @@ fn apply_conformance_defaults(req: &mut Value) {
 
 fn call_tool(db: &Db, name: &str, args: &Value, scope: &Scope) -> Result<Value, String> {
     match name {
-        "schema" | "lookup" | "point" | "expand" | "timeline" | "search" | "retrieve_context"
-        | "conformance" | "rule" => {
+        "schema" | "lookup" | "find" | "point" | "expand" | "timeline" | "search"
+        | "retrieve_context" | "conformance" | "rule" => {
             let mut req = args.clone();
             req["op"] = json!(name);
             if name == "conformance" {
@@ -265,7 +277,7 @@ pub fn handle_message_scoped(db: &Db, msg: &Value, scope: &Scope) -> Option<Valu
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "stroma-mcp", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Every read tool takes a numeric node id: when you are given an external identifier instead (an issue key, an email, a document number), call `lookup` with the predicate that holds it (e.g. `issue-key`) to get the node id; never guess ids. Suggested order for a decision on a tracker item: (1) `schema`; (2) `lookup` the key to its id; (3) `point` / `expand` / `timeline` around that id for the facts you need; (4) `conformance` with `rule_name` and `subjects: [id]` for the declared verdict; (5) cite the verdict with its `required`, `actual` and `as_of` values (a `NOT_APPLICABLE` row says why in `reason`; `required_unresolved` means a fact on the required path is missing, not that the item violates the rule; `hidden_by_label` means the verdict depends on facts your access labels hide; a non-empty `missing` names the fact that is not there — ask the user for it, offering the obvious default, and re-run with `assume` instead of inferring it). Use `point` for one-cardinality predicates and `expand` for many-cardinality ones (both accept `valid_at` for an as-of read of the state in effect at that instant). There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`; pass `subjects` for the items you are deciding, since a full evaluation is paged (`limit`, `offset`) and reports `counts`. For 'over which intervals / when was' questions, call `timeline` with a chain of one-cardinality predicates instead of probing `valid_at` repeatedly."
+                "instructions": "Call `schema` first to discover the predicates (name, cardinality, domain/range) and node labels. Every read tool takes a numeric node id: when you are given an external identifier instead (an issue key, an email, a document number), call `lookup` with the predicate that holds it (e.g. `issue-key`) to get the node id; never guess ids. When you only have words from a node's text (a phrase from a document body, say) and no exact key, call `find` with those words; it returns matches, not current truth, so read the node's current value with `point` before answering. Without an embedder, `find` is the way to locate a node by its text; `search` needs a query embedding. Suggested order for a decision on a tracker item: (1) `schema`; (2) `lookup` the key to its id; (3) `point` / `expand` / `timeline` around that id for the facts you need; (4) `conformance` with `rule_name` and `subjects: [id]` for the declared verdict; (5) cite the verdict with its `required`, `actual` and `as_of` values (a `NOT_APPLICABLE` row says why in `reason`; `required_unresolved` means a fact on the required path is missing, not that the item violates the rule; `hidden_by_label` means the verdict depends on facts your access labels hide; a non-empty `missing` names the fact that is not there — ask the user for it, offering the obvious default, and re-run with `assume` instead of inferring it). Use `point` for one-cardinality predicates and `expand` for many-cardinality ones (both accept `valid_at` for an as-of read of the state in effect at that instant). There is no join operator: to evaluate a chained/derived relation, compose several calls — e.g. to read an attribute of a node reached via another predicate, point/expand the first predicate, then point the next predicate on each resulting node. To evaluate a declared rule (a required derived path, optionally read as-of a valid-time anchor, compared to an actual predicate) into per-subject verdicts instead of composing the hops yourself, call `conformance`; pass `subjects` for the items you are deciding, since a full evaluation is paged (`limit`, `offset`) and reports `counts`. For 'over which intervals / when was' questions, call `timeline` with a chain of one-cardinality predicates instead of probing `valid_at` repeatedly."
             }),
         ),
         "ping" => rpc_result(&id, json!({})),

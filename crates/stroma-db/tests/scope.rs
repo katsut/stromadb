@@ -165,3 +165,34 @@ fn scope_caps_reads_and_blocks_readonly_writes_over_mcp() {
 
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
+
+#[test]
+fn scope_caps_find_over_mcp() {
+    let (dir, db) = fresh("find");
+
+    let all = mcp::Scope::default();
+    let (err, text) = mcp_call(&db, &all, "find", json!({"text":"secret"}));
+    assert!(!err && text.contains("\"id\":2"), "{text}");
+
+    let capped = mcp::Scope {
+        allowed_labels: Some(0b1),
+        ..Default::default()
+    };
+    let (err, text) = mcp_call(&db, &capped, "find", json!({"text":"secret"}));
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["nodes"], json!([]), "capped find must hide label-3: {v}");
+
+    // a capped request cannot widen itself
+    let (err, text) = mcp_call(
+        &db,
+        &capped,
+        "find",
+        json!({"text":"secret","allowed_labels":4294967295u32}),
+    );
+    assert!(!err, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["nodes"], json!([]), "request must not widen the cap: {v}");
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
