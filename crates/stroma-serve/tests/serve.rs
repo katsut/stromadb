@@ -210,8 +210,8 @@ fn serve_health_query_ingest() {
     assert_eq!(st, 200, "query: {body}");
     assert!(body.contains("[2]"), "query body: {body}");
 
-    // live ingest over HTTP, then read it back
-    let (st, _, _) = http(
+    // live ingest over HTTP, then read it back; the answer brackets the batch's heads
+    let (st, _, body) = http(
         &addr,
         "POST",
         "/ingest",
@@ -219,6 +219,12 @@ fn serve_health_query_ingest() {
         Some(&tok),
     );
     assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        v["durable_head"].as_u64().unwrap(),
+        v["head_before"].as_u64().unwrap() + 1,
+        "one fact = one head: {body}"
+    );
     let (_, _, body) = http(
         &addr,
         "POST",

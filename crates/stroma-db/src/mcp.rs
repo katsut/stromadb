@@ -160,7 +160,7 @@ fn tools() -> Value {
         },
         {
             "name": "ingest",
-            "description": "Ingest a JSONL batch (type_def / pred_def / node / fact / retract / close records, one per line). Durable on return. A fact or close may carry `label` (an access label 0..31) and a pred_def may declare `label_floor`; a reader sees a fact only when its labels allow both.",
+            "description": "Ingest a JSONL batch (type_def / pred_def / node / fact / retract / close records, one per line). Durable on return. A fact or close may carry `label` (an access label 0..31) and a pred_def may declare `label_floor`; a reader sees a fact only when its labels allow both. The answer counts what was written and carries `head_before` (the durable head when this batch started) and `durable_head` (the head after it); batches are serialized, so `(head_before, durable_head]` is exactly this batch's range of heads.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "jsonl": { "type": "string", "description": "newline-delimited records" } },
@@ -240,7 +240,7 @@ fn call_tool(db: &Db, name: &str, args: &Value, scope: &Scope) -> Result<Value, 
                 .ok_or("ingest requires a `jsonl` string")?;
             let s = db.ingest_str_as(jsonl, scope.default_source.as_deref())?;
             Ok(
-                json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "durable_head": s.durable_head }),
+                json!({ "defs": s.defs, "nodes": s.nodes, "facts": s.facts, "retracts": s.retracts, "closes": s.closes, "head_before": s.head_before, "durable_head": s.durable_head }),
             )
         }
         other => Err(format!("unknown tool: {other}")),

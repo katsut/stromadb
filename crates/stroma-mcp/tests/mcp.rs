@@ -118,12 +118,13 @@ fn mcp_initialize_list_call() {
 
     // tools/call ingest (write) then read back
     let r = mcp.call(json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ingest","arguments":{"jsonl":"{\"fact\":{\"subject\":2,\"predicate\":\"knows\",\"object\":{\"node\":1}}}"}}}));
-    assert!(
-        r["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("\"facts\":1"),
-        "ingest: {r}"
+    let text = r["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"facts\":1"), "ingest: {r}");
+    let s: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        s["durable_head"].as_u64().unwrap(),
+        s["head_before"].as_u64().unwrap() + 1,
+        "ingest range: {text}"
     );
     let r = mcp.call(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"expand","arguments":{"subject":2,"predicate":"knows"}}}));
     assert!(

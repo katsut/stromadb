@@ -313,7 +313,11 @@
   drain goes through one choke point that feeds every watched rule; changes land in a bounded per-rule
   journal behind a cursor (`conformance_watch` / `conformance_changes`), with `resync` on cursor
   fall-behind. Maintenance is unfiltered; the caller's label mask applies at read time, like the
-  one-shot op.
+  one-shot op. Journal entries are keyed by the durable head after the drain that produced them,
+  and an ingest reports `head_before` (the head at write-lock acquisition) next to its
+  `durable_head`; since ingests are serialized, `conformance_changes` with
+  `cursor = head_before, until = durable_head` returns exactly one ingest's changes, each tagged
+  with its `head` (and its `rule` when read across every watched rule).
 - **Why:** the maintained map provably equals a full evaluation while the update cost tracks the blast
   radius, not the graph.
 - **Evidence:** property test — 2,500 random events (supersessions, closes, late-arriving corrections,

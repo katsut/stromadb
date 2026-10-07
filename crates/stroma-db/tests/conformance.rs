@@ -444,6 +444,237 @@ fn conformance_watch_streams_verdict_diffs() {
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
+// The approval that turns the ABSENT issue 1003 OK, and the late manager transfer that flips
+// 1001/1003/1008 to stale MISMATCH (see `conformance_watch_streams_verdict_diffs`).
+const APPROVE_1003: &str = concat!(
+    "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-by\",\"object\":{\"node\":10},\"valid_from\":1200}}\n",
+    "{\"fact\":{\"subject\":1003,\"predicate\":\"approved-at\",\"object\":{\"int\":1200}}}\n",
+);
+const TRANSFER_AT_1100: &str = "{\"fact\":{\"subject\":1,\"predicate\":\"manager-of\",\"object\":{\"node\":102},\"valid_from\":1100}}\n";
+
+fn watched_db(tag: &str) -> (std::path::PathBuf, Db) {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_conformance_{tag}_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    db.ingest_str(FIXTURE).unwrap();
+    let rule_def = json!({ "rule_def": { "name": "release-approval", "rule": rule_body() } });
+    db.ingest_str(&rule_def.to_string()).unwrap();
+    (dir, db)
+}
+
+fn changes(db: &Db, req: serde_json::Value) -> (Vec<serde_json::Value>, u64) {
+    let c = db.query(&req).unwrap();
+    (
+        c["changes"].as_array().unwrap().clone(),
+        c["cursor"].as_u64().unwrap(),
+    )
+}
+
+fn subjects(changes: &[serde_json::Value]) -> Vec<u64> {
+    let mut s: Vec<u64> = changes
+        .iter()
+        .map(|c| c["subject"].as_u64().unwrap())
+        .collect();
+    s.sort_unstable();
+    s
+}
+
+// An ingest reports the head it started from, so `(head_before, durable_head]` bounds exactly its
+// verdict changes: `until` cuts off the changes a later ingest caused, and every change carries
+// the head that falls inside its own ingest's range.
+#[test]
+fn conformance_changes_bounded_to_one_ingest() {
+    let (dir, db) = watched_db("until");
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    let cursor = w["cursor"].as_u64().unwrap();
+
+    let a = db.ingest_str(APPROVE_1003).unwrap();
+    assert_eq!(a.head_before, cursor);
+    assert!(a.durable_head > a.head_before);
+    let b = db.ingest_str(TRANSFER_AT_1100).unwrap();
+    assert_eq!(b.head_before, a.durable_head);
+
+    // the second ingest's changes are excluded; the returned cursor is `until`
+    let (first, next) = changes(
+        &db,
+        json!({"op":"conformance_changes","rule_name":"release-approval","cursor":a.head_before,"until":a.durable_head}),
+    );
+    assert_eq!(next, a.durable_head);
+    assert_eq!(subjects(&first), vec![1003]);
+    assert_eq!(first[0]["old"]["verdict"], json!("ABSENT"));
+    assert_eq!(first[0]["new"]["verdict"], json!("OK"));
+    assert!(
+        first[0].get("rule").is_none(),
+        "single-rule form names no rule"
+    );
+    for c in &first {
+        let h = c["head"].as_u64().unwrap();
+        assert!(a.head_before < h && h <= a.durable_head, "{c}");
+    }
+
+    // continuing from that cursor yields exactly the second ingest's changes
+    let (second, next) = changes(
+        &db,
+        json!({"op":"conformance_changes","rule_name":"release-approval","cursor":b.head_before,"until":b.durable_head}),
+    );
+    assert_eq!(next, b.durable_head);
+    assert_eq!(subjects(&second), vec![1001, 1003, 1008]);
+    for c in &second {
+        let h = c["head"].as_u64().unwrap();
+        assert!(b.head_before < h && h <= b.durable_head, "{c}");
+    }
+
+    // without `until` the answer is the two ranges back to back, cursor at the current head
+    let (all, next) = changes(
+        &db,
+        json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}),
+    );
+    assert_eq!(next, b.durable_head);
+    assert_eq!(all, [first, second].concat());
+
+    // `until` past the head is capped at the head; `until` below the cursor is an error
+    let (_, next) = changes(
+        &db,
+        json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor,"until":b.durable_head + 100}),
+    );
+    assert_eq!(next, b.durable_head);
+    let err = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":b.durable_head,"until":a.durable_head}))
+        .unwrap_err();
+    assert!(err.contains("until"), "unexpected: {err}");
+    let err = db
+        .query(&json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor,"until":"x"}))
+        .unwrap_err();
+    assert!(err.contains("until"), "unexpected: {err}");
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+// Two ingests racing for the write lock get disjoint, contiguous head ranges that together cover
+// both, and the changes read per range partition the unbounded answer.
+#[test]
+fn concurrent_ingests_get_disjoint_contiguous_ranges() {
+    let (dir, db) = watched_db("race");
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    let h0 = w["cursor"].as_u64().unwrap();
+
+    let (a, b) = std::thread::scope(|s| {
+        let a = s.spawn(|| db.ingest_str(APPROVE_1003).unwrap());
+        let b = s.spawn(|| db.ingest_str(TRANSFER_AT_1100).unwrap());
+        (a.join().unwrap(), b.join().unwrap())
+    });
+    let (lo, hi) = if a.head_before < b.head_before {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    assert_eq!(lo.head_before, h0);
+    assert!(lo.durable_head > lo.head_before);
+    assert_eq!(lo.durable_head, hi.head_before, "ranges are contiguous");
+    assert!(hi.durable_head > hi.head_before);
+    assert_eq!(hi.durable_head, db.durable_head(), "ranges cover both");
+
+    let mut per_range = Vec::new();
+    for s in [lo, hi] {
+        let (cs, next) = changes(
+            &db,
+            json!({"op":"conformance_changes","rule_name":"release-approval","cursor":s.head_before,"until":s.durable_head}),
+        );
+        assert_eq!(next, s.durable_head);
+        assert!(!cs.is_empty(), "each ingest changes a verdict");
+        for c in &cs {
+            let h = c["head"].as_u64().unwrap();
+            assert!(s.head_before < h && h <= s.durable_head, "{c}");
+        }
+        per_range.extend(cs);
+    }
+    let (all, _) = changes(
+        &db,
+        json!({"op":"conformance_changes","rule_name":"release-approval","cursor":h0}),
+    );
+    assert_eq!(all, per_range);
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+// Without `rule_name` the answer covers every watched rule, each change naming its `rule`, ordered
+// by head then rule name; a cursor older than any watch's journal resyncs.
+#[test]
+fn conformance_changes_across_all_watched_rules() {
+    let (dir, db) = watched_db("all_rules");
+    let twin = json!({ "rule_def": { "name": "a-twin", "rule": rule_body() } });
+    db.ingest_str(&twin.to_string()).unwrap();
+    db.query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"a-twin"}))
+        .unwrap();
+    let cursor = w["cursor"].as_u64().unwrap();
+
+    let a = db.ingest_str(APPROVE_1003).unwrap();
+    let b = db.ingest_str(TRANSFER_AT_1100).unwrap();
+
+    let (all, next) = changes(&db, json!({"op":"conformance_changes","cursor":cursor}));
+    assert_eq!(next, b.durable_head);
+    let keys: Vec<(u64, String)> = all
+        .iter()
+        .map(|c| {
+            (
+                c["head"].as_u64().unwrap(),
+                c["rule"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "ordered by head, then rule");
+    for name in ["a-twin", "release-approval"] {
+        let (one, _) = changes(
+            &db,
+            json!({"op":"conformance_changes","rule_name":name,"cursor":cursor}),
+        );
+        let tagged: Vec<serde_json::Value> = all
+            .iter()
+            .filter(|c| c["rule"] == json!(name))
+            .map(|c| {
+                let mut c = c.clone();
+                c.as_object_mut().unwrap().remove("rule");
+                c
+            })
+            .collect();
+        assert_eq!(tagged, one, "{name}");
+        assert_eq!(subjects(&one), vec![1001, 1003, 1003, 1008]);
+    }
+
+    // bounded to the first ingest: both rules report 1003 only
+    let (first, _) = changes(
+        &db,
+        json!({"op":"conformance_changes","cursor":a.head_before,"until":a.durable_head}),
+    );
+    let rules: Vec<&str> = first.iter().map(|c| c["rule"].as_str().unwrap()).collect();
+    assert_eq!(rules, vec!["a-twin", "release-approval"]);
+    assert_eq!(subjects(&first), vec![1003, 1003]);
+
+    // a rule watched after the cursor has no journal that far back: the combined answer resyncs
+    let late = json!({ "rule_def": { "name": "late", "rule": rule_body() } });
+    db.ingest_str(&late.to_string()).unwrap();
+    db.query(&json!({"op":"conformance_watch","rule_name":"late"}))
+        .unwrap();
+    let c = db
+        .query(&json!({"op":"conformance_changes","cursor":cursor}))
+        .unwrap();
+    assert_eq!(c["resync"], json!(true));
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 // The two rule-expressiveness extensions end-to-end through the JSON boundary: a node-valued scope
 // (`equals: {"node": N}` — the documented object form) and `distinct_from` (a must-differ derived
 // path, e.g. a self-approval ban), including the stored `rule_def` replay of the new field.

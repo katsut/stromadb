@@ -195,6 +195,22 @@ curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1,"predicate":"work
 curl -s localhost:7687/stats
 ```
 
+An ingest answers with its counts plus `head_before` and `durable_head`, the durable head when the
+batch took the write lock and after it. Ingests are serialized, so `(head_before, durable_head]` is
+exactly that batch's range. A watched rule's verdict changes can be read for that range alone:
+
+```bash
+curl -s -X POST localhost:7687/query  -d '{"op":"conformance_watch","rule_name":"release-approval"}'
+curl -s -X POST localhost:7687/ingest -d '{"fact":{"subject":1003,"predicate":"approved-by","object":{"node":10}}}'
+# {"defs":0,"nodes":0,"facts":1,"retracts":0,"closes":0,"suppressed":0,"head_before":41,"durable_head":42}
+curl -s -X POST localhost:7687/query  -d '{"op":"conformance_changes","rule_name":"release-approval","cursor":41,"until":42}'
+# {"changes":[{"subject":1003,"old":{"verdict":"ABSENT",…},"new":{"verdict":"OK",…},"head":42}],"cursor":42}
+```
+
+Every change carries the `head` of the batch that caused it, and `until` (inclusive) becomes the
+returned cursor. Without `rule_name`, `conformance_changes` covers every watched rule and each
+change names its `rule`.
+
 Settings come from flags or environment variables (flag > env > default) — see
 **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** and `.env.example`. Reads are authz-scoped
 (`allowed_labels`, capped per token) and stamped with an `as_of` version vector. The `stroma-serve`
