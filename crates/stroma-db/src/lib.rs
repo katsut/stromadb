@@ -535,6 +535,12 @@ impl Db {
         let name = req["rule_name"]
             .as_str()
             .ok_or("conformance_watch.rule_name missing (only stored rules can be watched)")?;
+        if !req["assume"].is_null() {
+            return Err(
+                "conformance_watch maintains graph-only verdicts; evaluate 'assume' with the conformance op"
+                    .into(),
+            );
+        }
         let labels = req_labels(req);
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         w.materialize_live(); // seed from a fully drained state
@@ -576,12 +582,13 @@ impl Db {
             .values()
             .filter(|v| label_visible(&snap, v.subject, labels))
             .map(|v| {
-                if masking {
+                let v = if masking {
                     let support = maintained.support(v.subject);
-                    verdict_json(&conformance::mask_verdict(v.clone(), &support, &mask))
+                    conformance::mask_verdict(v.clone(), &support, &mask)
                 } else {
-                    verdict_json(v)
-                }
+                    v.clone()
+                };
+                verdict_json(&conformance::mask_missing_nodes(v, &snap, labels))
             })
             .collect();
         Ok(json!({ "verdicts": verdicts, "cursor": head }))
@@ -619,11 +626,12 @@ impl Db {
         let masking = mask.hides_any(&snap);
         let seen = |v: &Option<conformance::Verdict>, support: &conformance::Support| {
             v.clone().map(|v| {
-                if masking {
+                let v = if masking {
                     conformance::mask_verdict(v, support, &mask)
                 } else {
                     v
-                }
+                };
+                conformance::mask_missing_nodes(v, &snap, labels)
             })
         };
         let changes: Vec<Value> = lr
@@ -2420,29 +2428,67 @@ impl ReadState {
     /// `reasons` (per reason of the `NOT_APPLICABLE` rows) cover every row before `only` and paging,
     /// `total` is the kept count, and `truncated` means rows remain after this page. With none of
     /// them the op returns every verdict, as before; the MCP tool applies its own smaller defaults.
+    ///
+    /// Missing information, also additive: every row carries `missing` — what stopped the judgment
+    /// short, `{kind: "anchor", node, predicate}` (an as-of hop or condition whose anchor has no value
+    /// on the subject) or `{kind: "hop", node, predicate}` (a path predicate with no value on that
+    /// node) — and `assumed`, the anchors whose instant came from `assume`. `assume: {"<int anchor
+    /// predicate>": instant}` is used only where the subject has no value for that anchor (graph
+    /// values win) and is evaluated on demand, never stored. `subject` alone (no `rule` /
+    /// `rule_name`) evaluates every stored rule covering the subject's type, each row naming its
+    /// `rule`; when none covers it, the top-level `missing` holds `{kind: "no_rule", node, type}`
+    /// (`type` null for an unknown or hidden id).
     fn conformance(&self, req: &Value) -> DbResult<Value> {
-        let rule = if let Some(name) = req["rule_name"].as_str() {
-            self.schema
+        let labels = req_labels(req);
+        let mut top_missing: Vec<Value> = Vec::new();
+        let rules: Vec<(Option<String>, conformance::Rule)> = if let Some(name) =
+            req["rule_name"].as_str()
+        {
+            let rule = self
+                .schema
                 .rules
                 .get(name)
                 .map(|s| s.rule.clone())
-                .ok_or(format!("unknown rule_name: {name}"))?
+                .ok_or(format!("unknown rule_name: {name}"))?;
+            vec![(None, rule)]
         } else if !req["rule"].is_null() {
-            parse_conformance_rule(&req["rule"])?
+            vec![(None, parse_conformance_rule(&req["rule"])?)]
+        } else if let Some(s) = req["subject"].as_u64() {
+            let ty = self
+                .snap
+                .node_types
+                .get(&s)
+                .filter(|_| label_visible(&self.snap, s, labels))
+                .and_then(|&t| self.schema.cat.name(t));
+            let mut covering: Vec<(Option<String>, conformance::Rule)> = self
+                .schema
+                .rules
+                .iter()
+                .filter(|(_, sr)| Some(sr.rule.subject_type.as_str()) == ty)
+                .map(|(n, sr)| (Some(n.clone()), sr.rule.clone()))
+                .collect();
+            covering.sort_by(|a, b| a.0.cmp(&b.0));
+            if covering.is_empty() {
+                top_missing.push(json!({ "kind": "no_rule", "node": s, "type": ty }));
+            }
+            covering
         } else {
             return Err(
-                "conformance requires either 'rule' (inline) or 'rule_name' (stored)".into(),
-            );
+                    "conformance requires 'rule' (inline), 'rule_name' (stored), or 'subject' alone (every stored rule covering its type)"
+                        .into(),
+                );
         };
-        let missing = conformance::unresolved_names(&rule, &self.schema.cat);
-        if !missing.is_empty() {
-            return Err(format!(
-                "unknown name(s) in conformance rule: {}",
-                missing.join(", ")
-            ));
+        for (_, rule) in &rules {
+            let missing = conformance::unresolved_names(rule, &self.schema.cat);
+            if !missing.is_empty() {
+                return Err(format!(
+                    "unknown name(s) in conformance rule: {}",
+                    missing.join(", ")
+                ));
+            }
+            check_rule_paths(rule, &self.schema.cat)?;
         }
-        check_rule_paths(&rule, &self.schema.cat)?;
-        let labels = req_labels(req);
+        let assume = parse_assumptions(&req["assume"], &self.schema.cat)?;
         // `subject` (one id) or `subjects` (a list): evaluate only those.
         let subjects: Option<Vec<NodeId>> =
             if let Some(s) = req.get("subjects").filter(|v| !v.is_null()) {
@@ -2486,12 +2532,17 @@ impl ReadState {
         };
         let offset = req["offset"].as_u64().unwrap_or(0) as usize;
         let limit = req["limit"].as_u64().map(|l| l as usize);
-        let rows: Vec<conformance::Verdict> = match &subjects {
-            Some(s) => {
-                conformance::evaluate_subjects(&self.snap, &self.schema.cat, &rule, labels, s)
-            }
-            None => conformance::evaluate(&self.snap, &self.schema.cat, &rule, labels),
-        };
+        let cat = &self.schema.cat;
+        let mut rows: Vec<(Option<&str>, conformance::Verdict)> = Vec::new();
+        for (name, rule) in &rules {
+            let verdicts = match &subjects {
+                Some(s) => conformance::evaluate_subjects_assuming(
+                    &self.snap, cat, rule, labels, s, &assume,
+                ),
+                None => conformance::evaluate_assuming(&self.snap, cat, rule, labels, &assume),
+            };
+            rows.extend(verdicts.into_iter().map(|v| (name.as_deref(), v)));
+        }
         // Counts per verdict, and per reason of the NOT_APPLICABLE rows, over every row (each
         // visible subject, or each requested id), before `only`/paging.
         let zeros = |names: &[&str]| -> serde_json::Map<String, Value> {
@@ -2503,15 +2554,15 @@ impl ReadState {
             let c = &mut m[k];
             *c = json!(c.as_u64().unwrap_or(0) + 1);
         };
-        for r in &rows {
+        for (_, r) in &rows {
             bump(&mut counts, r.verdict.as_str());
             if let Some(reason) = r.reason {
                 bump(&mut reasons, reason.as_str());
             }
         }
-        let selected: Vec<&conformance::Verdict> = rows
+        let selected: Vec<&(Option<&str>, conformance::Verdict)> = rows
             .iter()
-            .filter(|r| {
+            .filter(|(_, r)| {
                 only.as_ref()
                     .is_none_or(|o| o.contains(&r.verdict.as_str()))
             })
@@ -2521,7 +2572,13 @@ impl ReadState {
             .into_iter()
             .skip(offset)
             .take(limit.unwrap_or(usize::MAX))
-            .map(verdict_json)
+            .map(|(name, v)| {
+                let mut j = verdict_json(v);
+                if let Some(n) = name {
+                    j["rule"] = json!(n);
+                }
+                j
+            })
             .collect();
         let returned = out.len();
         Ok(json!({
@@ -2531,6 +2588,7 @@ impl ReadState {
             "truncated": offset.saturating_add(returned) < total,
             "counts": counts,
             "reasons": reasons,
+            "missing": top_missing,
         }))
     }
 
@@ -3145,12 +3203,48 @@ fn verdict_json(v: &conformance::Verdict) -> Value {
         "actual": v.actual.clone().map(fmt_obj),
         "as_of": v.as_of,
         "case": v.case,
+        "missing": v.missing.iter().map(missing_json).collect::<Vec<Value>>(),
+        "assumed": v.assumed,
     });
     // present exactly on NOT_APPLICABLE rows
     if let Some(reason) = v.reason {
         out["reason"] = json!(reason.as_str());
     }
     out
+}
+
+fn missing_json(m: &conformance::Missing) -> Value {
+    match m {
+        conformance::Missing::Anchor { node, predicate }
+        | conformance::Missing::Hop { node, predicate } => {
+            json!({ "kind": m.kind(), "node": node, "predicate": predicate })
+        }
+    }
+}
+
+/// Parse an optional `assume` map `{ "<predicate name>": instant, .. }` (absent/null → empty). An
+/// instant is a bare integer or `{"int": N}`; an unknown predicate name is a clear error.
+fn parse_assumptions(v: &Value, cat: &Catalog) -> DbResult<conformance::Assumptions> {
+    let mut out = conformance::Assumptions::new();
+    if v.is_null() {
+        return Ok(out);
+    }
+    let map = v
+        .as_object()
+        .ok_or("conformance.assume must be an object of { predicate: instant }")?;
+    for (name, val) in map {
+        if cat.field_id(name).is_none() {
+            return Err(format!("unknown predicate in conformance.assume: {name}"));
+        }
+        let t = val
+            .as_i64()
+            .or_else(|| val.get("int").and_then(Value::as_i64))
+            .ok_or(format!(
+                "conformance.assume.{name} must be an integer instant"
+            ))?;
+        out.insert(name.clone(), t);
+    }
+    Ok(out)
 }
 
 /// A request's `allowed_labels` bitmask (absent = every label).
