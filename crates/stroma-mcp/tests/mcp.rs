@@ -335,6 +335,12 @@ fn mcp_conformance() {
     let conf = tool("conformance");
     assert!(conf["inputSchema"]["properties"]["assume"].is_object());
     assert!(conf["inputSchema"]["properties"]["subject"].is_object());
+    let conf_desc = conf["description"].as_str().unwrap();
+    assert!(conf_desc.contains("cannot judge yet"), "{conf_desc}");
+    assert!(
+        conf_desc.contains("not \"the rule does not apply\""),
+        "{conf_desc}"
+    );
     for name in ["conformance", "lookup", "point", "expand"] {
         let t = tool(name);
         let d = t["description"].as_str().unwrap();
