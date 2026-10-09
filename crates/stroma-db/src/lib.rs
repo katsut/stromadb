@@ -281,6 +281,7 @@ pub struct ReadState {
     suppressed_total: u64,
     index_retrained: bool,
     wal_bytes: u64,
+    bytes_on_disk: u64,
 }
 
 impl Db {
@@ -818,6 +819,12 @@ impl Db {
         }
     }
 
+    /// Size on disk of this database's own files, indexes and logs included, as measured at the
+    /// last publish; see [`dir_bytes`].
+    pub fn bytes_on_disk(&self) -> u64 {
+        self.read_state().bytes_on_disk
+    }
+
     /// Engine/schema/embedding/storage counters. Reads only the pinned view: every figure is a
     /// counter captured at publish time (or a small catalog walk), so this is O(1) in the graph
     /// size and never waits for an in-flight write.
@@ -869,7 +876,11 @@ impl Db {
                     "retrained_last_build": rs.index_retrained,
                 })
             }),
-            "storage": { "wal_bytes": rs.wal_bytes, "embeddings_bytes": rs.emb.len() * 4 },
+            "storage": {
+                "wal_bytes": rs.wal_bytes,
+                "embeddings_bytes": rs.emb.len() * 4,
+                "bytes_on_disk": self.bytes_on_disk(),
+            },
         })
     }
 }
@@ -882,6 +893,33 @@ impl Drop for Db {
             .unwrap_or_else(|e| e.into_inner())
             .persist_counts();
     }
+}
+
+/// Total size in bytes of the files in a database directory, including nested directories but
+/// excluding the top-level `ns/` directory that holds the other namespaces of a server root.
+/// Unreadable entries count as zero, so a listing never fails because of one file.
+pub fn dir_bytes(dir: &Path) -> u64 {
+    fn walk(dir: &Path, top: bool) -> u64 {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|e| {
+                let Ok(meta) = e.metadata() else { return 0 };
+                if meta.is_dir() {
+                    if top && e.file_name() == "ns" {
+                        0
+                    } else {
+                        walk(&e.path(), false)
+                    }
+                } else {
+                    meta.len()
+                }
+            })
+            .sum()
+    }
+    walk(dir, true)
 }
 
 /// Headline counts of a database: distinct nodes and the durable changelog head (facts).
@@ -991,6 +1029,7 @@ impl WriteState {
             wal_bytes: fs::metadata(self.dir.join("wal.log"))
                 .map(|m| m.len())
                 .unwrap_or(0),
+            bytes_on_disk: dir_bytes(&self.dir),
         }
     }
 
@@ -3519,6 +3558,28 @@ mod stats_tests {
                 facts: rs.durable_head
             }
         );
+    }
+
+    #[test]
+    fn bytes_on_disk_sums_own_files_and_skips_namespaces() {
+        let dir = tmp("bytes");
+        let db = Db::open_or_init(&dir).unwrap();
+        db.ingest_str("{\"type_def\":{\"name\":\"T\"}}\n{\"node\":{\"id\":1,\"type\":\"T\"}}\n")
+            .unwrap();
+        let reported = db.stats()["storage"]["bytes_on_disk"].as_u64().unwrap();
+        assert!(reported >= db.stats()["storage"]["wal_bytes"].as_u64().unwrap());
+        assert!(reported > 0);
+        assert!(reported <= dir_bytes(&dir));
+        // another namespace under ns/ is not part of this database's size
+        let before = dir_bytes(&dir);
+        fs::create_dir_all(dir.join("ns/other")).unwrap();
+        fs::write(dir.join("ns/other/wal.log"), vec![0u8; 4096]).unwrap();
+        assert_eq!(dir_bytes(&dir), before);
+        assert_eq!(db.bytes_on_disk(), reported);
+        // a missing directory reads as zero rather than failing
+        assert_eq!(dir_bytes(&dir.join("absent")), 0);
+        drop(db);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
