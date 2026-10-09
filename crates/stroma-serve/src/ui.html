@@ -776,11 +776,12 @@ function drawLabels(){
 // so a dense view never paints thousands of strings per frame.
 const EDGE_LABEL_MAX = 300;
 function edgeLabelSet(){
-  const out = [];
-  if(edgeLabelsOn){ for(let k=0;k<ePairs.length/2 && out.length<EDGE_LABEL_MAX;k++) out.push(k); return out; }
-  if(hoverE>=0) out.push(hoverE);
+  const out = []; const ok = k => { const i=ePairs[2*k], j=ePairs[2*k+1]; return vis[i]!==2 && vis[j]!==2 && ePreds[k] && ePreds[k].length; };
+  if(hoverE>=0 && ok(hoverE)) out.push(hoverE);
   const focus = [hoverN, selected].filter(i=>i>=0);
-  if(focus.length) for(let k=0;k<ePairs.length/2 && out.length<EDGE_LABEL_MAX;k++){ const i=ePairs[2*k], j=ePairs[2*k+1]; if(focus.includes(i)||focus.includes(j)) out.push(k); }
+  if(!edgeLabelsOn && !focus.length) return out;
+  for(let k=0;k<ePairs.length/2 && out.length<EDGE_LABEL_MAX;k++){ if(k===hoverE || !ok(k)) continue;
+    const i=ePairs[2*k], j=ePairs[2*k+1]; if(edgeLabelsOn || focus.includes(i) || focus.includes(j)) out.push(k); }
   return out; }
 function drawEdgeLabels(light, scr){
   const ks = edgeLabelSet(); if(!ks.length) return;
@@ -895,15 +896,18 @@ async function hiddenValues(id, scoped){
   }catch(x){ console.warn('hidden-value count unavailable:', x); return 0; } }
 // the view's edges at this node, with predicate names: a keyboard-reachable list (the canvas
 // itself cannot be tabbed through) that also covers incoming edges, which the property rows omit.
-function edgesList(id){
+function edgesList(id, all){
   const me=idx.get(id); if(me===undefined) return '';
   const rows=[]; for(let k=0;k<ePairs.length;k+=2){ const a=ePairs[k], b=ePairs[k+1]; if(a!==me&&b!==me) continue;
     const o=a===me?b:a; const pr=ePreds[k/2]; if(!pr||!pr.length) continue; rows.push([o,pr]); }
   if(!rows.length) return '';
-  const hint=t('noDataYet'); const shown=rows.slice(0,40);
-  return `<div class="ins-meta" style="margin-top:8px">${t('edgesInView')} · ${rows.length}</div><div class="ins-edges">`
-    + shown.map(([o,pr])=>`<button type="button" class="ins-edge" onclick="recenter(${ids[o]})"><span class="ie-p">${esc(pr.join(', '))}</span><span class="ie-n">${esc(nodeLabelText(names[o],types[o],ids[o],placeholders[o],hint))}</span></button>`).join('')
-    + (rows.length>shown.length ? `<span class="ins-ph">${t('nMore',{n:rows.length-shown.length})}</span>` : '') + `</div>`; }
+  const hint=t('noDataYet'); const shown=all ? rows : rows.slice(0,40);
+  return `<div class="ins-meta" style="margin-top:8px">${t('edgesInView')} · ${rows.length}</div><div class="ins-edges" id="insEdges">`
+    + shown.map(([o,pr])=>`<button type="button" class="ins-edge" onclick="openNode(${ids[o]})"><span class="ie-p">${esc(pr.join(', '))}</span><span class="ie-n">${esc(nodeLabelText(names[o],types[o],ids[o],placeholders[o],hint))}</span></button>`).join('')
+    + (rows.length>shown.length ? `<button type="button" class="ins-edge" onclick="expandEdges(${id})"><span class="ie-n">${esc(t('nMore',{n:rows.length-shown.length}))}</span></button>` : '') + `</div>`; }
+// open a neighbour's details (the keyboard path along an edge) and move focus to the panel
+window.openNode = id => { const i=idx.get(id); if(i===undefined) return; selected=i; showDetail(id, depth[i]).then(()=>{ const p=$('inspect'); p.tabIndex=-1; p.focus(); }); };
+window.expandEdges = id => { const box=$('insEdges'); if(!box) return; const tmp=document.createElement('div'); tmp.innerHTML=edgesList(id,true); box.innerHTML=tmp.querySelector('#insEdges').innerHTML; };
 async function showDetail(id, dep){
   const ins=$('inspect'); ins.classList.remove('hidden');
   ins.innerHTML = insHead(id, dep, null)+`<div class="ins-load">loading…</div>`;
@@ -1490,7 +1494,7 @@ const TYPE_PREF_KEY = 'stroma_types_' + NS;
 function saveTypePrefs(){
   const enc=encodeTypeState(typeState);
   try{ const u=new URL(location.href);
-    for(const [k,v] of [['dim',enc.dim],['hide',enc.hide],['edgelabels',edgeLabelsOn?'1':'']]){ if(v) u.searchParams.set(k,v); else u.searchParams.delete(k); }
+    for(const [k,v] of [['dim',enc.dim],['hide',enc.hide],['edgelabels',edgeLabelsOn?'1':'0']]){ if(v) u.searchParams.set(k,v); else u.searchParams.delete(k); }
     history.replaceState(null,'',u.pathname+u.search+u.hash); }catch(x){ console.warn('history.replaceState failed', x); }
   try{ localStorage.setItem(TYPE_PREF_KEY, JSON.stringify({dim:enc.dim,hide:enc.hide,edgelabels:edgeLabelsOn})); }catch(x){ console.warn('type prefs not saved', x); } }
 function loadTypePrefs(){

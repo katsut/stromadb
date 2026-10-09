@@ -1832,8 +1832,7 @@ impl ReadState {
             .node_types
             .get(&id)
             .and_then(|&t| self.schema.cat.name(t));
-        let (ones, manys) = query::describe(facts, id);
-        let placeholder = ones.is_empty() && manys.is_empty();
+        let placeholder = !query::has_facts(facts, id);
         json!({ "id": id, "depth": depth, "name": self.display_name(facts, id), "type": ty, "placeholder": placeholder })
     }
 
