@@ -103,7 +103,8 @@ fn tools() -> Value {
                     "k": { "type": "integer", "default": 10 },
                     "allowed_labels": { "type": "integer", "description": "caller ABAC label bitmask (default: all)" },
                     "expand": { "type": "string", "description": "optional predicate to 1-hop expand results" },
-                    "mode": { "type": "string", "enum": ["fresh", "strict"], "default": "fresh" }
+                    "mode": { "type": "string", "enum": ["fresh", "strict"], "default": "fresh" },
+                    "exact": { "type": "boolean", "default": false, "description": "score every stored vector of the type (brute force) instead of probing the index: recall-complete, for small corpora" }
                 },
                 "required": ["type", "vector"]
             }
