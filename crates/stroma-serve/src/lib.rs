@@ -346,6 +346,10 @@ impl Namespaces {
         if let Some(db) = slot.as_ref() {
             return Ok(Some(db.clone()));
         }
+        // an empty slot left by a failed create must not turn a missing namespace into an error
+        if !dir.join("wal.log").exists() {
+            return Ok(None);
+        }
         let db = Db::open_with(&dir, self.n_max).map_err(|e| format!("namespace '{name}': {e}"))?;
         let db = Arc::new(db);
         *slot = Some(db.clone());
