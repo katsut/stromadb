@@ -707,6 +707,15 @@
   open at once, and more answer 503. A stream ends after 5 minutes, which bounds how long it can
   outlive the session or token that opened it. The client resumes with `Last-Event-ID`. Events
   are written as HTTP chunks and flushed one by one, so none waits in a buffer.
+- **Verdict events:** `verdicts=1` on `/events` (implies `changes=1`) and `/events/stream` adds the
+  verdict changes of every watched rule. They are read through the same code as `conformance_changes`
+  without a rule name (`Db::verdict_changes`), bounded above by the head the fact read answered, so
+  facts and verdicts cover one range and carry the same masking. Per head the stream sends the fact
+  event, then one `event: verdict` per row. Only the last event of a head carries `id:`, so a client
+  that drops mid-head resumes from the previous head and gets the whole head again. A rule watched
+  after the cursor, or whose diff journal no longer reaches it, is named by `event: resync` and adds
+  no rows, while the other rules still answer. A cursor the fact feed cannot answer resyncs the whole
+  window. The heartbeat interval is `--sse-heartbeat` (default 15 s). MCP is unchanged.
 - **Console:** a neighbourhood or whole-graph view applies a change set of up to 12 nodes in
   place. A 1-hop `neighborhood` probe per touched node, with the view's predicate and scope,
   replaces that node's edges. New nodes linked to the slice join next to their neighbour within

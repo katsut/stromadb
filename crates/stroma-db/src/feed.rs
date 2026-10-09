@@ -150,6 +150,16 @@ impl Feed {
     }
 }
 
+/// The verdict changes of every watched rule over a head range, as one principal sees them.
+/// `changes` are `{head, rule, subject, old, new}` rows in head order. A rule in `resync` has a
+/// journal that no longer reaches the cursor: its changes in the range are not available and a
+/// client re-reads that rule's verdicts instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerdictFeed {
+    pub changes: Vec<Value>,
+    pub resync: Vec<String>,
+}
+
 impl Journal {
     /// An empty journal for a database whose durable head is `head`: nothing before it is known.
     pub(crate) fn new(head: u64) -> Journal {

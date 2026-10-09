@@ -63,7 +63,7 @@ pub mod mcp;
 
 /// The change feed: a bounded journal of what each durable batch touched, read after authz.
 pub mod feed;
-pub use feed::Feed;
+pub use feed::{Feed, VerdictFeed};
 
 pub type DbResult<T> = Result<T, String>;
 
@@ -228,6 +228,17 @@ struct WriteState {
 /// Diff-journal entries retained per watched rule; a cursor older than the retained window gets a
 /// `resync` answer instead of silently missing changes.
 const LIVE_LOG_CAP: usize = 1024;
+
+/// What [`Db::rule_changes`] read: the visible verdict changes of the rules whose journal covers
+/// the cursor, and the names of those it does not.
+struct RuleChanges {
+    /// The durable head at the time of the read.
+    head: u64,
+    /// The head the answer is complete up to (`until` capped at `head`).
+    upper: u64,
+    changes: Vec<Value>,
+    lagging: Vec<String>,
+}
 
 /// A stored conformance rule under live maintenance.
 struct LiveRule {
@@ -630,7 +641,44 @@ impl Db {
                 "conformance_changes.until ({u}) is below cursor ({cursor})"
             ));
         }
-        let labels = req_labels(req);
+        let r = self.rule_changes(name, cursor, until, req_labels(req))?;
+        if !r.lagging.is_empty() {
+            return Ok(json!({ "resync": true, "cursor": r.head }));
+        }
+        Ok(json!({ "changes": r.changes, "cursor": r.upper }))
+    }
+
+    /// The verdict changes of every watched rule with `since < head <= until`, in head order (rules
+    /// by name within a head), as a principal with `allowed_labels` sees them — the same rows and
+    /// masking as `conformance_changes` without a rule name. A rule whose journal no longer reaches
+    /// back to `since` is named in `resync` and contributes no changes; the other rules still do.
+    pub fn verdict_changes(
+        &self,
+        since: u64,
+        until: u64,
+        allowed_labels: u32,
+    ) -> DbResult<VerdictFeed> {
+        if until < since {
+            return Err(format!("until ({until}) is below since ({since})"));
+        }
+        let r = self.rule_changes(None, since, Some(until), allowed_labels)?;
+        Ok(VerdictFeed {
+            changes: r.changes,
+            resync: r.lagging,
+        })
+    }
+
+    /// The shared read behind `conformance_changes` and [`Db::verdict_changes`]: the changes of
+    /// the watched rule `name` (every watched rule when `None`) in `(cursor, upper]`, where
+    /// `upper` is `until` capped at the durable head. Rules whose journal starts after `cursor`
+    /// are listed in `lagging` and skipped.
+    fn rule_changes(
+        &self,
+        name: Option<&str>,
+        cursor: u64,
+        until: Option<u64>,
+        labels: u32,
+    ) -> DbResult<RuleChanges> {
         let mut w = self.write.lock().unwrap_or_else(|e| e.into_inner());
         w.materialize_live(); // usually a no-op: ingest drains on return
         let head = w.eng.durable_head();
@@ -655,9 +703,10 @@ impl Db {
                 all
             }
         };
-        if rules.iter().any(|(_, lr)| cursor < lr.truncated_to) {
-            return Ok(json!({ "resync": true, "cursor": head }));
-        }
+        let (lagging, rules): (Vec<_>, Vec<_>) = rules
+            .into_iter()
+            .partition(|(_, lr)| cursor < lr.truncated_to);
+        let lagging: Vec<String> = lagging.into_iter().map(|(n, _)| n.to_string()).collect();
         // Each side of a change is masked with the support it was judged from, labels as of that
         // judgment. The journal also holds entries whose verdict did not change but whose read
         // rows changed labels; an entry that looks the same on both sides through this caller's
@@ -704,7 +753,12 @@ impl Db {
                 })
             })
             .collect();
-        Ok(json!({ "changes": changes, "cursor": upper }))
+        Ok(RuleChanges {
+            head,
+            upper,
+            changes,
+            lagging,
+        })
     }
 
     /// The change feed after cursor `since` (a durable head) as a principal with `allowed_labels`
