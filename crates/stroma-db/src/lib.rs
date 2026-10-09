@@ -52,7 +52,9 @@ use stromadb_core::engine::Engine;
 use stromadb_core::fact::{FieldId, NodeId};
 use stromadb_core::fold::{ObjKey, Snapshot};
 use stromadb_core::incremental::{MaintainedConformance, VerdictDiff};
-use stromadb_core::ir::{Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run};
+use stromadb_core::ir::{
+    AnnBackend, Filter, NoAnn, Pipeline, Principal, Source, Transform, Traverser, run,
+};
 use stromadb_core::ivf::IvfPq;
 use stromadb_core::mask::{self, FactMask, Facts, Masked};
 use stromadb_core::query;
@@ -526,8 +528,10 @@ impl Db {
     ///   hop answers from the state in effect at `T`, echoed back)
     /// - `{"op":"edge_props","subject":N,"predicate":"name","object":{..}}` → `{"props":{k:v,..}}`
     ///   (properties on the edge `(subject, predicate, object)`; set at ingest via a fact's `props`)
-    /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"}`
-    ///   → `{"ids":[..],"scores":[..],"as_of":{..}}`
+    /// - `{"op":"search","type":"T","vector":[..],"k":K,"allowed_labels":M,"expand":"pred","mode":"fresh|strict"[,"exact":true]}`
+    ///   → `{"ids":[..],"scores":[..],"as_of":{..}}` (`exact` scores every stored row of the type
+    ///   by brute force instead of probing the IVF index — recall-complete, latest row per node;
+    ///   `score = 1/(1+d²)` with `d` the Euclidean distance)
     /// - `{"op":"lookup","predicate":"name","value":V[,"type":"T"][,"limit":L][,"valid_at":T]}` →
     ///   `{"nodes":[{id,type,display}],"truncated":bool}` (exact match on a one-cardinality value;
     ///   the external key → node id read); batched as `"queries":[{"value":V[,"valid_at":T]},..]`
@@ -2006,11 +2010,12 @@ impl ReadState {
             .get(&subject)
             .and_then(|&t| self.schema.cat.name(t))
             .map(|s| s.to_string());
-        // the node's stored embedding, if any (so the console can show it carries a vector)
+        // the node's stored embedding, if any (so the console can show it carries a vector): the
+        // latest row, since a re-embedded node keeps its earlier rows in the append-only file
         let embedding: Option<Vec<f32>> = self
             .emb_ids
             .iter()
-            .position(|&id| id == subject)
+            .rposition(|&id| id == subject)
             .map(|i| self.emb[i * self.dim..(i + 1) * self.dim].to_vec());
         Ok(json!({
             "id": subject,
@@ -2447,7 +2452,17 @@ impl ReadState {
             .iter()
             .map(|x| x.as_f64().unwrap_or(0.0) as f32)
             .collect();
-        let idx = (*self.index).as_ref().ok_or("no embeddings ingested")?;
+        let exact = req["exact"].as_bool().unwrap_or(false);
+        if qv.iter().any(|x| !x.is_finite()) {
+            return Err("vector has a non-finite component".into());
+        }
+        if self.dim > 0 && qv.len() != self.dim {
+            return Err(format!(
+                "vector dimension mismatch: expected {}, got {}",
+                self.dim,
+                qv.len()
+            ));
+        }
         let mut transforms = Vec::new();
         if let Some(p) = req["expand"].as_str() {
             let pid = self
@@ -2472,15 +2487,19 @@ impl ReadState {
         let head = self.durable_head;
         let vw = (self.emb_ids.len() as u64).min(head);
         let vv = VersionVector::new(head, vw);
-        Ok(run(
-            &facts,
-            idx,
-            &pipeline,
-            &Principal {
-                allowed_labels: labels,
-            },
-            vv,
-        ))
+        let principal = Principal {
+            allowed_labels: labels,
+        };
+        if exact {
+            let rows = ExactRows {
+                emb: &self.emb,
+                ids: &self.emb_ids,
+                dim: self.dim,
+            };
+            return Ok(run(&facts, &rows, &pipeline, &principal, vv));
+        }
+        let idx = (*self.index).as_ref().ok_or("no embeddings ingested")?;
+        Ok(run(&facts, idx, &pipeline, &principal, vv))
     }
 
     /// Composable pipeline: surfaces the query IR as `source → steps → top-k`, so the console can let
@@ -2509,7 +2528,7 @@ impl ReadState {
             let pos = self
                 .emb_ids
                 .iter()
-                .position(|&id| id == node)
+                .rposition(|&id| id == node)
                 .ok_or("that node has no embedding to search by")?;
             let q = self.emb[pos * self.dim..(pos + 1) * self.dim].to_vec();
             (
@@ -2911,6 +2930,48 @@ const INDEX_TRAIN_SAMPLE: usize = 20_000;
 /// Fit-ratio ceiling for reusing trained quantizers on rebuild: at or below it the quantizers still
 /// describe the corpus and k-means is skipped; above it the rebuild retrains on a fresh sample.
 const INDEX_DRIFT_RATIO_MAX: f32 = 1.5;
+
+/// Brute-force nearest neighbours over the stored embedding rows: the `exact` search path.
+/// Recall-complete (every row the `keep` filter admits is scored) and cheap at small corpora, where
+/// an IVF probe of a few cells can miss a rare type entirely. Rows are append-only, so a node
+/// embedded more than once is scored by its latest row only. `scope` (the strict watermark) admits
+/// rows by position, matching the posting seqnos the index is built with.
+struct ExactRows<'a> {
+    emb: &'a [f32],
+    ids: &'a [u64],
+    dim: usize,
+}
+
+impl AnnBackend for ExactRows<'_> {
+    fn ann_search(
+        &self,
+        q: &[f32],
+        k: usize,
+        scope: Option<u64>,
+        keep: &dyn Fn(NodeId) -> bool,
+    ) -> Vec<(NodeId, f32)> {
+        if k == 0 || self.dim == 0 || q.len() != self.dim {
+            return Vec::new();
+        }
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut scored: Vec<(f32, NodeId)> = Vec::new();
+        for (i, &node) in self.ids.iter().enumerate().rev() {
+            if scope.is_some_and(|w| i as u64 >= w) || !seen.insert(node) || !keep(node) {
+                continue;
+            }
+            let row = &self.emb[i * self.dim..(i + 1) * self.dim];
+            let d: f32 = row.iter().zip(q).map(|(a, b)| (a - b) * (a - b)).sum();
+            scored.push((d, node));
+        }
+        let order = |a: &(f32, NodeId), b: &(f32, NodeId)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+        if scored.len() > k {
+            scored.select_nth_unstable_by(k - 1, order);
+            scored.truncate(k);
+        }
+        scored.sort_by(order);
+        scored.into_iter().map(|(d, n)| (n, d)).collect()
+    }
+}
 
 fn pick_m(dim: usize) -> usize {
     for m in (1..=96.min(dim)).rev() {
