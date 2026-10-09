@@ -713,6 +713,12 @@ fn serve_namespaces() {
         assert_eq!(st, 404, "unknown namespace read: {body}");
         assert_eq!(http(&addr, "GET", "/ns/Bad!/stats", "", Some(&tok)).0, 400);
         let (st, _, body) = http(&addr, "POST", "/ns/a/ingest", graph, Some(&tok));
+        assert_eq!(st, 404, "ingest must not create a: {body}");
+        assert!(body.contains("POST /namespaces"), "{body}");
+        assert!(!dir.join("ns").exists());
+        let (st, _, body) = http(&addr, "POST", "/namespaces", "{\"name\":\"a\"}", Some(&tok));
+        assert_eq!(st, 201, "create a: {body}");
+        let (st, _, body) = http(&addr, "POST", "/ns/a/ingest", graph, Some(&tok));
         assert_eq!(st, 200, "ingest into a: {body}");
         let (_, _, body) = http(&addr, "POST", "/ns/a/query", expand, Some(&tok));
         assert!(body.contains("[2]"), "a sees its fact: {body}");
@@ -1144,5 +1150,131 @@ fn console_conformance_missing_and_assume() {
     let r: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(r["missing"][0]["kind"], "no_rule", "{body}");
     assert_eq!(r["missing"][0]["type"], "Person", "{body}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// POST /namespaces is the only way a namespace comes into being: 201, then visible in
+// the list and addressable; a repeat is 409 and leaves it alone; a bad name is 400; no or a
+// read-only credential is 401/403 and creates nothing.
+#[test]
+fn serve_namespace_create() {
+    let base = std::env::temp_dir().join(format!("stroma_serve_nscreate_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let dir = base.join("db");
+    let tokens = base.join("tokens.json");
+    std::fs::write(
+        &tokens,
+        r#"{"tokens":[{"name":"viewer","token":"ro","read_only":true}]}"#,
+    )
+    .unwrap();
+    let port = 14100 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let _guard = Kill(
+        Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+            .args([
+                "--db",
+                dir.to_str().unwrap(),
+                "--addr",
+                &addr,
+                "--api-token",
+                "tok",
+                "--tokens",
+                tokens.to_str().unwrap(),
+            ])
+            .spawn()
+            .unwrap(),
+    );
+    wait_up(&addr);
+    let post = |name: &str, bearer: Option<&str>| {
+        http_bearer_body(&addr, "POST", "/namespaces", name, bearer)
+    };
+
+    assert_eq!(post(r#"{"name":"fresh"}"#, None).0, 401);
+    let (st, body) = post(r#"{"name":"fresh"}"#, Some("ro"));
+    assert_eq!(st, 403, "read-only token: {body}");
+    assert!(
+        !dir.join("ns/fresh").exists(),
+        "refused create left a trace"
+    );
+
+    let (st, body) = post(r#"{"name":"fresh"}"#, Some("tok"));
+    assert_eq!(st, 201, "{body}");
+    assert!(dir.join("ns/fresh/wal.log").exists());
+    let (st, body) = http_bearer_body(&addr, "GET", "/namespaces", "", Some("tok"));
+    assert_eq!(st, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let names: Vec<&str> = v["namespaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["default", "fresh"], "{body}");
+    assert_eq!(v["namespaces"][1]["facts"], 0, "{body}");
+    assert_eq!(v["namespaces"][1]["durable_head"], 0, "{body}");
+    assert_eq!(
+        http_bearer_body(&addr, "GET", "/ns/fresh/stats", "", Some("tok")).0,
+        200
+    );
+
+    // an existing namespace is a conflict and keeps its data
+    let (st, _) = http_bearer_body(
+        &addr,
+        "POST",
+        "/ns/fresh/ingest",
+        concat!(
+            "{\"type_def\":{\"name\":\"Person\"}}\n",
+            "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n"
+        ),
+        Some("tok"),
+    );
+    assert_eq!(st, 200);
+    let (st, body) = post(r#"{"name":"fresh"}"#, Some("tok"));
+    assert_eq!(st, 409, "{body}");
+    assert!(body.contains("already exists"), "{body}");
+    let (st, body) = post(r#"{"name":"default"}"#, Some("tok"));
+    assert_eq!(st, 409, "{body}");
+    let (_, body) = http_bearer_body(&addr, "GET", "/namespaces", "", Some("tok"));
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v["namespaces"][1]["durable_head"].as_u64().unwrap() > 0,
+        "{body}"
+    );
+
+    // a write to a missing namespace is 404 and creates nothing
+    let (st, body) = http_bearer_body(
+        &addr,
+        "POST",
+        "/ns/missing/ingest",
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        Some("tok"),
+    );
+    assert_eq!(st, 404, "{body}");
+    assert!(body.contains("POST /namespaces"), "{body}");
+    assert!(!dir.join("ns/missing").exists());
+
+    for bad in [
+        r#"{"name":""}"#,
+        r#"{"name":"Bad!"}"#,
+        r#"{"name":"a/b"}"#,
+        r#"{"name":".."}"#,
+        r#"{"name":5}"#,
+        r#"{}"#,
+        "not json",
+    ] {
+        let (st, body) = post(bad, Some("tok"));
+        assert_eq!(st, 400, "{bad}: {body}");
+    }
+    // the console ships the management page and the same name rule the server enforces
+    let (st, page) = http_bearer_body(&addr, "GET", "/", "", Some("tok"));
+    assert_eq!(st, 200);
+    assert!(page.contains(r#"id="nsPage""#), "namespaces page missing");
+    assert!(
+        page.contains("/^[a-z0-9_-]{1,64}$/"),
+        "client name rule missing"
+    );
+    let long = format!(r#"{{"name":"{}"}}"#, "x".repeat(65));
+    assert_eq!(post(&long, Some("tok")).0, 400);
     let _ = std::fs::remove_dir_all(&base);
 }

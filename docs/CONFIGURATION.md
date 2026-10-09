@@ -74,16 +74,19 @@ an ordinary database directory under it:
   unaffected and `/ns/default/...` is an alias. `/health`, `/login`, `/logout`, `/me` and
   `GET /namespaces` are global and never prefixed.
 - **Names** match `[a-z0-9_-]{1,64}`; anything else answers `400`. `default` is reserved.
-- **Creation.** A namespace comes into existence on its first `POST /ns/<name>/ingest`. Any other
-  request to a namespace whose directory does not exist, including `/embed`, `/compact`, `/reset`,
-  `/mcp` and the console page, answers `404` and creates nothing.
+- **Creation.** A namespace is created only by `POST /namespaces` with `{"name":"<name>"}`: `201`
+  on success, `400` for a malformed name, `409` if it already exists (left untouched), `403` for a
+  read-only token. Any request to a namespace that does not exist, including `/ingest`, `/embed`,
+  `/compact`, `/reset`, `/mcp` and the console page, answers `404` and creates nothing. Create the
+  namespace first, then ingest into it.
 - **Lifetime.** Each namespace's database is opened on first use, with the same
   `--max-unmerged` bound as `default`, and stays open until the server exits.
-- **Listing.** `GET /namespaces` returns `{"namespaces":[{"name","nodes","facts","loaded"}, …]}`,
+- **Listing.** `GET /namespaces` returns `{"namespaces":[{"name","nodes","facts","loaded","durable_head"}, …]}`,
   `default` first then the existing named ones sorted, each with its node and fact counts (the
   same counters `GET /stats` reports). Listing never opens a namespace: an open one (`"loaded":
   true`) reports its live counters, an unopened one the counts its directory last persisted in
-  `counts.json` (rewritten after every write), or `null` counts if it has none yet. The console's
+  `counts.json` (rewritten after every write), or `null` counts if it has none yet. `durable_head` is the live durable head of an open namespace
+  and `null` for an unopened one. The console's
   topbar namespace selector is built from this.
 - **Access.** Sessions and tokens are server-wide: one login or token reaches every namespace, and
   a token's label cap, read-only bit and provenance stamping apply unchanged inside each. There
