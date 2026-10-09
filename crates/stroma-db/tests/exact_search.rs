@@ -125,7 +125,18 @@ fn search_rejects_a_query_of_the_wrong_dimension() {
             .query(&json!({"op":"search","type":"Clause","vector":[1,0],"k":5,"exact":exact}))
             .unwrap_err();
         assert!(e.contains("dimension mismatch"), "{e}");
+        // 1e100 overflows f32 to infinity
+        let e = db
+            .query(
+                &json!({"op":"search","type":"Clause","vector":[1e100,0,0,0],"k":5,"exact":exact}),
+            )
+            .unwrap_err();
+        assert!(e.contains("non-finite"), "{e}");
     }
+    let r = db
+        .query(&json!({"op":"search","type":"Clause","vector":[0,0,1,0],"k":0,"exact":true}))
+        .unwrap();
+    assert_eq!(ids(&r), Vec::<u64>::new());
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 

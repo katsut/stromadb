@@ -2414,6 +2414,9 @@ impl ReadState {
             .map(|x| x.as_f64().unwrap_or(0.0) as f32)
             .collect();
         let exact = req["exact"].as_bool().unwrap_or(false);
+        if qv.iter().any(|x| !x.is_finite()) {
+            return Err("vector has a non-finite component".into());
+        }
         if self.dim > 0 && qv.len() != self.dim {
             return Err(format!(
                 "vector dimension mismatch: expected {}, got {}",
@@ -2908,7 +2911,7 @@ impl AnnBackend for ExactRows<'_> {
         scope: Option<u64>,
         keep: &dyn Fn(NodeId) -> bool,
     ) -> Vec<(NodeId, f32)> {
-        if self.dim == 0 || q.len() != self.dim {
+        if k == 0 || self.dim == 0 || q.len() != self.dim {
             return Vec::new();
         }
         let mut seen: HashSet<NodeId> = HashSet::new();
@@ -2921,8 +2924,13 @@ impl AnnBackend for ExactRows<'_> {
             let d: f32 = row.iter().zip(q).map(|(a, b)| (a - b) * (a - b)).sum();
             scored.push((d, node));
         }
-        scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-        scored.into_iter().take(k).map(|(d, n)| (n, d)).collect()
+        let order = |a: &(f32, NodeId), b: &(f32, NodeId)| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1));
+        if scored.len() > k {
+            scored.select_nth_unstable_by(k - 1, order);
+            scored.truncate(k);
+        }
+        scored.sort_by(order);
+        scored.into_iter().map(|(d, n)| (n, d)).collect()
     }
 }
 
