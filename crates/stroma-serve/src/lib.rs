@@ -16,7 +16,16 @@
 //!                 {"head", "changes":[{"node","type","predicates":[..],"new"}], "resync"?} — ids,
 //!                 type and predicate names only, never values; filtered by node and fact labels
 //!   GET  /events/stream?since=N[&allowed_labels=M] → `text/event-stream`, one event per durable
-//!                 batch with the same JSON (`id:` = the batch head; `Last-Event-ID` resumes)
+//!                 batch with the same JSON (`id:` = the batch head; `Last-Event-ID` resumes);
+//!                 a comment line goes out on an idle stream every `--sse-heartbeat` seconds
+//!   …&verdicts=1  → on both `/events` (implies `changes=1`) and `/events/stream`: also the
+//!                 conformance verdict changes of every watched rule. The long-poll adds
+//!                 `"verdicts":[{"head","rule","subject","old","new"}]`; the stream sends each as
+//!                 an `event: verdict` right after its batch's fact event, in head order, and only
+//!                 the last event of a head carries `id:`, so a resume after a drop replays that
+//!                 head whole. A watched rule whose journal no longer reaches the cursor is named
+//!                 by `event: resync` (`"verdict_resync":[rule]` in the long-poll) and is re-read
+//!                 with `conformance_watch`. Label masking is the same as `conformance_changes`.
 //!   GET  /stats           → engine/schema/embedding/storage counters
 //!   POST /query   {op,...} → point / expand / search / neighborhood / node (see stromadb_store::Db::query)
 //!   POST /ingest  <jsonl> → {defs,nodes,facts,retracts,closes,suppressed,head_before,durable_head}
@@ -65,7 +74,7 @@
 //! (default `127.0.0.1:7687`), `--max-unmerged` / `$STROMA_MAX_UNMERGED`. A flag overrides the env
 //! var overrides the default.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::process::exit;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -73,8 +82,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use stromadb_store::Db;
 use stromadb_store::mcp;
+use stromadb_store::{Db, Feed};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 type SharedDb = Arc<Db>;
@@ -454,7 +463,13 @@ enum Reply {
         db: SharedDb,
         since: Option<u64>,
         labels: u32,
+        verdicts: bool,
     },
+}
+
+/// Whether query parameter `name` is switched on (`1` or `true`).
+fn flag_param(url: &str, name: &str) -> bool {
+    query_param(url, name).is_some_and(|v| v == "1" || v == "true")
 }
 
 /// The value of query parameter `name` in a request URL, if present.
@@ -488,7 +503,106 @@ const STREAM_LIFETIME: Duration = Duration::from_secs(300);
 /// How often a stream checks the durable head, and how long it stays silent before a comment
 /// line keeps intermediaries from timing it out (and notices a client that went away).
 const STREAM_POLL: Duration = Duration::from_millis(250);
+/// Default silence before a comment line; `--sse-heartbeat` / `$STROMA_SSE_HEARTBEAT` sets it.
 const STREAM_HEARTBEAT: Duration = Duration::from_secs(15);
+
+/// The change feed after a cursor, optionally with the verdict changes of every watched rule over
+/// the same head range (both read for the same upper head).
+struct Window {
+    feed: Feed,
+    verdicts: Vec<Value>,
+    /// Watched rules whose journal no longer reaches the cursor.
+    verdict_resync: Vec<String>,
+}
+
+/// Read what happened after `since` as a principal with `labels`. With `verdicts`, the verdict
+/// changes are read up to the head the fact feed answered, so both cover one range. A cursor the
+/// fact feed cannot answer resyncs everything, verdicts included.
+fn read_window(db: &Db, since: u64, labels: u32, verdicts: bool) -> Window {
+    let feed = db.changes_since(since, labels);
+    let mut w = Window {
+        feed,
+        verdicts: Vec::new(),
+        verdict_resync: Vec::new(),
+    };
+    if !verdicts || w.feed.resync {
+        return w;
+    }
+    match db.verdict_changes(since, w.feed.head, labels) {
+        Ok(v) => {
+            w.verdicts = v.changes;
+            w.verdict_resync = v.resync;
+        }
+        // not reachable for a cursor at or below the head; a client that gets here re-reads
+        Err(_) => w.feed.resync = true,
+    }
+    w
+}
+
+impl Window {
+    /// The long-poll body: the merged fact changes plus, when asked for, the verdict rows.
+    fn to_json(&self, verdicts: bool) -> Value {
+        let mut v = self.feed.to_json();
+        if verdicts {
+            v["verdicts"] = json!(self.verdicts);
+            if !self.verdict_resync.is_empty() {
+                v["verdict_resync"] = json!(self.verdict_resync);
+            }
+        }
+        v
+    }
+
+    /// The SSE chunks for this window, in head order. A batch's fact event comes first, then its
+    /// verdict events (`event: verdict`). With `verdicts`, only the last event of a head carries
+    /// `id:`, so a client that drops mid-head resumes from the previous head and gets the whole
+    /// head again. A rule that fell behind is named by an `event: resync`.
+    fn sse_chunks(&self, verdicts: bool) -> Vec<String> {
+        if self.feed.resync {
+            return vec![sse_event(self.feed.head, &self.feed.to_json())];
+        }
+        let mut steps: BTreeMap<u64, (Option<&Vec<Value>>, Vec<&Value>)> = BTreeMap::new();
+        for (h, changes) in &self.feed.batches {
+            steps.entry(*h).or_default().0 = Some(changes);
+        }
+        for row in &self.verdicts {
+            if let Some(h) = row["head"].as_u64() {
+                steps.entry(h).or_default().1.push(row);
+            }
+        }
+        let mut out = Vec::new();
+        for (i, rule) in self.verdict_resync.iter().enumerate() {
+            // the last of them marks the head as consumed when no batch follows to do it
+            let id = match steps.is_empty() && i + 1 == self.verdict_resync.len() {
+                true => format!("id: {}\n", self.feed.head),
+                false => String::new(),
+            };
+            out.push(format!(
+                "{id}event: resync\ndata: {}\n\n",
+                json!({ "head": self.feed.head, "rule": rule })
+            ));
+        }
+        for (h, (changes, rows)) in steps {
+            let mut events: Vec<String> = Vec::new();
+            if let Some(changes) = changes {
+                events.push(format!(
+                    "data: {}\n\n",
+                    json!({ "head": h, "changes": changes })
+                ));
+            }
+            for row in rows {
+                events.push(format!("event: verdict\ndata: {row}\n\n"));
+            }
+            let last = events.len().saturating_sub(1);
+            for (i, e) in events.into_iter().enumerate() {
+                match i == last || !verdicts {
+                    true => out.push(format!("id: {h}\n{e}")),
+                    false => out.push(e),
+                }
+            }
+        }
+        out
+    }
+}
 
 static STREAMS: AtomicUsize = AtomicUsize::new(0);
 
@@ -520,11 +634,13 @@ fn sse_event(head: u64, body: &Value) -> String {
 /// Stream the change feed after `since` (absent = from the current head, announced first) as
 /// server-sent events into `send`, one event per durable batch with visible changes, a `resync`
 /// event when the journal cannot answer the cursor, and a comment line after `heartbeat` of
-/// silence. Returns when `lifetime` has passed or `send` fails (the client went away).
+/// silence. With `verdicts`, each batch's verdict changes follow its fact event under the same
+/// cursor. Returns when `lifetime` has passed or `send` fails (the client went away).
 fn stream_changes(
     db: &Db,
     since: Option<u64>,
     labels: u32,
+    verdicts: bool,
     timing: (Duration, Duration, Duration),
     send: &mut dyn FnMut(&str) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
@@ -542,18 +658,11 @@ fn stream_changes(
     let mut quiet = Instant::now();
     while start.elapsed() < lifetime {
         if db.durable_head() != since {
-            let feed = db.changes_since(since, labels);
-            if feed.resync {
-                send(&sse_event(feed.head, &feed.to_json()))?;
-            } else {
-                for (head, changes) in &feed.batches {
-                    send(&sse_event(
-                        *head,
-                        &json!({ "head": head, "changes": changes }),
-                    ))?;
-                }
+            let window = read_window(db, since, labels, verdicts);
+            for chunk in window.sse_chunks(verdicts) {
+                send(&chunk)?;
             }
-            since = feed.head;
+            since = window.feed.head;
             quiet = Instant::now();
         } else if quiet.elapsed() >= heartbeat {
             send(": keepalive\n\n")?;
@@ -567,7 +676,14 @@ fn stream_changes(
 /// Serve one change stream on the raw connection: the response head, then each piece of the
 /// event stream as one HTTP chunk, flushed at once (a buffered chunk would delay the event),
 /// then the terminating chunk so the client sees a clean end and reconnects.
-fn serve_stream(req: Request, db: &Db, since: Option<u64>, labels: u32) {
+fn serve_stream(
+    req: Request,
+    db: &Db,
+    since: Option<u64>,
+    labels: u32,
+    verdicts: bool,
+    heartbeat: Duration,
+) {
     let mut w = req.into_writer();
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nTransfer-Encoding: chunked\r\n\r\n";
     if w.write_all(head.as_bytes())
@@ -580,8 +696,8 @@ fn serve_stream(req: Request, db: &Db, since: Option<u64>, labels: u32) {
         write!(w, "{:x}\r\n{s}\r\n", s.len())?;
         w.flush()
     };
-    let timing = (STREAM_LIFETIME, STREAM_POLL, STREAM_HEARTBEAT);
-    if stream_changes(db, since, labels, timing, &mut send).is_ok() {
+    let timing = (STREAM_LIFETIME, STREAM_POLL, heartbeat);
+    if stream_changes(db, since, labels, verdicts, timing, &mut send).is_ok() {
         let _ = w.write_all(b"0\r\n\r\n").and_then(|()| w.flush());
     }
 }
@@ -708,7 +824,8 @@ fn handle(
             let since = query_param(url, "since")
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(0);
-            let with_changes = query_param(url, "changes").is_some_and(|v| v == "1" || v == "true");
+            let verdicts = flag_param(url, "verdicts");
+            let with_changes = verdicts || flag_param(url, "changes");
             let mut head = db.durable_head();
             let mut waited = 0u32;
             while head == since && waited < 20_000 {
@@ -717,10 +834,8 @@ fn handle(
                 head = db.durable_head();
             }
             if with_changes {
-                Reply::Json(
-                    200,
-                    db.changes_since(since, feed_labels(url, scope)).to_json(),
-                )
+                let w = read_window(db, since, feed_labels(url, scope), verdicts);
+                Reply::Json(200, w.to_json(verdicts))
             } else {
                 Reply::Json(200, json!({ "head": head }))
             }
@@ -732,6 +847,7 @@ fn handle(
                 db: db.clone(),
                 since: resume.or_else(|| query_param(url, "since").and_then(|s| s.parse().ok())),
                 labels: feed_labels(url, scope),
+                verdicts: flag_param(url, "verdicts"),
             }
         }
         // MCP streamable HTTP transport, stateless: one JSON-RPC message per POST, no session
@@ -770,6 +886,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--admin-password",
     "--api-token",
     "--tokens",
+    "--sse-heartbeat",
 ];
 
 /// Flags that take no value.
@@ -788,6 +905,7 @@ fn usage() -> &'static str {
      \x20 --admin-password <pw>   console login password (default: password)\n\
      \x20 --api-token <token>     legacy single unnamed, unrestricted bearer token\n\
      \x20 --tokens <file>         named token registry (JSON)\n\
+     \x20 --sse-heartbeat <secs>  comment line sent on an idle event stream (default: 15)\n\
      \x20 --demo                  boot with the bundled sample org graph\n\
      \x20 --allow-reset           enable POST /reset, which clears the database\n\
      \x20 --no-auth               disable the auth gate (local dev only)\n\
@@ -847,6 +965,16 @@ pub fn run(args: &[String]) {
     let n_max: usize = opt(args, "--max-unmerged", "STROMA_MAX_UNMERGED", "")
         .parse()
         .unwrap_or(stromadb_store::DEFAULT_N_MAX);
+    let heartbeat = match opt(args, "--sse-heartbeat", "STROMA_SSE_HEARTBEAT", "").as_str() {
+        "" => STREAM_HEARTBEAT,
+        v => match v.parse::<u64>() {
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => {
+                eprintln!("error: --sse-heartbeat must be a whole number of seconds above 0: {v}");
+                exit(2);
+            }
+        },
+    };
     // The token registry: named tokens from --tokens/$STROMA_TOKENS (per-client identity, label
     // cap, read-only), plus the legacy single --api-token as an unnamed unrestricted entry.
     // --demo mints a named token when nothing is configured, so the printed MCP snippet works out
@@ -1099,12 +1227,17 @@ pub fn run(args: &[String]) {
                         Reply::Accepted => {
                             let _ = req.respond(Response::empty(202));
                         }
-                        Reply::Stream { db, since, labels } => match StreamSlot::acquire() {
+                        Reply::Stream {
+                            db,
+                            since,
+                            labels,
+                            verdicts,
+                        } => match StreamSlot::acquire() {
                             // its own thread, so a long-lived stream never holds a worker
                             Some(slot) => {
                                 std::thread::spawn(move || {
                                     let _slot = slot;
-                                    serve_stream(req, &db, since, labels);
+                                    serve_stream(req, &db, since, labels, verdicts, heartbeat);
                                 });
                             }
                             None => {
@@ -1267,7 +1400,7 @@ mod tests {
             Duration::from_millis(400),
         );
         let mut out: Vec<String> = Vec::new();
-        stream_changes(&db, Some(h0), u32::MAX, timing, &mut |s| {
+        stream_changes(&db, Some(h0), u32::MAX, false, timing, &mut |s| {
             out.push(s.to_string());
             Ok(())
         })
@@ -1306,7 +1439,7 @@ mod tests {
             Duration::from_millis(10),
             Duration::from_secs(9),
         );
-        stream_changes(&db, None, u32::MAX, short, &mut |s| {
+        stream_changes(&db, None, u32::MAX, false, short, &mut |s| {
             out.push(s.to_string());
             Ok(())
         })
@@ -1316,7 +1449,7 @@ mod tests {
             format!("id: {h}\ndata: {{\"changes\":[],\"head\":{h}}}\n\n")
         );
         let mut out: Vec<String> = Vec::new();
-        stream_changes(&db, Some(h + 50), u32::MAX, short, &mut |s| {
+        stream_changes(&db, Some(h + 50), u32::MAX, false, short, &mut |s| {
             out.push(s.to_string());
             Ok(())
         })
@@ -1325,7 +1458,7 @@ mod tests {
 
         // a client that went away ends the stream
         let mut n = 0;
-        let r = stream_changes(&db, Some(h0), u32::MAX, timing, &mut |_| {
+        let r = stream_changes(&db, Some(h0), u32::MAX, false, timing, &mut |_| {
             n += 1;
             match n {
                 1 => Ok(()),
@@ -1335,6 +1468,281 @@ mod tests {
         assert!(r.is_err());
         drop(db);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Issues 1001 and 1002 are visible to everyone; 1003 carries label 3. Each is a released
+    // release issue owned by person 10 and not yet approved.
+    const VERDICT_GRAPH: &str = concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Issue\"}}\n",
+        "{\"pred_def\":{\"name\":\"issue-type\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range_value\":\"text\"}}\n",
+        "{\"pred_def\":{\"name\":\"status\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range_value\":\"text\"}}\n",
+        "{\"pred_def\":{\"name\":\"owner\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"approved-by\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":10,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":1001,\"type\":\"Issue\",\"label\":0}}\n",
+        "{\"node\":{\"id\":1002,\"type\":\"Issue\",\"label\":0}}\n",
+        "{\"node\":{\"id\":1003,\"type\":\"Issue\",\"label\":3}}\n",
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+        "{\"fact\":{\"subject\":1002,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"issue-type\",\"object\":{\"text\":\"release\"}}}\n",
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"status\",\"object\":{\"text\":\"released\"}}}\n",
+        "{\"fact\":{\"subject\":1002,\"predicate\":\"status\",\"object\":{\"text\":\"released\"}}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"status\",\"object\":{\"text\":\"released\"}}}\n",
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"owner\",\"object\":{\"node\":10}}}\n",
+        "{\"fact\":{\"subject\":1002,\"predicate\":\"owner\",\"object\":{\"node\":10}}}\n",
+        "{\"fact\":{\"subject\":1003,\"predicate\":\"owner\",\"object\":{\"node\":10}}}\n",
+    );
+
+    fn rule_line(name: &str) -> String {
+        serde_json::json!({ "rule_def": { "name": name, "rule": {
+            "subject_type": "Issue",
+            "scope": { "predicate": "issue-type", "equals": "release" },
+            "required": { "hops": [{ "predicate": "owner" }] },
+            "actual": "approved-by",
+            "absent_when": { "predicate": "status", "equals": "released" },
+        } } })
+        .to_string()
+            + "\n"
+    }
+
+    fn approve(ids: &[u64]) -> String {
+        ids.iter()
+            .map(|id| {
+                format!(
+                    "{{\"fact\":{{\"subject\":{id},\"predicate\":\"approved-by\",\"object\":{{\"node\":10}}}}}}\n"
+                )
+            })
+            .collect()
+    }
+
+    fn watch(db: &Db, rule: &str) {
+        db.query(&serde_json::json!({ "op": "conformance_watch", "rule_name": rule }))
+            .unwrap();
+    }
+
+    fn verdict_db(root: &std::path::Path) -> Arc<Db> {
+        let _ = std::fs::remove_dir_all(root);
+        let db = Arc::new(Db::open_or_init_with(root, DEFAULT_N_MAX).unwrap());
+        db.ingest_str(VERDICT_GRAPH).unwrap();
+        db.ingest_str(&rule_line("approval")).unwrap();
+        watch(&db, "approval");
+        db
+    }
+
+    /// Everything the stream sends for the window after `since`, as chunks.
+    fn collect(db: &Db, since: u64, labels: u32, verdicts: bool) -> Vec<String> {
+        let timing = (
+            Duration::from_millis(120),
+            Duration::from_millis(10),
+            Duration::from_secs(9),
+        );
+        let mut out: Vec<String> = Vec::new();
+        stream_changes(db, Some(since), labels, verdicts, timing, &mut |s| {
+            out.push(s.to_string());
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
+    fn data(chunk: &str) -> Value {
+        let line = chunk
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .unwrap();
+        serde_json::from_str(line).unwrap()
+    }
+
+    fn verdict_rows(out: &[String]) -> Vec<Value> {
+        out.iter()
+            .filter(|c| c.contains("event: verdict\n"))
+            .map(|c| data(c))
+            .collect()
+    }
+
+    // A batch that flips a verdict yields its fact event, then the verdict event of the same
+    // head, which carries the `id:`. Without `verdicts` the stream is the plain fact stream.
+    #[test]
+    fn verdict_event_follows_its_batch() {
+        let root = std::env::temp_dir().join(format!("stroma_verdict_sse_{}", std::process::id()));
+        let db = verdict_db(&root);
+        let h0 = db.durable_head();
+        db.ingest_str(&approve(&[1001])).unwrap();
+        let h1 = db.durable_head();
+
+        let out = collect(&db, h0, u32::MAX, true);
+        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out[0], "retry: 2000\n\n");
+        assert!(out[1].starts_with("data: "), "no id yet: {out:?}");
+        let fact = data(&out[1]);
+        assert_eq!(fact["head"], h1);
+        assert_eq!(fact["changes"][0]["node"], 1001);
+        assert!(
+            out[2].starts_with(&format!("id: {h1}\nevent: verdict\ndata: ")),
+            "{out:?}"
+        );
+        let v = data(&out[2]);
+        assert_eq!(v["head"], h1);
+        assert_eq!(v["rule"], "approval");
+        assert_eq!(v["subject"], 1001);
+        assert_eq!(v["old"]["verdict"], "ABSENT");
+        assert_eq!(v["new"]["verdict"], "OK");
+
+        let plain = collect(&db, h0, u32::MAX, false);
+        assert_eq!(plain.len(), 2, "{plain:?}");
+        assert!(
+            plain[1].starts_with(&format!("id: {h1}\ndata: ")),
+            "{plain:?}"
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Reconnecting with the id of the last complete head delivers exactly what followed it, and a
+    // fact event never carries the id of a head whose verdicts have not all been sent.
+    #[test]
+    fn resume_delivers_exactly_the_missed_events() {
+        let root =
+            std::env::temp_dir().join(format!("stroma_verdict_resume_{}", std::process::id()));
+        let db = verdict_db(&root);
+        let h0 = db.durable_head();
+        db.ingest_str(&approve(&[1001])).unwrap();
+        let ha = db.durable_head();
+        db.ingest_str(&approve(&[1002])).unwrap();
+        let hb = db.durable_head();
+
+        let all = collect(&db, h0, u32::MAX, true);
+        assert_eq!(all.len(), 5, "{all:?}");
+        assert!(!all[1].contains("id: "), "{all:?}");
+        assert!(all[2].starts_with(&format!("id: {ha}\n")), "{all:?}");
+        assert!(!all[3].contains("id: "), "{all:?}");
+        assert!(all[4].starts_with(&format!("id: {hb}\n")), "{all:?}");
+
+        // the client saw head `ha` complete and dropped: the rest is exactly head `hb`
+        let rest = collect(&db, ha, u32::MAX, true);
+        assert_eq!(rest[1..], all[3..]);
+        // the client saw everything: nothing more
+        assert_eq!(collect(&db, hb, u32::MAX, true), ["retry: 2000\n\n"]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A label-restricted caller never receives the verdict of a subject it cannot see, on the
+    // stream or the long-poll, even if its request asks for every label.
+    #[test]
+    fn hidden_verdicts_are_never_sent() {
+        let root = std::env::temp_dir().join(format!("stroma_verdict_mask_{}", std::process::id()));
+        let db = verdict_db(&root);
+        let h0 = db.durable_head();
+        db.ingest_str(&approve(&[1001, 1003])).unwrap();
+
+        let subjects = |out: &[String]| -> Vec<u64> {
+            verdict_rows(out)
+                .iter()
+                .map(|v| v["subject"].as_u64().unwrap())
+                .collect()
+        };
+        assert_eq!(subjects(&collect(&db, h0, u32::MAX, true)), [1001, 1003]);
+        let masked = collect(&db, h0, 1, true);
+        assert_eq!(subjects(&masked), [1001]);
+        assert!(!masked.concat().contains("1003"), "{masked:?}");
+
+        let nss = Namespaces::new(&root, DEFAULT_N_MAX, db.clone());
+        let capped = mcp::Scope {
+            allowed_labels: Some(1),
+            ..mcp::Scope::default()
+        };
+        let url = format!("/events?since={h0}&verdicts=1&allowed_labels=255");
+        let v = get(&nss, &url, &capped);
+        let rows = v["verdicts"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{v}");
+        assert_eq!(rows[0]["subject"], 1001);
+        assert!(!v.to_string().contains("1003"), "{v}");
+        let v = get(
+            &nss,
+            &format!("/events?since={h0}&verdicts=1"),
+            &mcp::Scope::default(),
+        );
+        assert_eq!(v["verdicts"].as_array().unwrap().len(), 2, "{v}");
+        drop(nss);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A rule watched after the cursor has no journal back to it: it is named by a `resync`
+    // event, while a rule whose journal covers the cursor still delivers its verdicts.
+    #[test]
+    fn resync_names_the_rule_that_fell_behind() {
+        let root =
+            std::env::temp_dir().join(format!("stroma_verdict_resync_{}", std::process::id()));
+        let db = verdict_db(&root);
+        let h0 = db.durable_head();
+        db.ingest_str("{\"node\":{\"id\":20,\"type\":\"Person\",\"label\":0}}\n")
+            .unwrap();
+        db.ingest_str(&rule_line("late")).unwrap();
+        watch(&db, "late");
+        let hl = db.durable_head();
+        db.ingest_str(&approve(&[1001])).unwrap();
+        let h2 = db.durable_head();
+
+        let out = collect(&db, h0, u32::MAX, true);
+        let resyncs: Vec<&String> = out
+            .iter()
+            .filter(|c| c.contains("event: resync\n"))
+            .collect();
+        assert_eq!(resyncs.len(), 1, "{out:?}");
+        assert_eq!(
+            data(resyncs[0]),
+            serde_json::json!({ "head": h2, "rule": "late" })
+        );
+        let at = |needle: &str| out.iter().position(|c| c.contains(needle)).unwrap();
+        assert!(at("event: resync\n") < at("event: verdict\n"), "{out:?}");
+        // the fact events are still all there, and only the covered rule's verdict
+        assert!(out.iter().any(|c| c.contains("\"node\":20")), "{out:?}");
+        let rows = verdict_rows(&out);
+        assert_eq!(rows.len(), 1, "{out:?}");
+        assert_eq!(rows[0]["rule"], "approval");
+
+        // from the late rule's own cursor nothing lags: both rules report, in rule order
+        let out = collect(&db, hl, u32::MAX, true);
+        assert!(!out.concat().contains("event: resync"), "{out:?}");
+        let rules: Vec<String> = verdict_rows(&out)
+            .iter()
+            .map(|v| v["rule"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(rules, ["approval", "late"]);
+
+        let nss = Namespaces::new(&root, DEFAULT_N_MAX, db.clone());
+        let v = get(
+            &nss,
+            &format!("/events?since={h0}&verdicts=1"),
+            &mcp::Scope::default(),
+        );
+        assert_eq!(v["verdict_resync"], serde_json::json!(["late"]));
+        assert_eq!(v["verdicts"].as_array().unwrap().len(), 1, "{v}");
+        drop(nss);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // A cursor the fact feed cannot answer resyncs the whole window, verdicts included.
+    #[test]
+    fn a_cursor_ahead_of_the_head_resyncs_with_verdicts_on() {
+        let root =
+            std::env::temp_dir().join(format!("stroma_verdict_ahead_{}", std::process::id()));
+        let db = verdict_db(&root);
+        let h = db.durable_head();
+        let out = collect(&db, h + 50, u32::MAX, true);
+        assert!(out[1].contains("\"resync\":true"), "{out:?}");
+        assert!(verdict_rows(&out).is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn heartbeat_flag_takes_a_value() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::unknown_flag(&args(&["--sse-heartbeat", "5"])), None);
+        assert!(super::usage().contains("--sse-heartbeat"));
     }
 
     #[test]

@@ -211,6 +211,26 @@ Every change carries the `head` of the batch that caused it, and `until` (inclus
 returned cursor. Without `rule_name`, `conformance_changes` covers every watched rule and each
 change names its `rule`.
 
+To follow facts and verdicts together without a poll loop, add `verdicts=1` to the change feed
+(`GET /events`, a long-poll that implies `changes=1`, or `GET /events/stream`, server-sent events).
+After each batch's change event the stream sends that batch's verdict changes for every watched
+rule, in head order, under the same cursor:
+
+```bash
+curl -sN 'localhost:7687/events/stream?since=41&verdicts=1'
+# data: {"head":42,"changes":[{"node":1003,"type":"Issue","predicates":["approved-by"],"new":false}]}
+#
+# id: 42            (only the last event of a head carries the id)
+# event: verdict
+# data: {"head":42,"rule":"release-approval","subject":1003,"old":{"verdict":"ABSENT",…},"new":{"verdict":"OK",…}}
+```
+
+Reconnecting with `Last-Event-ID` replays everything after that head. A watched rule whose journal
+no longer reaches the cursor is named by an `event: resync` (`"verdict_resync":[…]` in the
+long-poll); re-read it with `conformance_watch`. Rows are masked exactly like `conformance_changes`,
+so a verdict hidden by the caller's labels is not sent. An idle stream gets a comment line every 15
+seconds, which `--sse-heartbeat` changes.
+
 Settings come from flags or environment variables (flag > env > default) — see
 **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** and `.env.example`. Reads are authz-scoped
 (`allowed_labels`, capped per token) and stamped with an `as_of` version vector. The `stroma-serve`

@@ -923,6 +923,120 @@ fn serve_change_stream() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+// Verdict events over a real connection: opt-in `verdicts=1`, the verdict event right after its
+// batch's fact event, the configured heartbeat on an idle stream, and a rejected heartbeat value.
+#[test]
+fn serve_verdict_stream() {
+    let base =
+        std::env::temp_dir().join(format!("stroma_serve_verdict_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    let port = 13100 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let _guard = Kill(
+        Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+            .args([
+                "--db",
+                dir.to_str().unwrap(),
+                "--addr",
+                &addr,
+                "--no-auth",
+                "--sse-heartbeat",
+                "1",
+            ])
+            .spawn()
+            .unwrap(),
+    );
+    wait_up(&addr);
+    let graph = concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"type_def\":{\"name\":\"Issue\"}}\n",
+        "{\"pred_def\":{\"name\":\"status\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range_value\":\"text\"}}\n",
+        "{\"pred_def\":{\"name\":\"owner\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"approved-by\",\"cardinality\":\"one\",\"domain\":\"Issue\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":10,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1001,\"type\":\"Issue\"}}\n",
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"status\",\"object\":{\"text\":\"released\"}}}\n",
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"owner\",\"object\":{\"node\":10}}}\n",
+        "{\"rule_def\":{\"name\":\"approval\",\"rule\":{\"subject_type\":\"Issue\",\"required\":{\"hops\":[{\"predicate\":\"owner\"}]},\"actual\":\"approved-by\",\"absent_when\":{\"predicate\":\"status\",\"equals\":\"released\"}}}}\n",
+    );
+    assert_eq!(http(&addr, "POST", "/ingest", graph, None).0, 200);
+    let (st, _, body) = http(
+        &addr,
+        "POST",
+        "/query",
+        "{\"op\":\"conformance_watch\",\"rule_name\":\"approval\"}",
+        None,
+    );
+    assert_eq!(st, 200, "{body}");
+
+    let open = |path: &str| {
+        let mut s = TcpStream::connect(&addr).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        s.write_all(req.as_bytes()).unwrap();
+        s
+    };
+    let mut s = open("/events/stream?verdicts=1");
+    let mut buf = String::new();
+    assert!(read_until(&mut s, &mut buf, "\"changes\":[]"), "{buf}");
+    // idle: the configured one-second heartbeat arrives well inside the read timeout
+    assert!(read_until(&mut s, &mut buf, ": keepalive"), "{buf}");
+
+    let ingest =
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"approved-by\",\"object\":{\"node\":10}}}\n";
+    assert_eq!(http(&addr, "POST", "/ingest", ingest, None).0, 200);
+    assert!(read_until(&mut s, &mut buf, "event: verdict"), "{buf}");
+    assert!(read_until(&mut s, &mut buf, "\"verdict\":\"OK\""), "{buf}");
+    let verdict = buf.rfind("event: verdict\n").unwrap();
+    let line = buf[verdict..]
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(v["rule"], "approval");
+    assert_eq!(v["subject"], 1001);
+    assert_eq!(v["old"]["verdict"], "ABSENT");
+    assert_eq!(v["new"]["verdict"], "OK");
+    assert!(
+        buf[..verdict].contains("\"predicates\":[\"approved-by\"]"),
+        "the fact event comes first: {buf}"
+    );
+    drop(s);
+
+    // without verdicts=1 the same write produces no verdict event
+    let h = http(&addr, "GET", "/stats", "", None).2;
+    let h: serde_json::Value = serde_json::from_str(&h).unwrap();
+    let head = h["facts"]["durable_head"].as_u64().unwrap();
+    let ingest =
+        "{\"fact\":{\"subject\":1001,\"predicate\":\"approved-by\",\"object\":{\"node\":1001}}}\n";
+    assert_eq!(http(&addr, "POST", "/ingest", ingest, None).0, 200);
+    let mut s = open(&format!("/events/stream?since={head}"));
+    let mut buf = String::new();
+    assert!(
+        read_until(&mut s, &mut buf, "\"predicates\":[\"approved-by\"]"),
+        "{buf}"
+    );
+    assert!(!buf.contains("verdict"), "{buf}");
+    drop(s);
+
+    // a zero or non-numeric heartbeat is refused at startup
+    for bad in ["0", "soon"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+            .args([
+                "--db",
+                base.join("bad").to_str().unwrap(),
+                "--sse-heartbeat",
+                bad,
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{bad}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("--sse-heartbeat"));
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn console_conformance_missing_and_assume() {
     let base = std::env::temp_dir().join(format!("stroma_serve_cf_test_{}", std::process::id()));

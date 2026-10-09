@@ -675,6 +675,65 @@ fn conformance_changes_across_all_watched_rules() {
     let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
+// `verdict_changes` is the all-rules read the change feed uses: the same rows as
+// `conformance_changes` without a rule name, bounded by `until`. A rule watched after the cursor is
+// named in `resync` and adds no rows, while the other rules still answer.
+#[test]
+fn verdict_changes_name_lagging_rules_and_keep_the_rest() {
+    let (dir, db) = watched_db("verdict_feed");
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"release-approval"}))
+        .unwrap();
+    let cursor = w["cursor"].as_u64().unwrap();
+    let a = db.ingest_str(APPROVE_1003).unwrap();
+    let late = json!({ "rule_def": { "name": "late", "rule": rule_body() } });
+    db.ingest_str(&late.to_string()).unwrap();
+    let w = db
+        .query(&json!({"op":"conformance_watch","rule_name":"late"}))
+        .unwrap();
+    let late_cursor = w["cursor"].as_u64().unwrap();
+    let b = db.ingest_str(TRANSFER_AT_1100).unwrap();
+
+    let v = db
+        .verdict_changes(cursor, b.durable_head, u32::MAX)
+        .unwrap();
+    assert_eq!(v.resync, vec!["late".to_string()]);
+    let (only, _) = changes(
+        &db,
+        json!({"op":"conformance_changes","rule_name":"release-approval","cursor":cursor}),
+    );
+    assert_eq!(v.changes.len(), only.len());
+    assert!(
+        v.changes
+            .iter()
+            .all(|c| c["rule"] == json!("release-approval"))
+    );
+    assert_eq!(subjects(&v.changes), subjects(&only));
+
+    // bounded to the first ingest: just its one flip
+    let first = db
+        .verdict_changes(cursor, a.durable_head, u32::MAX)
+        .unwrap();
+    assert_eq!(subjects(&first.changes), vec![1003]);
+
+    // from the late rule's own cursor nothing lags and both rules report the transfer's flips
+    let v = db
+        .verdict_changes(late_cursor, b.durable_head, u32::MAX)
+        .unwrap();
+    assert!(v.resync.is_empty());
+    assert_eq!(
+        subjects(&v.changes),
+        vec![1001, 1001, 1003, 1003, 1008, 1008]
+    );
+    assert!(v.changes.iter().all(|c| c["head"] == json!(b.durable_head)));
+
+    let err = db
+        .verdict_changes(b.durable_head, cursor, u32::MAX)
+        .unwrap_err();
+    assert!(err.contains("below since"), "unexpected: {err}");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 // The two rule-expressiveness extensions end-to-end through the JSON boundary: a node-valued scope
 // (`equals: {"node": N}` — the documented object form) and `distinct_from` (a must-differ derived
 // path, e.g. a self-approval ban), including the stored `rule_def` replay of the new field.
