@@ -240,6 +240,30 @@ fn authed(sessions: &Sessions, req: &Request) -> bool {
     }
 }
 
+/// The `host[:port]` authority of an `http(s)://host[:port][/...]` URL (an `Origin` or `Referer`
+/// value); `None` for anything else, including the opaque origin `null`.
+fn url_authority(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    Some(&rest[..end]).filter(|a| !a.is_empty())
+}
+
+/// CSRF guard for a state-changing request authenticated by the session cookie: the request's
+/// `Origin` (else the `Referer`'s origin) must name the server's own authority, i.e. the `Host`
+/// header the browser used. With neither header present the request is refused. The scheme is not
+/// compared, since the server speaks plain HTTP and may sit behind a TLS-terminating proxy.
+fn same_origin(host: Option<&str>, origin: Option<&str>, referer: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    match origin.or(referer).and_then(url_authority) {
+        Some(a) => a.eq_ignore_ascii_case(host),
+        None => false,
+    }
+}
+
 /// Resolve a setting: `--flag <v>` overrides `$ENV` overrides `default`.
 fn opt(args: &[String], name: &str, env: &str, default: &str) -> String {
     args.iter()
@@ -1203,6 +1227,16 @@ pub fn run(args: &[String]) {
                     continue;
                 }
                 if method == Method::Post && path == "/login" {
+                    // no cookie yet, so a missing Origin is fine (curl); a present one must match
+                    if let Some(o) = header_value(&req, "origin")
+                        && !same_origin(header_value(&req, "host"), Some(o), None)
+                    {
+                        let _ = req.respond(json_response(
+                            403,
+                            &json!({ "error": "cross-origin login refused: Origin does not match this server's Host" }),
+                        ));
+                        continue;
+                    }
                     let body = read_body(&mut req);
                     let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
                     let ok = ct_eq(v["user"].as_str().unwrap_or(""), &auth.user)
@@ -1254,6 +1288,28 @@ pub fn run(args: &[String]) {
                     }
                     continue;
                 };
+
+                // a cookie-authenticated state change must come from the server's own origin
+                // (the cookie is SameSite=Strict, which still admits same-site other-port pages)
+                if via == "session"
+                    && matches!(
+                        method,
+                        Method::Post | Method::Put | Method::Patch | Method::Delete
+                    )
+                    && !same_origin(
+                        header_value(&req, "host"),
+                        header_value(&req, "origin"),
+                        header_value(&req, "referer"),
+                    )
+                {
+                    let _ = req.respond(json_response(
+                        403,
+                        &json!({
+                            "error": "cross-origin request refused: a session-authenticated state change needs an Origin (or Referer) matching this server's Host"
+                        }),
+                    ));
+                    continue;
+                }
 
                 if method == Method::Post && path == "/logout" {
                     if let Some(tok) = cookie_token(&req) {
@@ -1335,14 +1391,37 @@ pub fn run(args: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Namespaces, Reply, dispatch, new_token, parse_tokens, query_param, route, stream_changes,
-        valid_ns_name,
+        Namespaces, Reply, dispatch, new_token, parse_tokens, query_param, route, same_origin,
+        stream_changes, valid_ns_name,
     };
     use serde_json::Value;
     use std::sync::Arc;
     use std::time::Duration;
     use stromadb_store::{DEFAULT_N_MAX, Db, mcp};
     use tiny_http::{Method, TestRequest};
+
+    #[test]
+    fn origin_matching() {
+        let h = Some("localhost:7687");
+        assert!(same_origin(h, Some("http://localhost:7687"), None));
+        assert!(same_origin(h, Some("https://LOCALHOST:7687"), None));
+        assert!(same_origin(
+            h,
+            None,
+            Some("http://localhost:7687/ns/a/?x=1")
+        ));
+        // Origin wins over Referer when both are present
+        assert!(!same_origin(
+            h,
+            Some("http://localhost:9999"),
+            Some("http://localhost:7687/")
+        ));
+        assert!(!same_origin(h, Some("http://localhost:9999"), None));
+        assert!(!same_origin(h, Some("http://localhost"), None));
+        assert!(!same_origin(h, Some("null"), None));
+        assert!(!same_origin(h, None, None));
+        assert!(!same_origin(None, Some("http://localhost:7687"), None));
+    }
 
     #[test]
     fn query_params() {
