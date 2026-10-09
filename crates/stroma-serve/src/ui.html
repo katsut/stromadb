@@ -1743,8 +1743,8 @@ function openNsPage(open){ closeNsPop(); if(open && !nsOpener) nsOpener = docume
 $('nsManage').onclick=()=>openNsPage(true);
 // ---- per-namespace reset: POST /reset or /ns/<name>/reset (needs --allow-reset and a writable
 // credential; the server enforces both). The namespace stays registered; only its data is cleared.
-let nsResetName = null, nsResetOpener = null;
-function closeNsReset(){ const name=nsResetName, op=nsResetOpener; $('nsResetModal').classList.add('hidden'); nsResetName=null; nsResetOpener=null;
+let nsResetName = null, nsResetOpener = null, nsResetBusy = false;
+function closeNsReset(){ if(nsResetBusy) return; const name=nsResetName, op=nsResetOpener; $('nsResetModal').classList.add('hidden'); nsResetName=null; nsResetOpener=null;
   const back = (name && $('nsTableWrap').querySelector('button[data-reset="'+name+'"]')) || (op && op.isConnected ? op : $('nsPageClose')); back.focus(); }
 $('nsTableWrap').onclick=e=>{ const b=e.target.closest('button.ns-reset'); if(!b || !perms || !perms.allow_reset || perms.read_only) return;
   nsResetName=b.dataset.reset; nsResetOpener=b;
@@ -1752,7 +1752,7 @@ $('nsTableWrap').onclick=e=>{ const b=e.target.closest('button.ns-reset'); if(!b
   $('nsResetLabel').textContent=t('nsResetType',{n:nsResetName}); $('nsResetConfirm').textContent=t('nsResetConfirm',{n:nsResetName});
   $('nsResetType').value=''; $('nsResetConfirm').disabled=true; $('nsResetResult').textContent=''; $('nsResetResult').className='tip';
   $('nsResetModal').classList.remove('hidden'); $('nsResetType').focus(); };
-$('nsResetType').oninput=e=>{ $('nsResetConfirm').disabled = e.target.value!==nsResetName; };
+$('nsResetType').oninput=e=>{ $('nsResetConfirm').disabled = nsResetBusy || e.target.value!==nsResetName; };
 $('nsResetType').onkeydown=e=>{ if(e.key==='Enter' && !$('nsResetConfirm').disabled) $('nsResetConfirm').click(); };
 $('nsResetCancel').onclick=closeNsReset;
 $('nsResetModal').onclick=e=>{ if(e.target===$('nsResetModal')) closeNsReset(); };
@@ -1760,15 +1760,16 @@ $('nsResetModal').onkeydown=e=>{ if(e.key==='Escape'){ e.stopPropagation(); clos
   if(e.key==='Tab'){ const f=[$('nsResetType'),$('nsResetCancel'),$('nsResetConfirm')].filter(x=>!x.disabled), i=f.indexOf(document.activeElement);
     const n = e.shiftKey ? (i<=0 ? f.length-1 : i-1) : (i<0 || i===f.length-1 ? 0 : i+1); e.preventDefault(); f[n].focus(); } };
 $('nsResetConfirm').onclick=async()=>{ const name=nsResetName, btn=$('nsResetConfirm'), out=$('nsResetResult');
-  if(!name || $('nsResetType').value!==name || !perms || !perms.allow_reset || perms.read_only) return;
-  btn.disabled=true; out.className='tip'; out.textContent=t('resetting');
+  if(nsResetBusy || !name || $('nsResetType').value!==name || !perms || !perms.allow_reset || perms.read_only) return;
+  nsResetBusy=true; btn.disabled=true; out.className='tip'; out.textContent=t('resetting');
   try{ const r=await fetch((name==='default' ? '' : '/ns/'+name)+'/reset',{method:'POST'});
     let j={}; try{ j=await r.json(); }catch(x){ console.warn('POST reset: non-JSON reply', x); }
     if(!r.ok || j.error){ out.className='tip err-text'; out.textContent=t('resetFailed',{e:j.error||('HTTP '+r.status)}); $('nsResetType').focus(); btn.disabled=$('nsResetType').value!==name; return; }
     await namespaces(); const row=(nsList||[]).find(n=>n.name===name)||{};
-    closeNsReset(); nsMsg('ok', esc(t('nsResetDone',{n:name,nodes:nsCell(row.nodes),facts:nsCell(row.facts)})));
+    nsResetBusy=false; closeNsReset(); nsMsg('ok', esc(t('nsResetDone',{n:name,nodes:nsCell(row.nodes),facts:nsCell(row.facts)})));
     if(name===(NS||'default')) afterReset();
-  }catch(x){ out.className='tip err-text'; out.textContent=t('resetFailed',{e:''+x}); btn.disabled=$('nsResetType').value!==name; } };
+  }catch(x){ out.className='tip err-text'; out.textContent=t('resetFailed',{e:''+x}); btn.disabled=$('nsResetType').value!==name; }
+  finally{ nsResetBusy=false; } };
 $('nsPageClose').onclick=()=>openNsPage(false);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('nsPage').classList.contains('hidden') && $('nsResetModal').classList.contains('hidden')) openNsPage(false); });
 addEventListener('hashchange', ()=>openNsPage(location.hash==='#namespaces'));
