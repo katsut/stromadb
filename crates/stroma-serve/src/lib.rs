@@ -38,7 +38,7 @@
 //!   POST /namespaces {"name"} → 201 {"name"}  (create an empty namespace — the only way one is
 //!                 created; 400 on a malformed name, 409 if it exists, 403 for a read-only token)
 //!   POST /reset           → clears the addressed database (opt-in: only when started with --allow-reset)
-//!   GET  /namespaces      → {"namespaces":[{"name","nodes","facts","loaded","durable_head"}, ...]}  (every
+//!   GET  /namespaces      → {"namespaces":[{"name","nodes","facts","loaded","durable_head","bytes_on_disk"}, ...]}  (every
 //!                 namespace that exists, default first then sorted, with its node/fact counts;
 //!                 never opens a namespace — an unopened one reports the counts it last persisted
 //!                 (updated on every write), or null when it has none)
@@ -430,6 +430,11 @@ impl Namespaces {
                     "nodes": counts.map(|c| c.nodes),
                     "facts": counts.map(|c| c.facts),
                     "loaded": db.is_some(),
+                    "bytes_on_disk": match &db {
+                        Some(db) => db.bytes_on_disk(),
+                        None => stromadb_store::dir_bytes(&self.dir(&name)),
+                    },
+                    "bytes_on_disk": stromadb_store::dir_bytes(&self.dir(&name)),
                     "durable_head": db.as_ref().map(|d| d.durable_head()),
                 })
             })

@@ -1213,9 +1213,16 @@ fn serve_namespace_create() {
     assert_eq!(names, ["default", "fresh"], "{body}");
     assert_eq!(v["namespaces"][1]["facts"], 0, "{body}");
     assert_eq!(v["namespaces"][1]["durable_head"], 0, "{body}");
+    assert!(
+        v["namespaces"][1]["bytes_on_disk"].as_u64().is_some(),
+        "{body}"
+    );
+    let (st, body) = http_bearer_body(&addr, "GET", "/ns/fresh/stats", "", Some("tok"));
+    assert_eq!(st, 200);
+    let stats: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        http_bearer_body(&addr, "GET", "/ns/fresh/stats", "", Some("tok")).0,
-        200
+        stats["storage"]["bytes_on_disk"], v["namespaces"][1]["bytes_on_disk"],
+        "{body}"
     );
 
     // an existing namespace is a conflict and keeps its data
