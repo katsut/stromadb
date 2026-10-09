@@ -162,6 +162,16 @@ fn serve_health_query_ingest() {
     ];
     assert!(order.is_sorted(), "settings groups out of order: {order:?}");
 
+    // the namespaces page offers a per-namespace reset behind a typed-name confirmation
+    for needle in [
+        "id=\"nsResetModal\"",
+        "id=\"nsResetType\"",
+        "id=\"nsResetConfirm\"",
+        "data-reset=",
+    ] {
+        assert!(body.contains(needle), "ui missing {needle}");
+    }
+
     // theme and language controls live in the topbar, not the settings drawer
     assert!(
         !body.contains("id=\"grpAppearance\""),
@@ -1284,4 +1294,89 @@ fn serve_namespace_create() {
     let long = format!(r#"{{"name":"{}"}}"#, "x".repeat(65));
     assert_eq!(post(&long, Some("tok")).0, 400);
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn serve_namespace_reset_keeps_registration() {
+    let base = std::env::temp_dir().join(format!("stroma_serve_nsreset_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let dir = base.join("db");
+    let tokens = base.join("tokens.json");
+    std::fs::write(
+        &tokens,
+        r#"{"tokens":[{"name":"viewer","token":"ro","read_only":true}]}"#,
+    )
+    .unwrap();
+    let port = 15100 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let _guard = Kill(
+        Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+            .args([
+                "--db",
+                dir.to_str().unwrap(),
+                "--addr",
+                &addr,
+                "--api-token",
+                "tok",
+                "--tokens",
+                tokens.to_str().unwrap(),
+                "--allow-reset",
+            ])
+            .spawn()
+            .unwrap(),
+    );
+    wait_up(&addr);
+    let call = |method: &str, path: &str, body: &str, bearer: &str| {
+        http_bearer_body(&addr, method, path, body, Some(bearer))
+    };
+    let counts = |name: &str| {
+        let (st, body) = call("GET", "/namespaces", "", "tok");
+        assert_eq!(st, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let e = v["namespaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name} not listed: {body}"))
+            .clone();
+        (e["nodes"].as_u64().unwrap(), e["facts"].as_u64().unwrap())
+    };
+    let data = concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\"}}\n",
+        "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
+    );
+    assert_eq!(
+        call("POST", "/namespaces", r#"{"name":"scratch"}"#, "tok").0,
+        201
+    );
+    assert_eq!(call("POST", "/ns/scratch/ingest", data, "tok").0, 200);
+    assert_eq!(call("POST", "/ingest", data, "tok").0, 200);
+    let (nodes, facts) = counts("scratch");
+    assert!(
+        nodes > 0 && facts > 0,
+        "seeded: {nodes} nodes {facts} facts"
+    );
+
+    // a read-only credential cannot reset, and nothing changes
+    assert_eq!(call("POST", "/ns/scratch/reset", "", "ro").0, 403);
+    assert_eq!(counts("scratch"), (nodes, facts));
+
+    // reset clears the namespace's data but leaves it registered and empty
+    let (st, body) = call("POST", "/ns/scratch/reset", "", "tok");
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(counts("scratch"), (0, 0));
+    assert!(dir.join("ns/scratch").exists(), "namespace dir removed");
+    assert_eq!(call("GET", "/ns/scratch/stats", "", "tok").0, 200);
+    // the schema is gone with the data, so the same ingest works again from scratch
+    assert_eq!(call("POST", "/ns/scratch/ingest", data, "tok").0, 200);
+
+    // resetting one namespace leaves the default database untouched
+    assert_eq!(call("POST", "/ns/scratch/reset", "", "tok").0, 200);
+    let (dn, df) = counts("default");
+    assert!(dn > 0 && df > 0, "default untouched: {dn} {df}");
 }

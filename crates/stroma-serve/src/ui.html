@@ -241,9 +241,12 @@
   .ns-table a { color:var(--accent); text-decoration:none; } .ns-table a:hover, .ns-table a:focus-visible { text-decoration:underline; }
   .ns-form { display:flex; gap:8px; align-items:flex-start; } .ns-form input { flex:1; min-width:0; }
   .ns-msg { min-height:1.4em; font-size:12px; margin-top:6px; } .ns-msg.err { color:#ff7a90; } .ns-msg.ok { color:var(--accent); }
-  .ns-table .ns-cur { font:600 10px var(--sans); color:var(--accent); }
+  .ns-table .ns-cur { font:600 10px var(--sans); color:var(--accent); white-space:nowrap; word-break:normal; }
   .ns-msg a { color:var(--accent); }
   .ns-manage { margin-top:10px; width:100%; }
+  .ns-table td.act { white-space:nowrap; text-align:right; } .ns-table td.nm { min-width:84px; }
+  .ns-table button.ns-reset { display:block; margin:4px 0 0 auto; background:none; border:1px solid color-mix(in oklab,#ff5a6a 50%,var(--line-2)); color:#ff7a90; border-radius:var(--r-sm); padding:2px 8px; font:600 11.5px var(--sans); cursor:pointer; }
+  .ns-table button.ns-reset:hover, .ns-table button.ns-reset:focus-visible { background:color-mix(in oklab,#ff5a6a 16%,var(--panel)); }
   /* settings drawer: grouped rows on the right edge; the danger zone is always the last group */
   .drawer { position:absolute; top:0; right:0; bottom:0; z-index:9; width:380px; max-width:100%; overflow-y:auto; background:var(--panel-2); border-left:1px solid var(--line-2); box-shadow:-18px 0 40px -24px rgba(0,0,0,.7); padding:14px 18px 22px; }
   .drawer-h { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; } .drawer-h .pop-h { margin:0; font-size:14px; }
@@ -351,6 +354,17 @@
       <div id="nsTableWrap"></div>
     </div>
   </aside>
+
+  <div class="modal-back hidden" id="nsResetModal" role="dialog" aria-modal="true" aria-labelledby="nsResetTitle">
+    <div class="modal">
+      <div class="pop-h" id="nsResetTitle"></div>
+      <div class="tip" id="nsResetBody" style="margin-top:0"></div>
+      <label for="nsResetType" id="nsResetLabel"></label>
+      <input id="nsResetType" autocomplete="off" spellcheck="false">
+      <div class="row"><button class="ghost" id="nsResetCancel" data-i18n="cancel">Cancel</button><button class="danger" id="nsResetConfirm" disabled></button></div>
+      <div class="tip" id="nsResetResult" role="alert" style="margin-bottom:0"></div>
+    </div>
+  </div>
 
   <div class="modal-back hidden" id="resetModal" role="dialog" aria-modal="true" aria-labelledby="resetTitle">
     <div class="modal">
@@ -472,7 +486,7 @@ const I18N = {
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”",
        settings:"settings", settingsTitle:"Settings", close:"close",
-       nsTitle:"Namespace", nsIntro:"Switch to another namespace — an isolated database this server also hosts.", nsCounts:"{n} nodes · {f} facts", nsCurrent:"current", switchNamespace:"switch namespace", nsManage:"Manage namespaces", nsPageTitle:"Namespaces", nsPageIntro:"Each namespace is an isolated database on this server. A namespace exists only once it is created here.", nsNewTitle:"New namespace", nsCreate:"Create", nsNameLabel:"namespace name", nsRule:"Use 1–64 characters: lowercase letters, digits, - and _.", nsExists:"Namespace “{n}” already exists.", nsCreated:"Created “{n}”.", nsSwitchTo:"Switch to it", nsColName:"name", nsColNodes:"nodes", nsColFacts:"facts", nsColHead:"durable head", nsOpen:"Open", nsNoNamed:"No namespaces yet. Create one to get started.", nsReadOnly:"This credential is read-only and cannot create namespaces.", nsNoNamedRO:"No namespaces yet. Ask someone with write access to create one.", nsListFailed:"Could not load namespaces: {e}", nsCreateFailed:"Could not create the namespace: {e}",
+       nsTitle:"Namespace", nsIntro:"Switch to another namespace — an isolated database this server also hosts.", nsCounts:"{n} nodes · {f} facts", nsCurrent:"current", switchNamespace:"switch namespace", nsManage:"Manage namespaces", nsPageTitle:"Namespaces", nsPageIntro:"Each namespace is an isolated database on this server. A namespace exists only once it is created here.", nsNewTitle:"New namespace", nsCreate:"Create", nsNameLabel:"namespace name", nsRule:"Use 1–64 characters: lowercase letters, digits, - and _.", nsExists:"Namespace “{n}” already exists.", nsCreated:"Created “{n}”.", nsSwitchTo:"Switch to it", nsColName:"name", nsColNodes:"nodes", nsColFacts:"facts", nsColHead:"durable head", nsOpen:"Open", nsResetBtn:"Reset…", nsResetTitle:"Reset namespace {n}", nsResetBody:"This permanently erases every fact, the schema, the rules and the embeddings stored in the namespace “{n}”, and cannot be undone. The namespace itself remains and stays listed, empty.", nsResetType:"type {n} to confirm", nsResetConfirm:"Reset {n}", nsResetDone:"namespace {n} reset: {nodes} nodes, {facts} facts", nsNoNamed:"No namespaces yet. Create one to get started.", nsReadOnly:"This credential is read-only and cannot create namespaces.", nsNoNamedRO:"No namespaces yet. Ask someone with write access to create one.", nsListFailed:"Could not load namespaces: {e}", nsCreateFailed:"Could not create the namespace: {e}",
        grpServer:"Server", version:"version", dbPath:"database", workers:"workers", typesPreds:"types · predicates", embeddingsLbl:"embeddings", durableHead:"durable head", changelog:"changelog", signedInAs:"signed in as", access:"access", readWrite:"read-write", readOnlyLbl:"read-only", allLabels:"all labels", labelsCap:"labels {l}", unnamedToken:"unnamed token", authOpen:"open (auth disabled)", viaToken:"token “{n}”",
        mcpEndpoint:"MCP endpoint", copy:"Copy", copied:"copied to clipboard", copyFailed:"copy failed — select the URL and copy it manually",
        grpAdmin:"Admin", compactIntro:"Snapshot the current state and truncate the changelog. Non-destructive: as-of reads keep answering across the boundary.", compactNow:"Compact now", compacting:"compacting…", compactDone:"compacted up to {n} · changelog {w} · snapshot {s}", compactFailed:"compaction failed: {e}", resetState:"Database reset", enabled:"enabled", disabled:"disabled", dangerZone:"Danger zone",
@@ -484,7 +498,7 @@ const I18N = {
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用",
        settings:"設定", settingsTitle:"設定", close:"閉じる",
-       nsTitle:"ネームスペース", nsIntro:"別のネームスペースに切り替え — このサーバーが持つ別の独立したデータベースです。", nsCounts:"ノード {n} · ファクト {f}", nsCurrent:"現在", switchNamespace:"ネームスペースを切り替え", nsManage:"ネームスペースを管理", nsPageTitle:"ネームスペース", nsPageIntro:"各ネームスペースは、このサーバー上の独立したデータベースです。ここで作成して初めて存在します。", nsNewTitle:"新しいネームスペース", nsCreate:"作成", nsNameLabel:"ネームスペース名", nsRule:"1〜64 文字の小文字英数字、- と _ が使えます。", nsExists:"ネームスペース「{n}」は既に存在します。", nsCreated:"「{n}」を作成しました。", nsSwitchTo:"切り替える", nsColName:"名前", nsColNodes:"ノード", nsColFacts:"ファクト", nsColHead:"durable head", nsOpen:"開く", nsNoNamed:"まだネームスペースがありません。作成して始めましょう。", nsReadOnly:"この資格情報は読み取り専用のため、ネームスペースを作成できません。", nsNoNamedRO:"まだネームスペースがありません。書き込み権限のある人に作成を依頼してください。", nsListFailed:"ネームスペースを読み込めませんでした: {e}", nsCreateFailed:"ネームスペースを作成できませんでした: {e}",
+       nsTitle:"ネームスペース", nsIntro:"別のネームスペースに切り替え — このサーバーが持つ別の独立したデータベースです。", nsCounts:"ノード {n} · ファクト {f}", nsCurrent:"現在", switchNamespace:"ネームスペースを切り替え", nsManage:"ネームスペースを管理", nsPageTitle:"ネームスペース", nsPageIntro:"各ネームスペースは、このサーバー上の独立したデータベースです。ここで作成して初めて存在します。", nsNewTitle:"新しいネームスペース", nsCreate:"作成", nsNameLabel:"ネームスペース名", nsRule:"1〜64 文字の小文字英数字、- と _ が使えます。", nsExists:"ネームスペース「{n}」は既に存在します。", nsCreated:"「{n}」を作成しました。", nsSwitchTo:"切り替える", nsColName:"名前", nsColNodes:"ノード", nsColFacts:"ファクト", nsColHead:"durable head", nsOpen:"開く", nsResetBtn:"リセット…", nsResetTitle:"ネームスペース {n} をリセット", nsResetBody:"ネームスペース「{n}」に保存されているすべてのファクト・スキーマ・ルール・埋め込みを完全に削除します。元には戻せません。ネームスペース自体は残り、空の状態で一覧に表示され続けます。", nsResetType:"確認のため {n} と入力", nsResetConfirm:"{n} をリセット", nsResetDone:"ネームスペース {n} をリセットしました: ノード {nodes}、ファクト {facts}", nsNoNamed:"まだネームスペースがありません。作成して始めましょう。", nsReadOnly:"この資格情報は読み取り専用のため、ネームスペースを作成できません。", nsNoNamedRO:"まだネームスペースがありません。書き込み権限のある人に作成を依頼してください。", nsListFailed:"ネームスペースを読み込めませんでした: {e}", nsCreateFailed:"ネームスペースを作成できませんでした: {e}",
        grpServer:"サーバー", version:"バージョン", dbPath:"データベース", workers:"ワーカー数", typesPreds:"型 · 述語", embeddingsLbl:"埋め込み", durableHead:"durable head", changelog:"変更ログ", signedInAs:"サインイン", access:"権限", readWrite:"読み書き", readOnlyLbl:"読み取り専用", allLabels:"全ラベル", labelsCap:"ラベル {l}", unnamedToken:"名前なしトークン", authOpen:"認証なし（無効化中）", viaToken:"トークン「{n}」",
        mcpEndpoint:"MCP エンドポイント", copy:"コピー", copied:"クリップボードにコピーしました", copyFailed:"コピーできませんでした。URL を選択して手動でコピーしてください",
        grpAdmin:"管理", compactIntro:"現在の状態をスナップショットし、変更ログを切り詰めます。非破壊で、境界をまたぐ時点指定の読み取りもそのまま動きます。", compactNow:"今すぐコンパクション", compacting:"コンパクション中…", compactDone:"{n} までコンパクション済み · 変更ログ {w} · スナップショット {s}", compactFailed:"コンパクションに失敗しました: {e}", resetState:"データベースのリセット", enabled:"有効", disabled:"無効", dangerZone:"危険な操作",
@@ -496,7 +510,7 @@ const I18N = {
        detNode:"节点", detType:"类型", detLabel:"标签", untyped:"无类型", recentre:"以此为中心 ›", noProps:"无存储属性。", loading:"加载中…", restricted:"角色“{r}”下受限。",
        tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”",
        settings:"设置", settingsTitle:"设置", close:"关闭",
-       nsTitle:"命名空间", nsIntro:"切换到另一个命名空间 — 本服务器托管的另一个独立数据库。", nsCounts:"{n} 节点 · {f} 事实", nsCurrent:"当前", switchNamespace:"切换命名空间", nsManage:"管理命名空间", nsPageTitle:"命名空间", nsPageIntro:"每个命名空间都是本服务器上的独立数据库，只有在此创建后才存在。", nsNewTitle:"新建命名空间", nsCreate:"创建", nsNameLabel:"命名空间名称", nsRule:"1–64 个字符：小写字母、数字、- 和 _。", nsExists:"命名空间“{n}”已存在。", nsCreated:"已创建“{n}”。", nsSwitchTo:"切换过去", nsColName:"名称", nsColNodes:"节点", nsColFacts:"事实", nsColHead:"durable head", nsOpen:"打开", nsNoNamed:"还没有命名空间，请先创建一个。", nsReadOnly:"此凭据为只读，无法创建命名空间。", nsNoNamedRO:"还没有命名空间，请让有写入权限的人创建。", nsListFailed:"无法加载命名空间：{e}", nsCreateFailed:"无法创建命名空间：{e}",
+       nsTitle:"命名空间", nsIntro:"切换到另一个命名空间 — 本服务器托管的另一个独立数据库。", nsCounts:"{n} 节点 · {f} 事实", nsCurrent:"当前", switchNamespace:"切换命名空间", nsManage:"管理命名空间", nsPageTitle:"命名空间", nsPageIntro:"每个命名空间都是本服务器上的独立数据库，只有在此创建后才存在。", nsNewTitle:"新建命名空间", nsCreate:"创建", nsNameLabel:"命名空间名称", nsRule:"1–64 个字符：小写字母、数字、- 和 _。", nsExists:"命名空间“{n}”已存在。", nsCreated:"已创建“{n}”。", nsSwitchTo:"切换过去", nsColName:"名称", nsColNodes:"节点", nsColFacts:"事实", nsColHead:"durable head", nsOpen:"打开", nsResetBtn:"重置…", nsResetTitle:"重置命名空间 {n}", nsResetBody:"这将永久删除命名空间“{n}”中存储的所有事实、模式、规则和嵌入向量，且无法撤销。命名空间本身会保留，并以空状态继续显示在列表中。", nsResetType:"输入 {n} 以确认", nsResetConfirm:"重置 {n}", nsResetDone:"命名空间 {n} 已重置：{nodes} 个节点，{facts} 条事实", nsNoNamed:"还没有命名空间，请先创建一个。", nsReadOnly:"此凭据为只读，无法创建命名空间。", nsNoNamedRO:"还没有命名空间，请让有写入权限的人创建。", nsListFailed:"无法加载命名空间：{e}", nsCreateFailed:"无法创建命名空间：{e}",
        grpServer:"服务器", version:"版本", dbPath:"数据库", workers:"工作线程", typesPreds:"类型 · 谓词", embeddingsLbl:"嵌入向量", durableHead:"durable head", changelog:"变更日志", signedInAs:"登录身份", access:"权限", readWrite:"读写", readOnlyLbl:"只读", allLabels:"全部标签", labelsCap:"标签 {l}", unnamedToken:"未命名令牌", authOpen:"开放（认证已禁用）", viaToken:"令牌“{n}”",
        mcpEndpoint:"MCP 端点", copy:"复制", copied:"已复制到剪贴板", copyFailed:"复制失败，请选中 URL 手动复制",
        grpAdmin:"管理", compactIntro:"为当前状态创建快照并截断变更日志。非破坏性：跨越边界的时点读取仍然有效。", compactNow:"立即压缩", compacting:"正在压缩…", compactDone:"已压缩至 {n} · 变更日志 {w} · 快照 {s}", compactFailed:"压缩失败：{e}", resetState:"数据库重置", enabled:"已启用", disabled:"已禁用", dangerZone:"危险操作",
@@ -1711,9 +1725,12 @@ function renderNsPage(){ const wrap=$('nsTableWrap'); if(!wrap) return;
   $('nsForm').classList.toggle('hidden', !known || ro); $('nsRO').classList.toggle('hidden', !ro);
   if(!nsList){ wrap.innerHTML = nsListError ? `<div class="ns-msg err" role="alert">${esc(t('nsListFailed',{e:nsListError}))}</div>` : ''; return; }
   const cur=NS||'default';
+  const canReset = known && perms.allow_reset && !ro;
   const rows = nsList.map(n=>`<tr><td class="nm">${esc(n.name)}${n.name===cur?` <span class="ns-cur">${esc(t('nsCurrent'))}</span>`:''}</td>`
     + `<td class="num">${esc(nsCell(n.nodes))}</td><td class="num">${esc(nsCell(n.facts))}</td><td class="num">${esc(nsCell(n.durable_head))}</td>`
-    + `<td><a href="${esc(nsHref(n.name))}" aria-label="${esc(t('nsOpen')+' '+n.name)}">${esc(t('nsOpen'))}</a></td></tr>`).join('');
+    + `<td class="act"><a href="${esc(nsHref(n.name))}" aria-label="${esc(t('nsOpen')+' '+n.name)}">${esc(t('nsOpen'))}</a>`
+    + (canReset ? `<button type="button" class="ns-reset" data-reset="${esc(n.name)}" aria-label="${esc(t('nsResetBtn')+' '+n.name)}">${esc(t('nsResetBtn'))}</button>` : '')
+    + `</td></tr>`).join('');
   const empty = nsList.every(n=>n.name==='default') ? `<div class="tip">${esc(t(ro ? 'nsNoNamedRO' : 'nsNoNamed'))}</div>` : '';
   wrap.innerHTML = `<table class="ns-table"><thead><tr><th scope="col">${esc(t('nsColName'))}</th><th scope="col" class="num">${esc(t('nsColNodes'))}</th>`
     + `<th scope="col" class="num">${esc(t('nsColFacts'))}</th><th scope="col" class="num">${esc(t('nsColHead'))}</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table>${empty}`; }
@@ -1724,8 +1741,37 @@ function openNsPage(open){ closeNsPop(); if(open && !nsOpener) nsOpener = docume
   if(open){ nsMsg('',''); namespaces(); (($('nsForm').classList.contains('hidden')) ? $('nsPageClose') : $('nsNewName')).focus(); }
   else { if(nsOpener && nsOpener.focus) nsOpener.focus(); nsOpener = null; } }
 $('nsManage').onclick=()=>openNsPage(true);
+// ---- per-namespace reset: POST /reset or /ns/<name>/reset (needs --allow-reset and a writable
+// credential; the server enforces both). The namespace stays registered; only its data is cleared.
+let nsResetName = null, nsResetOpener = null, nsResetBusy = false;
+function closeNsReset(){ if(nsResetBusy) return; const name=nsResetName, op=nsResetOpener; $('nsResetModal').classList.add('hidden'); nsResetName=null; nsResetOpener=null;
+  const back = (name && $('nsTableWrap').querySelector('button[data-reset="'+name+'"]')) || (op && op.isConnected ? op : $('nsPageClose')); back.focus(); }
+$('nsTableWrap').onclick=e=>{ const b=e.target.closest('button.ns-reset'); if(!b || !perms || !perms.allow_reset || perms.read_only) return;
+  nsResetName=b.dataset.reset; nsResetOpener=b;
+  $('nsResetTitle').textContent=t('nsResetTitle',{n:nsResetName}); $('nsResetBody').textContent=t('nsResetBody',{n:nsResetName});
+  $('nsResetLabel').textContent=t('nsResetType',{n:nsResetName}); $('nsResetConfirm').textContent=t('nsResetConfirm',{n:nsResetName});
+  $('nsResetType').value=''; $('nsResetConfirm').disabled=true; $('nsResetResult').textContent=''; $('nsResetResult').className='tip';
+  $('nsResetModal').classList.remove('hidden'); $('nsResetType').focus(); };
+$('nsResetType').oninput=e=>{ $('nsResetConfirm').disabled = nsResetBusy || e.target.value!==nsResetName; };
+$('nsResetType').onkeydown=e=>{ if(e.key==='Enter' && !$('nsResetConfirm').disabled) $('nsResetConfirm').click(); };
+$('nsResetCancel').onclick=closeNsReset;
+$('nsResetModal').onclick=e=>{ if(e.target===$('nsResetModal')) closeNsReset(); };
+$('nsResetModal').onkeydown=e=>{ if(e.key==='Escape'){ e.stopPropagation(); closeNsReset(); return; }
+  if(e.key==='Tab'){ const f=[$('nsResetType'),$('nsResetCancel'),$('nsResetConfirm')].filter(x=>!x.disabled), i=f.indexOf(document.activeElement);
+    const n = e.shiftKey ? (i<=0 ? f.length-1 : i-1) : (i<0 || i===f.length-1 ? 0 : i+1); e.preventDefault(); f[n].focus(); } };
+$('nsResetConfirm').onclick=async()=>{ const name=nsResetName, btn=$('nsResetConfirm'), out=$('nsResetResult');
+  if(nsResetBusy || !name || $('nsResetType').value!==name || !perms || !perms.allow_reset || perms.read_only) return;
+  nsResetBusy=true; btn.disabled=true; out.className='tip'; out.textContent=t('resetting');
+  try{ const r=await fetch((name==='default' ? '' : '/ns/'+name)+'/reset',{method:'POST'});
+    let j={}; try{ j=await r.json(); }catch(x){ console.warn('POST reset: non-JSON reply', x); }
+    if(!r.ok || j.error){ out.className='tip err-text'; out.textContent=t('resetFailed',{e:j.error||('HTTP '+r.status)}); $('nsResetType').focus(); btn.disabled=$('nsResetType').value!==name; return; }
+    await namespaces(); const row=(nsList||[]).find(n=>n.name===name)||{};
+    nsResetBusy=false; closeNsReset(); nsMsg('ok', esc(t('nsResetDone',{n:name,nodes:nsCell(row.nodes),facts:nsCell(row.facts)})));
+    if(name===(NS||'default')) afterReset();
+  }catch(x){ out.className='tip err-text'; out.textContent=t('resetFailed',{e:''+x}); btn.disabled=$('nsResetType').value!==name; }
+  finally{ nsResetBusy=false; } };
 $('nsPageClose').onclick=()=>openNsPage(false);
-document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('nsPage').classList.contains('hidden')) openNsPage(false); });
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('nsPage').classList.contains('hidden') && $('nsResetModal').classList.contains('hidden')) openNsPage(false); });
 addEventListener('hashchange', ()=>openNsPage(location.hash==='#namespaces'));
 $('nsNewName').oninput=()=>{ const v=$('nsNewName').value; nsMsg(v && !nsValid(v) ? 'err' : '', v && !nsValid(v) ? esc(t('nsRule')) : ''); };
 $('nsForm').onsubmit=async e=>{ e.preventDefault();
