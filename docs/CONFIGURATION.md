@@ -35,6 +35,15 @@ restart). Every endpoint requires a valid session **except** `GET /health` (for 
 and the login page / `POST /login`. Unauthenticated API calls receive `401`; unauthenticated page
 loads are served the login page. `POST /logout` ends the session.
 
+State-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) authenticated by the session cookie
+must also come from the server's own origin: the `Origin` header (or, when it is absent, the
+`Referer`) must name the same `host[:port]` as the request's `Host` header, otherwise the server
+answers `403`. A cookie-authenticated state change with neither header is refused too. The scheme
+is not compared, so a TLS-terminating proxy works as long as it forwards the original `Host`.
+`POST /login` refuses a present `Origin` that does not match. Browsers send `Origin` on these
+requests automatically, so the console is unaffected. Bearer-token requests and `GET` requests
+are not checked.
+
 Credentials come from the settings above (default `admin` / `password`). There is no cookie
 `Secure` flag yet, so put the server behind TLS (or keep it on localhost) if the network is
 untrusted. The MCP stdio surface is local and is not affected by this login.

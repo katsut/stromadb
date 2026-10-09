@@ -21,7 +21,7 @@ fn http(
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let cookie_hdr = cookie
-        .map(|c| format!("Cookie: stroma_session={c}\r\n"))
+        .map(|c| format!("Cookie: stroma_session={c}\r\nOrigin: http://localhost\r\n"))
         .unwrap_or_default();
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{cookie_hdr}Connection: close\r\n\r\n{body}",
@@ -1379,4 +1379,187 @@ fn serve_namespace_reset_keeps_registration() {
     assert_eq!(call("POST", "/ns/scratch/reset", "", "tok").0, 200);
     let (dn, df) = counts("default");
     assert!(dn > 0 && df > 0, "default untouched: {dn} {df}");
+}
+
+/// Status of a request with arbitrary extra header lines (each ending in `\r\n`) and `Host: localhost`.
+fn http_hdrs(addr: &str, method: &str, path: &str, body: &str, hdrs: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n{hdrs}Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let resp = String::from_utf8_lossy(&raw).into_owned();
+    let status = resp
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body = resp.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+    (status, body.to_string())
+}
+
+#[test]
+fn serve_session_state_changes_require_same_origin() {
+    let base =
+        std::env::temp_dir().join(format!("stroma_serve_origin_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("db");
+    let port = 11100 + (std::process::id() % 900) as u16;
+    let addr = format!("127.0.0.1:{port}");
+    let _guard = Kill(
+        Command::new(env!("CARGO_BIN_EXE_stroma-serve"))
+            .args([
+                "--db",
+                dir.to_str().unwrap(),
+                "--addr",
+                &addr,
+                "--api-token",
+                "s3cr3t-token",
+            ])
+            .spawn()
+            .unwrap(),
+    );
+    wait_up(&addr);
+
+    // login: a matching or absent Origin is accepted, a foreign one is refused
+    let creds = "{\"user\":\"admin\",\"password\":\"password\"}";
+    let (st, _) = http_hdrs(
+        &addr,
+        "POST",
+        "/login",
+        creds,
+        "Origin: http://localhost:9\r\n",
+    );
+    assert_eq!(st, 403, "cross-origin login");
+    let (st, cookie, _) = http(&addr, "POST", "/login", creds, None);
+    assert_eq!(st, 200, "login without Origin");
+    let tok = cookie.expect("session cookie");
+    let ck = format!("Cookie: stroma_session={tok}\r\n");
+    let ns = "{\"name\":\"origin_ns\"}";
+
+    // cookie + cross-port Origin: refused with an explanatory body
+    let (st, body) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        ns,
+        &format!("{ck}Origin: http://localhost:9999\r\n"),
+    );
+    assert_eq!(st, 403, "cross-port origin: {body}");
+    assert!(body.contains("cross-origin"), "clear error body: {body}");
+    // cookie + opaque origin
+    let (st, _) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        ns,
+        &format!("{ck}Origin: null\r\n"),
+    );
+    assert_eq!(st, 403, "null origin");
+    // cookie, neither Origin nor Referer
+    let (st, _) = http_hdrs(&addr, "POST", "/namespaces", ns, &ck);
+    assert_eq!(st, 403, "no Origin or Referer");
+    let (st, _) = http_hdrs(&addr, "POST", "/ns/default/reset", "", &ck);
+    assert_eq!(st, 403, "reset without Origin");
+    let (st, _) = http_hdrs(&addr, "POST", "/logout", "", &ck);
+    assert_eq!(st, 403, "logout without Origin");
+    // Referer fallback: foreign refused, same-origin accepted
+    let (st, _) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        ns,
+        &format!("{ck}Referer: http://localhost:9999/x\r\n"),
+    );
+    assert_eq!(st, 403, "cross-port referer");
+    // Origin present and foreign beats a same-origin Referer
+    let (st, _) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        ns,
+        &format!("{ck}Origin: http://localhost:9999\r\nReferer: http://localhost/\r\n"),
+    );
+    assert_eq!(st, 403, "foreign Origin with same-origin Referer");
+
+    // same-origin Origin allowed
+    let (st, body) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        ns,
+        &format!("{ck}Origin: http://localhost\r\n"),
+    );
+    assert!(st == 200 || st == 201, "same-origin create: {st} {body}");
+    // same-origin Referer (no Origin) allowed
+    let (st, body) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        "{\"name\":\"origin_ns2\"}",
+        &format!("{ck}Referer: http://localhost/ns/\r\n"),
+    );
+    assert!(
+        st == 200 || st == 201,
+        "same-origin referer create: {st} {body}"
+    );
+
+    // GET is unaffected, with or without Origin
+    let (st, _) = http_hdrs(&addr, "GET", "/namespaces", "", &ck);
+    assert_eq!(st, 200, "GET without Origin");
+    let (st, _) = http_hdrs(
+        &addr,
+        "GET",
+        "/namespaces",
+        "",
+        &format!("{ck}Origin: http://localhost:9999\r\n"),
+    );
+    assert_eq!(st, 200, "GET with foreign Origin");
+
+    // Bearer requests need no Origin, and a foreign one does not matter
+    let (st, body) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        "{\"name\":\"origin_ns3\"}",
+        "Authorization: Bearer s3cr3t-token\r\n",
+    );
+    assert!(st == 200 || st == 201, "bearer without Origin: {st} {body}");
+    let (st, body) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        "{\"name\":\"origin_ns4\"}",
+        "Authorization: Bearer s3cr3t-token\r\nOrigin: http://evil.example\r\n",
+    );
+    assert!(
+        st == 200 || st == 201,
+        "bearer with foreign Origin: {st} {body}"
+    );
+
+    // a valid Bearer alongside a live cookie is a Bearer request: no Origin needed
+    let (st, body) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        "{\"name\":\"origin_ns5\"}",
+        &format!("{ck}Authorization: Bearer s3cr3t-token\r\n"),
+    );
+    assert!(st == 200 || st == 201, "bearer plus cookie: {st} {body}");
+
+    // logout from the same origin still works
+    let (st, _) = http_hdrs(
+        &addr,
+        "POST",
+        "/logout",
+        "",
+        &format!("{ck}Origin: http://localhost\r\n"),
+    );
+    assert_eq!(st, 200, "same-origin logout");
 }
