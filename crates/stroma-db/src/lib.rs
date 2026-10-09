@@ -1821,7 +1821,8 @@ impl ReadState {
     /// Distance-bounded subgraph around a focal node: BFS out to `hops` (default 2), following a
     /// given `predicate` or *all* node-valued edges (ontology view), authz-scoped, capped at
     /// `max_nodes` (default 3000). Returns `{nodes:[{id,depth}], edges:[[a,b]]}` — the primitive the
-    /// UI's "distance from a node" filter renders.
+    /// UI's "distance from a node" filter renders. When the cap cuts a hop level, `order:"recent"`
+    /// keeps the nodes created latest (see [`first_seen`]); the default keeps adjacency order.
     fn neighborhood(&self, req: &Value) -> DbResult<Value> {
         let focus = req["subject"].as_u64().ok_or("subject required")?;
         let hops = req["hops"].as_u64().unwrap_or(2) as usize;
@@ -1852,25 +1853,34 @@ impl ReadState {
         depth.insert(focus, 0);
         // undirected adjacency: reach both what the focus points to and what points at it.
         let adj = query::undirected_adjacency(&facts, pred);
+        let seen = is_recent(req).then(|| first_seen(&self.snap));
         let mut frontier = vec![focus];
         for d in 0..hops {
             if frontier.is_empty() || depth.len() >= cap {
                 break;
             }
-            let mut next = Vec::new();
+            let mut found: Vec<u64> = Vec::new();
+            let mut found_set: HashSet<u64> = HashSet::new();
             for &u in &frontier {
                 for &v in adj.get(&u).into_iter().flatten() {
                     if !visible(v) {
                         continue;
                     }
                     edges.insert(if u < v { (u, v) } else { (v, u) });
-                    if !depth.contains_key(&v) && depth.len() < cap {
-                        depth.insert(v, d + 1);
-                        next.push(v);
+                    if !depth.contains_key(&v) && found_set.insert(v) {
+                        found.push(v);
                     }
                 }
             }
-            frontier = next;
+            // within one hop level the cap keeps the newest nodes when `order` is "recent"
+            if let Some(seen) = &seen {
+                sort_recent(&mut found, seen);
+            }
+            found.truncate(cap.saturating_sub(depth.len()));
+            for &v in &found {
+                depth.insert(v, d + 1);
+            }
+            frontier = found;
         }
         let nodes: Vec<Value> = depth
             .iter()
@@ -2010,7 +2020,9 @@ impl ReadState {
 
     /// Whole-graph view: every declared node and its node-valued edges, authz-scoped and capped at
     /// `max_nodes` (default 3000). Unlike `neighborhood` there is no focal distance — the result is
-    /// the entire visible graph (or a `truncated` prefix when it exceeds the cap). Same
+    /// the entire visible graph (or a `truncated` prefix when it exceeds the cap). The prefix is
+    /// by ascending node id unless `order` is `"recent"`, which keeps the nodes whose first stored
+    /// fact has the latest transaction time (newest first). Same
     /// `{nodes:[{id,depth}], edges:[[a,b]]}` shape so the UI renders it identically.
     fn graph(&self, req: &Value) -> DbResult<Value> {
         let cap = req["max_nodes"].as_u64().unwrap_or(3000) as usize;
@@ -2023,10 +2035,13 @@ impl ReadState {
                 .is_none_or(|&l| (labels >> l) & 1 == 1)
         };
 
-        let all: Vec<u64> = node_ids(&self.snap)
+        let mut all: Vec<u64> = node_ids(&self.snap)
             .into_iter()
             .filter(|&n| visible(n))
             .collect();
+        if is_recent(req) {
+            sort_recent(&mut all, &first_seen(&self.snap));
+        }
         let truncated = all.len() > cap;
         let keep: BTreeSet<u64> = all.into_iter().take(cap).collect();
 
@@ -2865,6 +2880,35 @@ fn excerpt(s: &str, needle_lc: &str) -> String {
         body,
         if end < total { "…" } else { "" }
     )
+}
+
+/// Transaction time of each subject's earliest stored row, the creation-order key behind
+/// `order: "recent"`. Nodes with no fact rows are absent (callers treat them as oldest).
+fn first_seen(snap: &Snapshot) -> HashMap<NodeId, u64> {
+    let mut m: HashMap<NodeId, u64> = HashMap::new();
+    let mut note = |n: NodeId, rows: &[stromadb_core::fold::VersionRow]| {
+        if let Some(tx) = rows.iter().map(|r| r.0.tx).min() {
+            m.entry(n).and_modify(|t| *t = (*t).min(tx)).or_insert(tx);
+        }
+    };
+    for (&(n, _), rows) in &snap.one_history {
+        note(n, rows);
+    }
+    for (&(n, _), elems) in &snap.many_history {
+        for rows in elems.values() {
+            note(n, rows);
+        }
+    }
+    m
+}
+
+/// Sort `ids` newest-first by `first_seen`; ties and unseen nodes fall back to descending id.
+fn sort_recent(ids: &mut [NodeId], seen: &HashMap<NodeId, u64>) {
+    ids.sort_unstable_by_key(|n| std::cmp::Reverse((seen.get(n).copied().unwrap_or(0), *n)));
+}
+
+fn is_recent(req: &Value) -> bool {
+    req["order"].as_str() == Some("recent")
 }
 
 fn node_ids(snap: &Snapshot) -> Vec<NodeId> {

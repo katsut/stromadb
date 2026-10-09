@@ -846,6 +846,79 @@ fn graph_all_nodes_and_authz() {
 }
 
 #[test]
+fn graph_and_neighborhood_order_recent() {
+    let dir = std::env::temp_dir()
+        .join(format!("stroma_recent_test_{}", std::process::id()))
+        .join("db");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    Db::init(&dir).unwrap();
+    let db = Db::open(&dir).unwrap();
+    // creation order 1, 30, 20, 10, 40 (ids deliberately not ascending with age); node 1 links to all
+    db.ingest_str(concat!(
+        "{\"type_def\":{\"name\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"knows\",\"cardinality\":\"many\",\"domain\":\"Person\",\"range\":\"Person\"}}\n",
+        "{\"pred_def\":{\"name\":\"name\",\"cardinality\":\"one\",\"domain\":\"Person\",\"range_value\":\"text\"}}\n",
+        "{\"node\":{\"id\":1,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":10,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":20,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":30,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"node\":{\"id\":40,\"type\":\"Person\",\"label\":0}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"name\",\"object\":{\"text\":\"a\"}}}\n",
+        "{\"fact\":{\"subject\":30,\"predicate\":\"name\",\"object\":{\"text\":\"b\"}}}\n",
+        "{\"fact\":{\"subject\":20,\"predicate\":\"name\",\"object\":{\"text\":\"c\"}}}\n",
+        "{\"fact\":{\"subject\":10,\"predicate\":\"name\",\"object\":{\"text\":\"d\"}}}\n",
+        "{\"fact\":{\"subject\":40,\"predicate\":\"name\",\"object\":{\"text\":\"e\"}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":10}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":20}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":30}}}\n",
+        "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":40}}}\n",
+    ))
+    .unwrap();
+    let ids = |r: &serde_json::Value| -> Vec<u64> {
+        let mut v: Vec<u64> = r["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_u64().unwrap())
+            .collect();
+        v.sort_unstable();
+        v
+    };
+
+    // default keeps the lowest ids
+    let r = db.query(&json!({"op":"graph","max_nodes":3})).unwrap();
+    assert_eq!(ids(&r), vec![1, 10, 20]);
+
+    // recent keeps the newest three by creation: 40, 10, 20; edges only among kept nodes
+    let r = db
+        .query(&json!({"op":"graph","max_nodes":3,"order":"recent"}))
+        .unwrap();
+    assert_eq!(ids(&r), vec![10, 20, 40]);
+    assert_eq!(r["truncated"], json!(true));
+    assert!(r["edges"].as_array().unwrap().is_empty());
+
+    // under the cap nothing is dropped
+    let r = db
+        .query(&json!({"op":"graph","max_nodes":10,"order":"recent"}))
+        .unwrap();
+    assert_eq!(ids(&r), vec![1, 10, 20, 30, 40]);
+    assert_eq!(r["truncated"], json!(false));
+
+    // neighborhood: focus plus the two newest neighbours; default is adjacency order
+    let r = db
+        .query(&json!({"op":"neighborhood","subject":1,"hops":1,"max_nodes":3,"order":"recent"}))
+        .unwrap();
+    assert_eq!(ids(&r), vec![1, 10, 40]);
+    assert_eq!(r["edges"].as_array().unwrap().len(), 2);
+    let r = db
+        .query(&json!({"op":"neighborhood","subject":1,"hops":1,"max_nodes":3}))
+        .unwrap();
+    assert_eq!(r["nodes"].as_array().unwrap().len(), 3);
+
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
 fn overview_type_aggregate() {
     let dir = std::env::temp_dir()
         .join(format!("stroma_ovw_test_{}", std::process::id()))
