@@ -646,6 +646,20 @@ pub fn neighbors(snap: &impl Facts, subject: NodeId) -> BTreeSet<NodeId> {
     out
 }
 
+/// Whether `subject` has at least one stored assertion of its own (a current One value or a
+/// non-empty Many set), without copying any values. False for a node that exists only because
+/// another node's fact points at it.
+pub fn has_facts(snap: &impl Facts, subject: NodeId) -> bool {
+    let mut any = false;
+    snap.for_each_one((subject, u32::MIN)..=(subject, u32::MAX), |_, v| {
+        any |= v.is_some();
+    });
+    snap.for_each_many((subject, u32::MIN)..=(subject, u32::MAX), |_, set| {
+        any |= !set.is_empty();
+    });
+    any
+}
+
 /// All stored assertions on `subject`, across One (current functional value) and Many (present
 /// set), keyed by predicate — the raw material for a node-detail / describe view. O(predicates on
 /// the subject) via range scans over the fold.
@@ -704,15 +718,12 @@ pub fn undirected_adjacency(
     adj
 }
 
-/// Structural strength of every node-valued edge: for each undirected node pair, the number of
-/// *distinct predicates* connecting them (both directions) — a lightweight "relationship strength"
-/// derived from the graph, not stored. E.g. a pair linked by both `knows` and `reports-to` scores 2;
-/// a single `knows` scores 1. Optionally restricted to one predicate (then every weight is 1).
-/// O(node-valued edges) — a full scan.
-pub fn edge_strengths(
+/// The distinct predicates connecting every node-valued edge, per undirected node pair (both
+/// directions merged). Optionally restricted to one predicate. O(node-valued edges) — a full scan.
+pub fn edge_predicates(
     snap: &impl Facts,
     predicate: Option<FieldId>,
-) -> HashMap<(NodeId, NodeId), u32> {
+) -> HashMap<(NodeId, NodeId), BTreeSet<FieldId>> {
     let mut preds: HashMap<(NodeId, NodeId), BTreeSet<FieldId>> = HashMap::new();
     let note = |a: NodeId,
                 b: NodeId,
@@ -740,6 +751,18 @@ pub fn edge_strengths(
         }
     });
     preds
+}
+
+/// Structural strength of every node-valued edge: for each undirected node pair, the number of
+/// *distinct predicates* connecting them (both directions) — a lightweight "relationship strength"
+/// derived from the graph, not stored. E.g. a pair linked by both `knows` and `reports-to` scores 2;
+/// a single `knows` scores 1. Optionally restricted to one predicate (then every weight is 1).
+/// O(node-valued edges) — a full scan.
+pub fn edge_strengths(
+    snap: &impl Facts,
+    predicate: Option<FieldId>,
+) -> HashMap<(NodeId, NodeId), u32> {
+    edge_predicates(snap, predicate)
         .into_iter()
         .map(|(k, s)| (k, s.len() as u32))
         .collect()

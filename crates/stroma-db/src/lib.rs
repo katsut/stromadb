@@ -1823,6 +1823,32 @@ impl ReadState {
     /// `max_nodes` (default 3000). Returns `{nodes:[{id,depth}], edges:[[a,b]]}` — the primitive the
     /// UI's "distance from a node" filter renders. When the cap cuts a hop level, `order:"recent"`
     /// keeps the nodes created latest (see [`first_seen`]); the default keeps adjacency order.
+    /// One node of a `graph` / `neighborhood` answer: id, hop depth, display name and type name
+    /// (`null` for an untyped node), and `placeholder`: true when the node exists only because
+    /// another node's fact points at it, i.e. it has no facts of its own as subject.
+    fn graph_node(&self, facts: &Masked, id: u64, depth: usize) -> Value {
+        let ty = self
+            .snap
+            .node_types
+            .get(&id)
+            .and_then(|&t| self.schema.cat.name(t));
+        let placeholder = !query::has_facts(facts, id);
+        json!({ "id": id, "depth": depth, "name": self.display_name(facts, id), "type": ty, "placeholder": placeholder })
+    }
+
+    /// One edge of a `graph` / `neighborhood` answer: `[a, b, strength, [predicate names]]`, where
+    /// strength is the number of distinct predicates connecting the pair.
+    fn graph_edge(&self, preds: &HashMap<(u64, u64), BTreeSet<FieldId>>, a: u64, b: u64) -> Value {
+        let mut names: Vec<&str> = preds
+            .get(&(a, b))
+            .into_iter()
+            .flatten()
+            .filter_map(|&p| self.schema.cat.name(p))
+            .collect();
+        names.sort_unstable();
+        json!([a, b, names.len().max(1), names])
+    }
+
     fn neighborhood(&self, req: &Value) -> DbResult<Value> {
         let focus = req["subject"].as_u64().ok_or("subject required")?;
         let hops = req["hops"].as_u64().unwrap_or(2) as usize;
@@ -1884,13 +1910,13 @@ impl ReadState {
         }
         let nodes: Vec<Value> = depth
             .iter()
-            .map(|(&id, &d)| json!({ "id": id, "depth": d, "name": self.display_name(&facts, id) }))
+            .map(|(&id, &d)| self.graph_node(&facts, id, d))
             .collect();
-        let strengths = query::edge_strengths(&facts, pred);
+        let preds = query::edge_predicates(&facts, pred);
         let edges: Vec<Value> = edges
             .iter()
             .filter(|(a, b)| depth.contains_key(a) && depth.contains_key(b))
-            .map(|(a, b)| json!([a, b, strengths.get(&(*a, *b)).copied().unwrap_or(1)]))
+            .map(|(a, b)| self.graph_edge(&preds, *a, *b))
             .collect();
         Ok(json!({ "nodes": nodes, "edges": edges, "focus": focus }))
     }
@@ -2023,7 +2049,7 @@ impl ReadState {
     /// the entire visible graph (or a `truncated` prefix when it exceeds the cap). The prefix is
     /// by ascending node id unless `order` is `"recent"`, which keeps the nodes whose first stored
     /// fact has the latest transaction time (newest first). Same
-    /// `{nodes:[{id,depth}], edges:[[a,b]]}` shape so the UI renders it identically.
+    /// `{nodes:[{id,depth,name,type,placeholder}], edges:[[a,b,strength,[predicates]]]}` shape so the UI renders it identically.
     fn graph(&self, req: &Value) -> DbResult<Value> {
         let cap = req["max_nodes"].as_u64().unwrap_or(3000) as usize;
         let labels = req_labels(req);
@@ -2055,12 +2081,12 @@ impl ReadState {
         }
         let nodes: Vec<Value> = keep
             .iter()
-            .map(|&id| json!({ "id": id, "depth": 0, "name": self.display_name(&facts, id) }))
+            .map(|&id| self.graph_node(&facts, id, 0))
             .collect();
-        let strengths = query::edge_strengths(&facts, None);
+        let preds = query::edge_predicates(&facts, None);
         let edges: Vec<Value> = edges
             .iter()
-            .map(|(a, b)| json!([a, b, strengths.get(&(*a, *b)).copied().unwrap_or(1)]))
+            .map(|(a, b)| self.graph_edge(&preds, *a, *b))
             .collect();
         Ok(json!({ "nodes": nodes, "edges": edges, "truncated": truncated }))
     }
