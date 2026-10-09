@@ -704,15 +704,12 @@ pub fn undirected_adjacency(
     adj
 }
 
-/// Structural strength of every node-valued edge: for each undirected node pair, the number of
-/// *distinct predicates* connecting them (both directions) — a lightweight "relationship strength"
-/// derived from the graph, not stored. E.g. a pair linked by both `knows` and `reports-to` scores 2;
-/// a single `knows` scores 1. Optionally restricted to one predicate (then every weight is 1).
-/// O(node-valued edges) — a full scan.
-pub fn edge_strengths(
+/// The distinct predicates connecting every node-valued edge, per undirected node pair (both
+/// directions merged). Optionally restricted to one predicate. O(node-valued edges) — a full scan.
+pub fn edge_predicates(
     snap: &impl Facts,
     predicate: Option<FieldId>,
-) -> HashMap<(NodeId, NodeId), u32> {
+) -> HashMap<(NodeId, NodeId), BTreeSet<FieldId>> {
     let mut preds: HashMap<(NodeId, NodeId), BTreeSet<FieldId>> = HashMap::new();
     let note = |a: NodeId,
                 b: NodeId,
@@ -740,6 +737,18 @@ pub fn edge_strengths(
         }
     });
     preds
+}
+
+/// Structural strength of every node-valued edge: for each undirected node pair, the number of
+/// *distinct predicates* connecting them (both directions) — a lightweight "relationship strength"
+/// derived from the graph, not stored. E.g. a pair linked by both `knows` and `reports-to` scores 2;
+/// a single `knows` scores 1. Optionally restricted to one predicate (then every weight is 1).
+/// O(node-valued edges) — a full scan.
+pub fn edge_strengths(
+    snap: &impl Facts,
+    predicate: Option<FieldId>,
+) -> HashMap<(NodeId, NodeId), u32> {
+    edge_predicates(snap, predicate)
         .into_iter()
         .map(|(k, s)| (k, s.len() as u32))
         .collect()
