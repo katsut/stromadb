@@ -1292,6 +1292,7 @@ pub fn run(args: &[String]) {
                 // a cookie-authenticated state change must come from the server's own origin
                 // (the cookie is SameSite=Strict, which still admits same-site other-port pages)
                 if via == "session"
+                    && bearer_entry(&auth, &req).is_none()
                     && matches!(
                         method,
                         Method::Post | Method::Put | Method::Patch | Method::Delete

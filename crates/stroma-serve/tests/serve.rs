@@ -1543,6 +1543,16 @@ fn serve_session_state_changes_require_same_origin() {
         "bearer with foreign Origin: {st} {body}"
     );
 
+    // a valid Bearer alongside a live cookie is a Bearer request: no Origin needed
+    let (st, body) = http_hdrs(
+        &addr,
+        "POST",
+        "/namespaces",
+        "{\"name\":\"origin_ns5\"}",
+        &format!("{ck}Authorization: Bearer s3cr3t-token\r\n"),
+    );
+    assert!(st == 200 || st == 201, "bearer plus cookie: {st} {body}");
+
     // logout from the same origin still works
     let (st, _) = http_hdrs(
         &addr,
