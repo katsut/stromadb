@@ -35,8 +35,10 @@
 //!                 a request gets its JSON-RPC response (200), a notification gets 202 with an
 //!                 empty body. Stateless (no session ids); GET /mcp is 405 (no server stream).
 //!                 Same tool set as `stroma-mcp` (shared `stromadb_store::mcp` dispatch).
+//!   POST /namespaces {"name"} → 201 {"name"}  (create an empty namespace — the only way one is
+//!                 created; 400 on a malformed name, 409 if it exists, 403 for a read-only token)
 //!   POST /reset           → clears the addressed database (opt-in: only when started with --allow-reset)
-//!   GET  /namespaces      → {"namespaces":[{"name","nodes","facts","loaded"}, ...]}  (every
+//!   GET  /namespaces      → {"namespaces":[{"name","nodes","facts","loaded","durable_head"}, ...]}  (every
 //!                 namespace that exists, default first then sorted, with its node/fact counts;
 //!                 never opens a namespace — an unopened one reports the counts it last persisted
 //!                 (updated on every write), or null when it has none)
@@ -47,7 +49,7 @@
 //! endpoint — `/query`, `/ingest`, `/embed`, `/events`, `/stats`, `/compact`, `/reset`, `/mcp` and
 //! the console `/` — and any unprefixed path addresses `default`, so `/ns/default/...` is an
 //! alias. `/health`, `/login`, `/logout`, `/me` and `/namespaces` are global. A namespace is
-//! created by its first `POST /ingest`; any other request to a missing one is 404, a malformed
+//! created only by `POST /namespaces`; any other request to a missing one, a write included, is 404, a malformed
 //! name 400. Databases open lazily and stay cached for the life of the process. Auth, sessions and
 //! token scopes are server-wide and apply unchanged inside every namespace.
 //!
@@ -325,10 +327,9 @@ impl Namespaces {
         self.root.join("ns").join(name)
     }
 
-    /// The database for a (validated) namespace name. `create` (a write) initializes a missing
-    /// one; otherwise a missing namespace is `Ok(None)` and leaves nothing behind — neither a
-    /// directory nor a cache entry.
-    fn get(&self, name: &str, create: bool) -> Result<Option<SharedDb>, String> {
+    /// The database for a (validated) namespace name. A missing namespace is `Ok(None)` and
+    /// leaves nothing behind — neither a directory nor a cache entry; only `create` makes one.
+    fn get(&self, name: &str) -> Result<Option<SharedDb>, String> {
         if name == DEFAULT_NS {
             return Ok(Some(self.default.clone()));
         }
@@ -337,7 +338,7 @@ impl Namespaces {
             let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
             match open.get(name) {
                 Some(slot) => slot.clone(),
-                None if !create && !dir.join("wal.log").exists() => return Ok(None),
+                None if !dir.join("wal.log").exists() => return Ok(None),
                 None => open.entry(name.to_string()).or_default().clone(),
             }
         };
@@ -345,14 +346,39 @@ impl Namespaces {
         if let Some(db) = slot.as_ref() {
             return Ok(Some(db.clone()));
         }
-        let db = match create {
-            true => Db::open_or_init_with(&dir, self.n_max),
-            false => Db::open_with(&dir, self.n_max),
+        // an empty slot left by a failed create must not turn a missing namespace into an error
+        if !dir.join("wal.log").exists() {
+            return Ok(None);
         }
-        .map_err(|e| format!("namespace '{name}': {e}"))?;
+        let db = Db::open_with(&dir, self.n_max).map_err(|e| format!("namespace '{name}': {e}"))?;
         let db = Arc::new(db);
         *slot = Some(db.clone());
         Ok(Some(db))
+    }
+
+    /// Create an empty namespace — the only way one comes into being. `Ok(false)` when it already
+    /// exists (nothing is modified). Concurrent creates of one name serialize on the
+    /// slot's lock, so exactly one of them wins.
+    fn create(&self, name: &str) -> Result<bool, String> {
+        if name == DEFAULT_NS {
+            return Ok(false);
+        }
+        let dir = self.dir(name);
+        let slot = self
+            .open
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(name.to_string())
+            .or_default()
+            .clone();
+        let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() || dir.join("wal.log").exists() {
+            return Ok(false);
+        }
+        let db = Db::open_or_init_with(&dir, self.n_max)
+            .map_err(|e| format!("namespace '{name}': {e}"))?;
+        *slot = Some(Arc::new(db));
+        Ok(true)
     }
 
     /// `default` first, then every database directory under `<db>/ns/`, sorted.
@@ -404,6 +430,7 @@ impl Namespaces {
                     "nodes": counts.map(|c| c.nodes),
                     "facts": counts.map(|c| c.facts),
                     "loaded": db.is_some(),
+                    "durable_head": db.as_ref().map(|d| d.durable_head()),
                 })
             })
             .collect()
@@ -703,8 +730,50 @@ fn serve_stream(
 }
 
 /// Serve one authenticated request against the namespace its path addresses: parse the
-/// `/ns/<name>` prefix (400 on a bad name), resolve that namespace's database (created only by a
-/// `POST /ingest`; anything else on a missing one is 404), then dispatch the inner path to it.
+/// `/ns/<name>` prefix (400 on a bad name), resolve that namespace's database (a missing one is 404 for
+/// every method — only `POST /namespaces` creates one), then dispatch the inner path to it.
+/// `POST /namespaces {"name"}`: create an empty namespace. Global like the list; a write, so a
+/// read-only token is refused (403). A malformed name is 400, an existing one 409 (untouched).
+fn create_namespace(
+    nss: &Namespaces,
+    req: &mut Request,
+    scope: &mcp::Scope,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    if scope.read_only {
+        return json_response(
+            403,
+            &json!({ "error": "this token is read-only: writes are not allowed" }),
+        );
+    }
+    let body = read_body(req);
+    let name = match serde_json::from_str::<Value>(&body) {
+        Ok(v) => v["name"].as_str().map(str::to_string),
+        Err(e) => {
+            return json_response(400, &json!({ "error": format!("bad json: {e}") }));
+        }
+    };
+    let Some(name) = name else {
+        return json_response(
+            400,
+            &json!({ "error": "expected {\"name\": \"<namespace>\"}" }),
+        );
+    };
+    if !valid_ns_name(&name) {
+        return json_response(
+            400,
+            &json!({ "error": format!("bad namespace name '{name}': expected [a-z0-9_-]{{1,64}}") }),
+        );
+    }
+    match nss.create(&name) {
+        Ok(true) => json_response(201, &json!({ "name": name })),
+        Ok(false) => json_response(
+            409,
+            &json!({ "error": format!("namespace '{name}' already exists") }),
+        ),
+        Err(e) => json_response(500, &json!({ "error": e })),
+    }
+}
+
 fn dispatch(
     nss: &Namespaces,
     allow_reset: bool,
@@ -716,13 +785,11 @@ fn dispatch(
         Ok(r) => r,
         Err(e) => return Reply::Json(400, json!({ "error": e })),
     };
-    // a read-only token's ingest is refused (403), so it must not create the namespace either
-    let create = *req.method() == Method::Post && inner == "/ingest" && !scope.read_only;
-    match nss.get(name, create) {
+    match nss.get(name) {
         Ok(Some(db)) => handle(&db, req, inner, scope, allow_reset),
         Ok(None) => Reply::Json(
             404,
-            json!({ "error": format!("namespace '{name}' does not exist (it is created by its first /ingest)") }),
+            json!({ "error": format!("namespace '{name}' does not exist; create it with POST /namespaces") }),
         ),
         Err(e) => Reply::Json(500, json!({ "error": e })),
     }
@@ -1216,6 +1283,9 @@ pub fn run(args: &[String]) {
                         200,
                         &json!({ "namespaces": nss.list_with_counts() }),
                     ));
+                } else if method == Method::Post && path == "/namespaces" {
+                    let reply = create_namespace(&nss, &mut req, &scope);
+                    let _ = req.respond(reply);
                 } else {
                     match dispatch(&nss, auth.allow_reset, &mut req, &path, &scope) {
                         Reply::Json(status, body) => {
@@ -1789,10 +1859,10 @@ mod tests {
         Namespaces::new(root, DEFAULT_N_MAX, Arc::new(db))
     }
 
-    // Writes to /ns/a are invisible from default and from /ns/b; unknown namespaces 404 without
-    // being created; bad names 400; a fresh server state over the same root finds `a` again.
+    // Writes to /ns/a are invisible from default and from /ns/b; unknown namespaces 404 for reads and
+    // writes alike without being created (only create makes one); bad names 400; a fresh server state over the same root finds `a` again.
     #[test]
-    fn namespaces_isolate_create_on_write_and_reopen() {
+    fn namespaces_isolate_explicit_create_and_reopen() {
         let root = std::env::temp_dir().join(format!("stroma_ns_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let graph = concat!(
@@ -1814,12 +1884,18 @@ mod tests {
                 (Method::Post, "/ns/a/compact"),
                 (Method::Post, "/ns/a/reset"),
                 (Method::Post, "/ns/a/mcp"),
+                (Method::Post, "/ns/a/ingest"),
             ] {
                 assert_eq!(call(&nss, m, p, "").0, 404, "{p}");
             }
             assert!(!root.join("ns").exists());
             assert_eq!(call(&nss, Method::Get, "/ns/Bad!/stats", "").0, 400);
 
+            let (_, body) = call(&nss, Method::Post, "/ns/a/ingest", graph);
+            assert!(body.contains("POST /namespaces"), "{body}");
+            assert_eq!(nss.create("a"), Ok(true));
+            assert_eq!(nss.create("a"), Ok(false));
+            assert_eq!(nss.create("default"), Ok(false));
             let (st, body) = call(&nss, Method::Post, "/ns/a/ingest", graph);
             assert_eq!(st, 200, "{body}");
             assert!(root.join("ns/a/wal.log").exists());
@@ -1832,6 +1908,7 @@ mod tests {
                 let (_, body) = call(&nss, Method::Post, p, expand);
                 assert!(!body.contains("[2]"), "{p} leaked: {body}");
             }
+            assert_eq!(nss.create("b"), Ok(true));
             call(
                 &nss,
                 Method::Post,
@@ -1877,6 +1954,7 @@ mod tests {
             "{\"node\":{\"id\":2,\"type\":\"Person\"}}\n",
             "{\"fact\":{\"subject\":1,\"predicate\":\"knows\",\"object\":{\"node\":2}}}\n",
         );
+        assert_eq!(nss.create("a"), Ok(true));
         call(&nss, Method::Post, "/ns/a/ingest", graph);
 
         let counts = nss.list_with_counts();
@@ -1913,17 +1991,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    // Concurrent first requests for one namespace open it once (a second open of the same
-    // directory would fail on its LOCK) and all get the same database.
+    // Concurrent creates of one name: exactly one wins and the rest see a conflict; concurrent
+    // first opens of it share one database (a second open of the same directory would fail on
+    // its LOCK).
     #[test]
-    fn concurrent_first_open_opens_once() {
+    fn concurrent_create_and_open_once() {
         let root = std::env::temp_dir().join(format!("stroma_ns_race_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        let nss = Arc::new(open_root(&root));
+        let created: Vec<bool> = (0..8)
+            .map(|_| {
+                let nss = nss.clone();
+                std::thread::spawn(move || nss.create("r").unwrap())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .collect();
+        assert_eq!(created.iter().filter(|c| **c).count(), 1);
+        drop(nss);
         let nss = Arc::new(open_root(&root));
         let dbs: Vec<_> = (0..8)
             .map(|_| {
                 let nss = nss.clone();
-                std::thread::spawn(move || nss.get("r", true).unwrap().unwrap())
+                std::thread::spawn(move || nss.get("r").unwrap().unwrap())
             })
             .collect::<Vec<_>>()
             .into_iter()

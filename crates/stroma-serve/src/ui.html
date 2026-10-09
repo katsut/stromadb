@@ -219,6 +219,18 @@
   .ns-row .ns-name { font:600 12.5px var(--mono); color:var(--fg); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .ns-row .ns-counts { font:11px var(--mono); color:var(--mut); flex:0 0 auto; white-space:nowrap; }
   .ns-row .ns-cur { font:600 10px var(--sans); color:var(--accent); flex:0 0 auto; }
+  .ns-page { width:560px; }
+  .ns-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  .ns-table th { text-align:left; font:600 10.5px var(--sans); letter-spacing:.06em; text-transform:uppercase; color:var(--mut); padding:4px 8px 6px; }
+  .ns-table td { padding:7px 8px; border-top:1px solid var(--line); color:var(--fg-dim); }
+  .ns-table td.num, .ns-table th.num { text-align:right; font-family:var(--mono); white-space:nowrap; }
+  .ns-table td.nm { font:600 12.5px var(--mono); color:var(--fg); word-break:break-all; }
+  .ns-table a { color:var(--accent); text-decoration:none; } .ns-table a:hover, .ns-table a:focus-visible { text-decoration:underline; }
+  .ns-form { display:flex; gap:8px; align-items:flex-start; } .ns-form input { flex:1; min-width:0; }
+  .ns-msg { min-height:1.4em; font-size:12px; margin-top:6px; } .ns-msg.err { color:#ff7a90; } .ns-msg.ok { color:var(--accent); }
+  .ns-table .ns-cur { font:600 10px var(--sans); color:var(--accent); }
+  .ns-msg a { color:var(--accent); }
+  .ns-manage { margin-top:10px; width:100%; }
   /* settings drawer: grouped rows on the right edge; the danger zone is always the last group */
   .drawer { position:absolute; top:0; right:0; bottom:0; z-index:9; width:380px; max-width:100%; overflow-y:auto; background:var(--panel-2); border-left:1px solid var(--line-2); box-shadow:-18px 0 40px -24px rgba(0,0,0,.7); padding:14px 18px 22px; }
   .drawer-h { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; } .drawer-h .pop-h { margin:0; font-size:14px; }
@@ -252,7 +264,7 @@
     <div class="brand">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="5" r="2.4" fill="#37d6a8"/><circle cx="5" cy="17" r="2.4" fill="#5aa9ff"/><circle cx="19" cy="16" r="2.4" fill="#b78cff"/><circle cx="12" cy="12" r="1.6" fill="#e8ecf4"/><path d="M12 5.2 12 10.6M11 11 6 15.4M13 11 18 14.6" stroke="#3a475e" stroke-width="1.3"/></svg>
       <span class="name">Stroma<b>DB</b></span>
-      <button class="pill scope-btn hidden" id="nsPill" title="namespace" aria-haspopup="true" aria-expanded="false"></button>
+      <button class="pill scope-btn hidden" id="nsPill" title="namespace" aria-haspopup="true" aria-expanded="false" aria-controls="nsPop"></button>
     </div>
     <span class="pill live-ind on" id="livePill" title="live"><span class="dot"></span>LIVE</span>
     <span id="statpills"></span>
@@ -272,13 +284,15 @@
   </div>
 
   <!-- namespace selector: lists every namespace the signed-in caller can see, with node/fact
-       counts; hidden entirely when only "default" exists (see renderNamespaces). -->
+       counts, with a link to the management page (see renderNamespaces). -->
   <div class="pop hidden" id="nsPop">
     <div class="pop-h" data-i18n="nsTitle">Namespace</div>
     <div class="tip" data-i18n="nsIntro" style="margin:0 0 9px">Switch to another namespace — an isolated database this server also hosts.</div>
     <input id="nsFilter" class="hidden" type="search" autocomplete="off" data-i18n-ph="nsFilter" placeholder="filter namespaces…">
     <div id="nsList" class="ns-list"></div>
+    <button class="ghost ns-manage" id="nsManage" data-i18n="nsManage">Manage namespaces</button>
   </div>
+
 
   <!-- settings: a right-side drawer, groups in a fixed order; the destructive reset is always last -->
   <aside class="drawer hidden" id="settings" role="dialog" aria-labelledby="setTitle">
@@ -302,6 +316,26 @@
       <div class="tip" data-i18n="resetIntro" style="margin:0">Remove everything stored in this database and start empty.</div>
       <button class="danger" id="resetBtn" data-i18n="resetDb">Reset database…</button>
       <div class="tip hidden" id="resetHint" style="margin-bottom:0"></div>
+    </div>
+  </aside>
+
+  <!-- namespaces page: every namespace with its stats and a link to open it, plus a create form.
+       Opens from the selector or at #namespaces. Read-only apart from creating a namespace. -->
+  <aside class="drawer ns-page hidden" id="nsPage" role="dialog" aria-labelledby="nsPageTitle">
+    <div class="drawer-h"><span class="pop-h" id="nsPageTitle" data-i18n="nsPageTitle">Namespaces</span><button class="caret-btn" id="nsPageClose" data-i18n-title="close" title="close">✕</button></div>
+    <div class="tip" data-i18n="nsPageIntro" style="margin-top:0">Each namespace is an isolated database on this server. A namespace exists only once it is created here.</div>
+    <div class="set-grp">
+      <h2 data-i18n="nsNewTitle">New namespace</h2>
+      <form id="nsForm" novalidate>
+        <label for="nsNewName" data-i18n="nsNameLabel" style="margin-top:0">namespace name</label>
+        <div class="ns-form"><input id="nsNewName" type="text" autocomplete="off" spellcheck="false" maxlength="64" aria-describedby="nsMsg">
+        <button class="tb-btn" id="nsCreate" type="submit" data-i18n="nsCreate">Create</button></div>
+      </form>
+      <div class="ns-msg" id="nsMsg" role="status" aria-live="polite"></div>
+      <div class="tip hidden" id="nsRO" data-i18n="nsReadOnly">This credential is read-only and cannot create namespaces.</div>
+    </div>
+    <div class="set-grp">
+      <div id="nsTableWrap"></div>
     </div>
   </aside>
 
@@ -424,7 +458,7 @@ const I18N = {
        detNode:"node", detType:"type", detLabel:"label", untyped:"untyped", recentre:"re-centre here ›", noProps:"no stored properties.", loading:"loading…", restricted:"restricted under role “{r}”.",
        tWithin:"{n} nodes · {e} edges within {h} hops", tWhole:"whole graph · {n} nodes · {e} edges{cap}", capped:" (capped)", tOverview:"overview · {n} types", tLive:"live · updated", enterFocus:"enter a focus node, or use “Show all nodes”",
        settings:"settings", settingsTitle:"Settings", close:"close",
-       nsTitle:"Namespace", nsIntro:"Switch to another namespace — an isolated database this server also hosts.", nsCounts:"{n} nodes · {f} facts", nsCurrent:"current", switchNamespace:"switch namespace",
+       nsTitle:"Namespace", nsIntro:"Switch to another namespace — an isolated database this server also hosts.", nsCounts:"{n} nodes · {f} facts", nsCurrent:"current", switchNamespace:"switch namespace", nsManage:"Manage namespaces", nsPageTitle:"Namespaces", nsPageIntro:"Each namespace is an isolated database on this server. A namespace exists only once it is created here.", nsNewTitle:"New namespace", nsCreate:"Create", nsNameLabel:"namespace name", nsRule:"Use 1–64 characters: lowercase letters, digits, - and _.", nsExists:"Namespace “{n}” already exists.", nsCreated:"Created “{n}”.", nsSwitchTo:"Switch to it", nsColName:"name", nsColNodes:"nodes", nsColFacts:"facts", nsColHead:"durable head", nsOpen:"Open", nsNoNamed:"No namespaces yet. Create one to get started.", nsReadOnly:"This credential is read-only and cannot create namespaces.", nsNoNamedRO:"No namespaces yet. Ask someone with write access to create one.", nsListFailed:"Could not load namespaces: {e}", nsCreateFailed:"Could not create the namespace: {e}",
        grpServer:"Server", version:"version", dbPath:"database", workers:"workers", typesPreds:"types · predicates", embeddingsLbl:"embeddings", durableHead:"durable head", changelog:"changelog", signedInAs:"signed in as", access:"access", readWrite:"read-write", readOnlyLbl:"read-only", allLabels:"all labels", labelsCap:"labels {l}", unnamedToken:"unnamed token", authOpen:"open (auth disabled)", viaToken:"token “{n}”",
        mcpEndpoint:"MCP endpoint", copy:"Copy", copied:"copied to clipboard", copyFailed:"copy failed — select the URL and copy it manually",
        grpAdmin:"Admin", compactIntro:"Snapshot the current state and truncate the changelog. Non-destructive: as-of reads keep answering across the boundary.", compactNow:"Compact now", compacting:"compacting…", compactDone:"compacted up to {n} · changelog {w} · snapshot {s}", compactFailed:"compaction failed: {e}", resetState:"Database reset", enabled:"enabled", disabled:"disabled", dangerZone:"Danger zone",
@@ -436,7 +470,7 @@ const I18N = {
        detNode:"ノード", detType:"型", detLabel:"ラベル", untyped:"型なし", recentre:"ここを中心に ›", noProps:"プロパティなし。", loading:"読み込み中…", restricted:"ロール「{r}」では非表示。",
        tWithin:"{n} ノード · {e} 辺（{h} ホップ以内）", tWhole:"全体 · {n} ノード · {e} 辺{cap}", capped:"（上限）", tOverview:"概観 · {n} 型", tLive:"ライブ · 更新", enterFocus:"起点ノードを入力、または「全ノード表示」を使用",
        settings:"設定", settingsTitle:"設定", close:"閉じる",
-       nsTitle:"ネームスペース", nsIntro:"別のネームスペースに切り替え — このサーバーが持つ別の独立したデータベースです。", nsCounts:"ノード {n} · ファクト {f}", nsCurrent:"現在", switchNamespace:"ネームスペースを切り替え",
+       nsTitle:"ネームスペース", nsIntro:"別のネームスペースに切り替え — このサーバーが持つ別の独立したデータベースです。", nsCounts:"ノード {n} · ファクト {f}", nsCurrent:"現在", switchNamespace:"ネームスペースを切り替え", nsManage:"ネームスペースを管理", nsPageTitle:"ネームスペース", nsPageIntro:"各ネームスペースは、このサーバー上の独立したデータベースです。ここで作成して初めて存在します。", nsNewTitle:"新しいネームスペース", nsCreate:"作成", nsNameLabel:"ネームスペース名", nsRule:"1〜64 文字の小文字英数字、- と _ が使えます。", nsExists:"ネームスペース「{n}」は既に存在します。", nsCreated:"「{n}」を作成しました。", nsSwitchTo:"切り替える", nsColName:"名前", nsColNodes:"ノード", nsColFacts:"ファクト", nsColHead:"durable head", nsOpen:"開く", nsNoNamed:"まだネームスペースがありません。作成して始めましょう。", nsReadOnly:"この資格情報は読み取り専用のため、ネームスペースを作成できません。", nsNoNamedRO:"まだネームスペースがありません。書き込み権限のある人に作成を依頼してください。", nsListFailed:"ネームスペースを読み込めませんでした: {e}", nsCreateFailed:"ネームスペースを作成できませんでした: {e}",
        grpServer:"サーバー", version:"バージョン", dbPath:"データベース", workers:"ワーカー数", typesPreds:"型 · 述語", embeddingsLbl:"埋め込み", durableHead:"durable head", changelog:"変更ログ", signedInAs:"サインイン", access:"権限", readWrite:"読み書き", readOnlyLbl:"読み取り専用", allLabels:"全ラベル", labelsCap:"ラベル {l}", unnamedToken:"名前なしトークン", authOpen:"認証なし（無効化中）", viaToken:"トークン「{n}」",
        mcpEndpoint:"MCP エンドポイント", copy:"コピー", copied:"クリップボードにコピーしました", copyFailed:"コピーできませんでした。URL を選択して手動でコピーしてください",
        grpAdmin:"管理", compactIntro:"現在の状態をスナップショットし、変更ログを切り詰めます。非破壊で、境界をまたぐ時点指定の読み取りもそのまま動きます。", compactNow:"今すぐコンパクション", compacting:"コンパクション中…", compactDone:"{n} までコンパクション済み · 変更ログ {w} · スナップショット {s}", compactFailed:"コンパクションに失敗しました: {e}", resetState:"データベースのリセット", enabled:"有効", disabled:"無効", dangerZone:"危険な操作",
@@ -448,7 +482,7 @@ const I18N = {
        detNode:"节点", detType:"类型", detLabel:"标签", untyped:"无类型", recentre:"以此为中心 ›", noProps:"无存储属性。", loading:"加载中…", restricted:"角色“{r}”下受限。",
        tWithin:"{n} 节点 · {e} 边（{h} 跳内）", tWhole:"全图 · {n} 节点 · {e} 边{cap}", capped:"（已截断）", tOverview:"概览 · {n} 类型", tLive:"实时 · 已更新", enterFocus:"请输入焦点节点，或使用“显示全部节点”",
        settings:"设置", settingsTitle:"设置", close:"关闭",
-       nsTitle:"命名空间", nsIntro:"切换到另一个命名空间 — 本服务器托管的另一个独立数据库。", nsCounts:"{n} 节点 · {f} 事实", nsCurrent:"当前", switchNamespace:"切换命名空间",
+       nsTitle:"命名空间", nsIntro:"切换到另一个命名空间 — 本服务器托管的另一个独立数据库。", nsCounts:"{n} 节点 · {f} 事实", nsCurrent:"当前", switchNamespace:"切换命名空间", nsManage:"管理命名空间", nsPageTitle:"命名空间", nsPageIntro:"每个命名空间都是本服务器上的独立数据库，只有在此创建后才存在。", nsNewTitle:"新建命名空间", nsCreate:"创建", nsNameLabel:"命名空间名称", nsRule:"1–64 个字符：小写字母、数字、- 和 _。", nsExists:"命名空间“{n}”已存在。", nsCreated:"已创建“{n}”。", nsSwitchTo:"切换过去", nsColName:"名称", nsColNodes:"节点", nsColFacts:"事实", nsColHead:"durable head", nsOpen:"打开", nsNoNamed:"还没有命名空间，请先创建一个。", nsReadOnly:"此凭据为只读，无法创建命名空间。", nsNoNamedRO:"还没有命名空间，请让有写入权限的人创建。", nsListFailed:"无法加载命名空间：{e}", nsCreateFailed:"无法创建命名空间：{e}",
        grpServer:"服务器", version:"版本", dbPath:"数据库", workers:"工作线程", typesPreds:"类型 · 谓词", embeddingsLbl:"嵌入向量", durableHead:"durable head", changelog:"变更日志", signedInAs:"登录身份", access:"权限", readWrite:"读写", readOnlyLbl:"只读", allLabels:"全部标签", labelsCap:"标签 {l}", unnamedToken:"未命名令牌", authOpen:"开放（认证已禁用）", viaToken:"令牌“{n}”",
        mcpEndpoint:"MCP 端点", copy:"复制", copied:"已复制到剪贴板", copyFailed:"复制失败，请选中 URL 手动复制",
        grpAdmin:"管理", compactIntro:"为当前状态创建快照并截断变更日志。非破坏性：跨越边界的时点读取仍然有效。", compactNow:"立即压缩", compacting:"正在压缩…", compactDone:"已压缩至 {n} · 变更日志 {w} · 快照 {s}", compactFailed:"压缩失败：{e}", resetState:"数据库重置", enabled:"已启用", disabled:"已禁用", dangerZone:"危险操作",
@@ -710,7 +744,7 @@ $('zin').onclick=()=>cam.z=Math.min(cam.z*1.3,8); $('zout').onclick=()=>cam.z=Ma
 $('help').onclick=()=>{ const p=$('helpPop'); p.classList.toggle('hidden'); $('help').classList.toggle('active', !p.classList.contains('hidden')); };
 $('labtog').onclick=()=>{ labelsOn=!labelsOn; $('labtog').classList.toggle('active', labelsOn); };
 
-const esc = s => (''+s).replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const esc = s => (''+s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 // node-ref values only carry an id; resolveName looks up that node's own display predicate
 // (same logic as displayName() below) so values can show a name instead of a bare id. Cached
 // per session — a node's display name is not expected to change while the console is open.
@@ -1401,7 +1435,7 @@ applyTheme(localStorage.getItem('stroma_theme')||'dark');
 // group and no reset at all; without --allow-reset the reset stays visible but disabled, with the
 // server's own hint.
 let perms=null;
-async function me(){ try{ const r=await fetch('/me'); if(r.ok){ perms=await r.json(); renderSettings(); } }catch(x){ console.warn('GET /me failed', x); } }
+async function me(){ try{ const r=await fetch('/me'); if(r.ok){ perms=await r.json(); renderSettings(); renderNsPage(); } }catch(x){ console.warn('GET /me failed', x); } }
 const fmtBytes = n => n<1024 ? n+' B' : n<1048576 ? (n/1024).toFixed(1)+' KiB' : (n/1048576).toFixed(1)+' MiB';
 // the server reports the MCP URL on its bound address; a wildcard bind (0.0.0.0 / ::) is not
 // reachable as such, so fall back to the address this page was loaded from
@@ -1471,11 +1505,14 @@ $('lang').onchange=e=>applyLang(e.target.value);
 $('logout').onclick=async()=>{ try{ await fetch('/logout',{method:'POST'}); }catch(x){} location.href='/login'; };
 
 // ---------- namespace selector: GET /namespaces (global, every namespace the caller can see
-// with its node/fact counts) drives a topbar pill + popover listing the others; hidden entirely
-// when only "default" exists, since there would be nothing to switch to ----------
-let nsList = null, nsFilterQuery = '';
-async function namespaces(){ try{ const r=await fetch('/namespaces'); if(r.ok){ const j=await r.json(); nsList=j.namespaces||[]; nsTouchRecent(NS||'default'); renderNamespaces(); } }
-  catch(x){ console.warn('GET /namespaces failed', x); } }
+// with its node/fact counts) drives a topbar pill + popover; the pill is always shown so the
+// Namespaces page stays reachable ----------
+let nsList = null, nsFilterQuery = '', nsListError = '';
+async function namespaces(){ try{ const r=await fetch('/namespaces');
+    if(r.ok){ const j=await r.json(); nsList=j.namespaces||[]; nsListError=''; nsTouchRecent(NS||'default'); }
+    else nsListError = 'HTTP '+r.status;
+  }catch(x){ console.warn('GET /namespaces failed', x); nsListError = String(x); }
+  renderNamespaces(); }
 function nsHref(name){ return name==='default' ? '/' : '/ns/'+name+'/'; }
 // "recently used" survives across visits via localStorage — a small MRU list of namespace
 // names, most-recent first, capped so it never grows unbounded.
@@ -1491,11 +1528,12 @@ function nsSorted(){ const cur=NS||'default', recent=nsRecentList();
     const an=ai<0?Infinity:ai, bn=bi<0?Infinity:bi;
     return an!==bn ? an-bn : a.name.localeCompare(b.name); }); }
 function renderNamespaces(){ const pill=$('nsPill');
-  if(!nsList || nsList.length<2){ pill.classList.add('hidden'); $('nsPop').classList.add('hidden'); return; }
+  renderNsPage();
   pill.textContent = NS || 'default';
   pill.title = t('switchNamespace');
   pill.classList.remove('hidden');
   const cur = NS || 'default';
+  if(!nsList){ $('nsList').innerHTML=''; return; }
   // a filter box only earns its place once the list is long enough to need narrowing
   const filterEl=$('nsFilter');
   filterEl.classList.toggle('hidden', nsList.length<=8);
@@ -1516,6 +1554,48 @@ $('nsPill').onclick=()=>{ const p=$('nsPop'); const willOpen=p.classList.contain
 $('nsList').onclick=e=>{ const row=e.target.closest('.ns-row'); if(!row || row.classList.contains('current')) return;
   nsTouchRecent(row.dataset.ns); location.href = nsHref(row.dataset.ns); };
 $('nsFilter').oninput=e=>{ nsFilterQuery=e.target.value; renderNamespaces(); };
+// ---- namespaces page: GET /namespaces as a table (name, nodes, facts, durable head, open link)
+// plus POST /namespaces {name}. The server's rule is the one in nsValid(); the server stays the
+// authority (it answers 400/409 with a message that is shown inline).
+const NS_RULE = /^[a-z0-9_-]{1,64}$/;
+function nsValid(name){ return NS_RULE.test(name); }
+function nsMsg(kind, html){ const m=$('nsMsg'); m.className='ns-msg'+(kind?' '+kind:''); m.innerHTML=html||''; }
+function nsCell(v){ return v==null ? '—' : String(v); }
+function renderNsPage(){ const wrap=$('nsTableWrap'); if(!wrap) return;
+  const known = !!perms, ro = known && perms.read_only;
+  $('nsForm').classList.toggle('hidden', !known || ro); $('nsRO').classList.toggle('hidden', !ro);
+  if(!nsList){ wrap.innerHTML = nsListError ? `<div class="ns-msg err" role="alert">${esc(t('nsListFailed',{e:nsListError}))}</div>` : ''; return; }
+  const cur=NS||'default';
+  const rows = nsList.map(n=>`<tr><td class="nm">${esc(n.name)}${n.name===cur?` <span class="ns-cur">${esc(t('nsCurrent'))}</span>`:''}</td>`
+    + `<td class="num">${esc(nsCell(n.nodes))}</td><td class="num">${esc(nsCell(n.facts))}</td><td class="num">${esc(nsCell(n.durable_head))}</td>`
+    + `<td><a href="${esc(nsHref(n.name))}" aria-label="${esc(t('nsOpen')+' '+n.name)}">${esc(t('nsOpen'))}</a></td></tr>`).join('');
+  const empty = nsList.every(n=>n.name==='default') ? `<div class="tip">${esc(t(ro ? 'nsNoNamedRO' : 'nsNoNamed'))}</div>` : '';
+  wrap.innerHTML = `<table class="ns-table"><thead><tr><th scope="col">${esc(t('nsColName'))}</th><th scope="col" class="num">${esc(t('nsColNodes'))}</th>`
+    + `<th scope="col" class="num">${esc(t('nsColFacts'))}</th><th scope="col" class="num">${esc(t('nsColHead'))}</th><th scope="col"></th></tr></thead><tbody>${rows}</tbody></table>${empty}`; }
+let nsOpener = null;
+function openNsPage(open){ closeNsPop(); if(open && !nsOpener) nsOpener = document.activeElement; $('nsPage').classList.toggle('hidden', !open);
+  try{ if(open){ if(location.hash!=='#namespaces') history.replaceState(null,'',location.pathname+location.search+'#namespaces'); }
+       else if(location.hash==='#namespaces') history.replaceState(null,'',location.pathname+location.search); }catch(x){ console.warn('history.replaceState failed', x); }
+  if(open){ nsMsg('',''); namespaces(); (($('nsForm').classList.contains('hidden')) ? $('nsPageClose') : $('nsNewName')).focus(); }
+  else { if(nsOpener && nsOpener.focus) nsOpener.focus(); nsOpener = null; } }
+$('nsManage').onclick=()=>openNsPage(true);
+$('nsPageClose').onclick=()=>openNsPage(false);
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('nsPage').classList.contains('hidden')) openNsPage(false); });
+addEventListener('hashchange', ()=>openNsPage(location.hash==='#namespaces'));
+$('nsNewName').oninput=()=>{ const v=$('nsNewName').value; nsMsg(v && !nsValid(v) ? 'err' : '', v && !nsValid(v) ? esc(t('nsRule')) : ''); };
+$('nsForm').onsubmit=async e=>{ e.preventDefault();
+  const name=$('nsNewName').value.trim();
+  if(!nsValid(name)){ nsMsg('err', esc(t('nsRule'))); $('nsNewName').focus(); return; }
+  $('nsCreate').disabled=true;
+  try{
+    const r=await fetch('/namespaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    let j={}; try{ j=await r.json(); }catch(x){ console.warn('POST /namespaces: non-JSON reply', x); }
+    if(r.status===201){ $('nsNewName').value=''; await namespaces();
+      nsMsg('ok', `${esc(t('nsCreated',{n:name}))} <a href="${esc(nsHref(name))}">${esc(t('nsSwitchTo'))}</a>`); }
+    else if(r.status===409){ nsMsg('err', esc(t('nsExists',{n:name}))); }
+    else { nsMsg('err', esc(t('nsCreateFailed',{e:j.error||('HTTP '+r.status)}))); }
+  }catch(x){ console.warn('POST /namespaces failed', x); nsMsg('err', esc(t('nsCreateFailed',{e:String(x)}))); }
+  finally{ $('nsCreate').disabled=false; } };
 // Escape, or a click/mousedown outside the popover (but not on the pill that opens it), closes it
 document.addEventListener('mousedown', e=>{ if($('nsPop').classList.contains('hidden')) return;
   if(e.target.closest('#nsPop') || e.target.closest('#nsPill')) return; closeNsPop(); });
@@ -1526,7 +1606,7 @@ document.addEventListener('keydown', e=>{ if(e.key==='Escape' && !$('nsPop').cla
 // node 1, and "draw neighbourhood" on it just looked broken. An empty database gets an explicit
 // empty state instead of the generic "draw a neighbourhood" hint.
 async function boot(){ await stats(); if(_stats && _stats.schema.nodes>0) overviewDraw(); else setNote('emptyDb'); }
-resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); setPanelCollapsed(localStorage.getItem('stroma_panel_collapsed')==='1'); boot(); me(); namespaces(); loadSchema(); qopFields(); loop();
+resize(); initGL(); applyLang(localStorage.getItem('stroma_lang') || (navigator.language||'en').slice(0,2)); setPanelCollapsed(localStorage.getItem('stroma_panel_collapsed')==='1'); boot(); me(); namespaces(); loadSchema(); qopFields(); loop(); if(location.hash==='#namespaces') openNsPage(true);
 </script>
 </body>
 </html>

@@ -337,8 +337,8 @@
   isolation was a second process on another port — heavy for one developer machine.
 - **Decision:** `stroma-serve` fronts several databases. The `--db` directory is the `default`
   namespace; a named namespace is an ordinary database directory at `<db>/ns/<name>/`, addressed by
-  the path prefix `/ns/<name>/` (names `[a-z0-9_-]{1,64}`). A namespace is created by its first
-  `/ingest`; anything else on a missing one is 404. Databases open lazily and stay cached for the
+  the path prefix `/ns/<name>/` (names `[a-z0-9_-]{1,64}`). A namespace is created only by
+  `POST /namespaces`; any other request to a missing one, a write included, is 404. Databases open lazily and stay cached for the
   process lifetime. Auth, sessions and token scopes stay server-wide.
 - **Why not in the engine:** a `Db` owns one WAL, one catalog, one write mutex and one directory lock.
   Tenancy inside it would thread a namespace through every key, index and read path for no gain over
@@ -347,8 +347,8 @@
 - **Why a path prefix, not a header:** an MCP client and the browser console can only be given a URL.
   A prefix makes a namespace addressable wherever a URL is, and unprefixed paths keep existing
   clients on `default`.
-- **Why lazy creation on write:** a typo in a read URL must not leave an empty database behind, while
-  the first ingest into a new name should just work, as `stroma up` does for a fresh directory.
+- **Why explicit creation:** a typo in a URL, on a read or a write, must not leave an empty database
+  behind, so a namespace comes into being only through `POST /namespaces`.
 - **Relation to #237:** namespaces share one process — one crash, one memory budget, one credential
   set. They are for one developer machine or one small server holding a few datasets. Many tenants,
   per-tenant credentials and crash isolation remain the job of process isolation and the planned

@@ -240,15 +240,16 @@ binary still ships and behaves identically to `stroma serve`.
 
 One server can hold several isolated databases. Prefix any endpoint with `/ns/<name>/` to address
 namespace `<name>`, stored as its own database directory at `<db>/ns/<name>/`; unprefixed paths
-keep hitting the `--db` database. A namespace is created by its first ingest, and
-`GET /namespaces` lists them. The console and MCP work per namespace too
+keep hitting the `--db` database. A namespace is created explicitly with `POST /namespaces`
+(writes to a missing one answer 404), and `GET /namespaces` lists them. The console and MCP work per namespace too
 (`http://localhost:7687/ns/ocel/`, `…/ns/ocel/mcp`). Logins and tokens are shared server-wide;
 see [docs/CONFIGURATION.md](docs/CONFIGURATION.md#namespaces).
 
 ```bash
+curl -s -X POST localhost:7687/namespaces -d '{"name":"ocel"}'
 curl -s -X POST localhost:7687/ns/ocel/ingest --data-binary @events.jsonl
 curl -s localhost:7687/ns/ocel/stats
-curl -s localhost:7687/namespaces     # {"namespaces":[{"name":"default","nodes":0,"facts":0,"loaded":true},{"name":"ocel","nodes":2,"facts":3,"loaded":true}]}
+curl -s localhost:7687/namespaces     # {"namespaces":[{"name":"default","nodes":0,"facts":0,"loaded":true,"durable_head":0},{"name":"ocel","nodes":2,"facts":3,"loaded":true,"durable_head":3}]}
 ```
 
 Docker, without a local Rust toolchain:
